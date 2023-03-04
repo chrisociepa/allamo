@@ -10,6 +10,7 @@ Dependencies:
 - [pytorch](https://pytorch.org)
 - [numpy](https://numpy.org/install/)
 - [tiktoken](https://github.com/openai/tiktoken)
+- [huggingface transformers](https://huggingface.co/docs/transformers/installation)
 - [wandb](https://wandb.ai/)
 
 ## training
@@ -98,9 +99,9 @@ $ python sample.py \
     --prompt="FILE:prompt.txt"
 ```
 
+Default tokenizer is `tiktoken` (`cl100k_base`) but thanks to HuggingFace Transformers you can easily use your own pretrained tokenizer. Use `--custom_tokenizer_path`  to provide your tokenizer json config file.
+
 ## References:
 
 1. [nanoGPT](https://github.com/karpathy/nanoGPT) - many thanks to Andrej Karpathy for amazing and inspirational work!
 2. [LLaMA](https://github.com/facebookresearch/llama)
-
-

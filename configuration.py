@@ -19,7 +19,8 @@ class AllamoConfiguration:
     eval_only: bool = False
     always_save_checkpoint: bool = True
     vocab_size: int = 100277
-    tokenizer_name: str = 'cl100k_base'
+    tiktoken_tokenizer_name: str = 'cl100k_base'
+    custom_tokenizer_path: str = None
     wandb_log: bool = False
     wandb_project: str = 'allamo'
     wandb_run_name: str = 'allamo-run-' + str(time.time())
@@ -81,7 +82,8 @@ class AllamoConfiguration:
         parser.add_argument('--eval_only', type=bool, help='Exit right after the first evaluation. Indicates no training.')
         parser.add_argument('--always_save_checkpoint', type=bool, help='Enable saving the last checkpoint')
         parser.add_argument('--vocab_size', type=int, help='Vacabulary size. Might be overwritten by provideded metadata or checkpoint')
-        parser.add_argument('--tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by provideded metadata or checkpoint')
+        parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by provideded metadata or checkpoint')
+        parser.add_argument('--custom_tokenizer_path', type=str, help='Custom tokenizer path. Might be overwritten by provideded metadata or checkpoint')
         parser.add_argument('--wandb_log', type=bool)
         parser.add_argument('--wandb_project', type=str)
         parser.add_argument('--wandb_run_name', type=str)

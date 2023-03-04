@@ -5,7 +5,6 @@ import os
 import pickle
 from contextlib import nullcontext
 import torch
-import tiktoken
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 
@@ -35,7 +34,8 @@ if config.compile:
     model = torch.compile(model) # requires PyTorch 2.0 (optional)
 
 vocab_size = config.vocab_size
-tokenizer_name = config.tokenizer_name
+tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
+custom_tokenizer_path = config.custom_tokenizer_path
 # look for the meta pickle in case it is available in the dataset folder
 if 'config' in checkpoint and 'dataset' in checkpoint['config']:
     meta_path = os.path.join(config.data_dir, checkpoint['config']['dataset'], 'meta.pkl')
@@ -44,11 +44,19 @@ if 'config' in checkpoint and 'dataset' in checkpoint['config']:
         with open(meta_path, 'rb') as f:
             meta = pickle.load(f)
         vocab_size = meta['vocab_size']
-        tokenizer_name = meta['tokenizer_name']
-        if meta['tokenizer_name']:
-            tokenizer_name = meta['tokenizer_name']
-print(f"Vocab_size: {vocab_size}. Tokenizer: {tokenizer_name}")
-tokenizer = tiktoken.get_encoding(tokenizer_name)
+        if meta['tiktoken_tokenizer_name']:
+            tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
+        if meta['custom_tokenizer_path']:
+            custom_tokenizer_path = meta['custom_tokenizer_path']
+print(f"Vocab_size: {vocab_size}")
+if custom_tokenizer_path is not None:
+    from transformers import PreTrainedTokenizerFast
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
+    print(f"Custom tokenizer path: {custom_tokenizer_path}")
+else:
+    import tiktoken
+    tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
+    print(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
 
 # encode the beginning of the prompt
 if config.prompt.startswith('FILE:'):
