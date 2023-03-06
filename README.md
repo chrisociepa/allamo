@@ -101,6 +101,31 @@ $ python sample.py \
 
 Default tokenizer is `tiktoken` (`cl100k_base`) but thanks to HuggingFace Transformers you can easily use your own pretrained tokenizer. Use `--custom_tokenizer_path`  to provide your tokenizer json config file.
 
+Use the script 'sample_api.py' to expose 2 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
+
+To run the API with a pretrained model, example:
+
+```
+$ python sample_api.py \
+    --config="../config/train_allamo_cl100k_base.json" \
+    --max_new_tokens=10 \
+    --temperature=0.7 \
+    --top_k=200 \
+    --num_samples=5
+```
+
+- Query for text embeddings, example:
+
+```
+$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddings -d '{"text": "Long long time ago"}'
+```
+
+- Query for text completions, example:
+
+```
+$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"text": "Long long time ago"}'
+```
+
 ## References:
 
 1. [nanoGPT](https://github.com/karpathy/nanoGPT) - many thanks to Andrej Karpathy for amazing and inspirational work!
