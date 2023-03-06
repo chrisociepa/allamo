@@ -210,26 +210,30 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, tokens, targets=None):
+    def embeddings(self, tokens):
         b, t = tokens.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
-        # forward the model itself
         tok_emb = self.tok_embeddings(tokens) # token embeddings of shape (b, t, n_embd)
         self.freqs_cis = self.freqs_cis.to(tok_emb.device)
         freqs_cis = self.freqs_cis[:t]
+        
         x = self.tok_drop(tok_emb)
         for layer in self.layers:
             x = layer(x, freqs_cis)
         x = self.norm(x)
+        return x
+
+    def forward(self, tokens, targets=None):
+        final_embeddings = self.embeddings(tokens)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            logits = self.lm_head(final_embeddings)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
         return logits, loss
@@ -239,7 +243,6 @@ class AllamoTransformer(nn.Module):
         Separate out all parameters of the model into two buckets: those that will experience
         weight decay for regularization and those that won't (biases, norm, embedding weights).
         """
-
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (torch.nn.Linear, )
@@ -277,6 +280,10 @@ class AllamoTransformer(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
 
         return optimizer
+        
+    @torch.no_grad()
+    def generate_embeddings(self, tokens):
+        return self.embeddings(tokens)
 
     @torch.no_grad()
     def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None):

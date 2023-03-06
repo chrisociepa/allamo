@@ -62,13 +62,18 @@ else:
 if config.prompt.startswith('FILE:'):
     with open(config.prompt[5:], 'r', encoding='utf-8') as f:
         config.prompt = f.read()
-prompt_ids = tokenizer.encode(config.prompt)
-x = (torch.tensor(prompt_ids, dtype=torch.long, device=config.device)[None, ...])
+prompt_tokens = tokenizer.encode(config.prompt)
+prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=config.device)
+prompt_tokens = torch.unsqueeze(prompt_tokens, 0)
 
 # run generation
 with torch.no_grad():
     with ctx:
+        embeddings = model.generate_embeddings(prompt_tokens)
+        embeddings = torch.squeeze(embeddings[:, [-1], :]) # use only the last position
+        print(f"Prompt embeddings shape: {embeddings.shape}")
+        print("Samples:")
         for k in range(config.num_samples):
-            y = model.generate(x, config.max_new_tokens, temperature=config.temperature, top_k=config.top_k)
+            y = model.generate(prompt_tokens, config.max_new_tokens, temperature=config.temperature, top_k=config.top_k)
             print(tokenizer.decode(y[0].tolist()))
             print('---------------')
