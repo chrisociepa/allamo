@@ -61,8 +61,8 @@ class AllamoConfiguration:
     dtype: str = 'float16'
     compile: bool = False
     prompt: str = "\n" 
-    num_samples: int = 10 
-    max_new_tokens: int = 500 
+    num_samples: int = 5 
+    max_new_tokens: int = 50 
     temperature: float = 0.8 
     top_k: int = 100
     
