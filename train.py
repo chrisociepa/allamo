@@ -117,8 +117,9 @@ if config.init_from == 'scratch':
     model = init_model()
 elif config.init_from == 'resume':
     print(f"Resuming training from {config.out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(config.out_dir, 'ckpt.pt')
+    # resume training from a checkpoint
+    ckpt_path = config.checkpoint_path if config.checkpoint_path else os.path.join(config.out_dir, 'ckpt.pt')
+    print(f"Loading checkpoint from {ckpt_path}...")
     checkpoint = torch.load(ckpt_path, map_location=config.device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training

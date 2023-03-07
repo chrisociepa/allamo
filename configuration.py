@@ -10,6 +10,7 @@ from dataclasses import dataclass
 @dataclass
 class AllamoConfiguration:
     init_from: str = 'scratch'
+    checkpoint_path: str = None
     seed: int = 1337
     data_dir: str = 'data'
     out_dir: str = 'out'
@@ -63,7 +64,6 @@ class AllamoConfiguration:
     compile: bool = False
     
     # inference params
-    checkpoint_path: str = None
     prompt: str = "\n" 
     num_samples: int = 5 
     max_new_tokens: int = 50 
@@ -77,6 +77,7 @@ class AllamoConfiguration:
         parser = argparse.ArgumentParser(description='Allamo allows you to train and evaluate LLaMA-based models.')
         parser.add_argument('--config', help='Path to a json configuration file')
         parser.add_argument('--init_from', type=str, choices=['scratch', 'resume'], help='Start from scratch or resume')
+        parser.add_argument('--checkpoint_path', type=str, help='Custom checkpoint path')
         parser.add_argument('--seed', type=int, help='The desired seed for generating random numbers')
         parser.add_argument('--data_dir', type=str, help='Directory where datasets exist')
         parser.add_argument('--out_dir', type=str, help='Output directory for checkpoints')
@@ -126,7 +127,6 @@ class AllamoConfiguration:
         parser.add_argument('--device', type=str, help='"cpu", "cuda", "cuda:0", "cuda:1" etc., or try "mps" on macbooks')
         parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'float16'], help='Type of tensor to be used in the model')
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
-        parser.add_argument('--checkpoint_path', type=str, help='Custom checkpoint path')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens generated in each sample')
