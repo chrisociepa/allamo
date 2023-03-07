@@ -55,9 +55,9 @@ class AllamoSampler:
                 with open(meta_path, 'rb') as f:
                     meta = pickle.load(f)
                 vocab_size = meta['vocab_size']
-                if meta['tiktoken_tokenizer_name']:
+                if 'tiktoken_tokenizer_name' in meta and meta['tiktoken_tokenizer_name']:
                     tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
-                if meta['custom_tokenizer_path']:
+                if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
                     custom_tokenizer_path = meta['custom_tokenizer_path']
         print(f"Vocab_size: {vocab_size}")
         if custom_tokenizer_path is not None:
