@@ -29,6 +29,7 @@ class AllamoConfiguration:
     batch_size: int = 64 
     block_size: int = 1024
     dataset_seq_train: bool = False
+    dataset_seq_train_start: int = None
     dataset_seq_step_size: int = 512 
     batch_size_initial: int = 2
     batch_size_max_iter: int = 2000
@@ -95,6 +96,7 @@ class AllamoConfiguration:
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--block_size', type=int, help='Block size (aka context size)')
         parser.add_argument('--dataset_seq_train', type=bool, help='Iterate dataset sequentially')
+        parser.add_argument('--dataset_seq_train_start', type=bool, help='Position in tokens to start with')
         parser.add_argument('--dataset_seq_step_size', type=float, help='Step size when iterate dataset sequentially. E.g. block_size/2')
         parser.add_argument('--batch_size_initial', type=int, help='Initial batch_size value')
         parser.add_argument('--batch_size_max_iter', help='Number of iterations to reach maximum batch_size value')

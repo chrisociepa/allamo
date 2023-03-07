@@ -60,7 +60,7 @@ gradient_accumulation_steps = config.gradient_accumulation_steps
 data_dir = os.path.join(config.data_dir, config.dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint32, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint32, mode='r')
-dataset_train_x_start = random.randint(0, batch_size-1)
+dataset_train_x_start = dataset_seq_train_start if dataset_seq_train_start is not None else random.randint(0, batch_size-1)
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     data_size = len(data)
