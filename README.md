@@ -117,13 +117,13 @@ $ python sample_api.py \
 - Query for text embeddings, example:
 
 ```
-$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddings -d '{"text": "Long long time ago"}'
+$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddings -d '{"prompt": "Long long time ago"}'
 ```
 
 - Query for text completions, example:
 
 ```
-$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"text": "Long long time ago"}'
+$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"prompt": "Long long time ago", "num_samples": 3}'
 ```
 
 ## References:
