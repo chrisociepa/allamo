@@ -69,9 +69,12 @@ class AllamoSampler:
             tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
             print(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
         self.tokenizer = tokenizer
+    
+    def tokenize_prompt(self, text: str):
+        return self.tokenizer.encode(text)
         
     def encode_prompt(self, text: str):
-        prompt_tokens = self.tokenizer.encode(text)
+        prompt_tokens = self.tokenize_prompt(text)
         prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=self.config.device)
         prompt_tokens = torch.unsqueeze(prompt_tokens, 0)
         return prompt_tokens

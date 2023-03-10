@@ -6,6 +6,13 @@ config = AllamoConfiguration()
 sampler = AllamoSampler(config)
 app = Flask(__name__)
 
+@app.route('/tokens', methods=['POST'])
+def tokens():
+    payload = request.json
+    prompt = payload.get('prompt') if 'prompt' in payload else None
+    tokens = sampler.tokenize_prompt(prompt)
+    return jsonify({'tokens': tokens})
+
 @app.route('/embeddings', methods=['POST'])
 def embeddings():
     payload = request.json
