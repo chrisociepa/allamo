@@ -64,10 +64,12 @@ class AllamoSampler:
             from transformers import PreTrainedTokenizerFast
             tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
             print(f"Custom tokenizer path: {custom_tokenizer_path}")
-        else:
+        elif tiktoken_tokenizer_name is not None:
             import tiktoken
             tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
             print(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
+        else:
+            raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
         self.tokenizer = tokenizer
     
     def tokenize_prompt(self, text: str):
