@@ -99,9 +99,9 @@ $ python sample.py \
     --prompt="FILE:prompt.txt"
 ```
 
-Default tokenizer is `tiktoken` (`cl100k_base`) but thanks to HuggingFace Transformers you can easily use your own pretrained tokenizer. Use `--custom_tokenizer_path`  to provide your tokenizer json config file.
+Specify the tokenizer using `--tiktoken_tokenizer_name` for Tiktoken (e.g. `cl100k_base`), or thanks to HuggingFace Transformers, you can easily use your own pretrained tokenizer using `--custom_tokenizer_path` to provide your tokenizer's JSON config file.
 
-Use the script 'sample_api.py' to expose 2 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
+Use the script 'sample_api.py' to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
 
 To run the API with a pretrained model, example:
 
@@ -124,6 +124,18 @@ $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddi
 
 ```
 $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"prompt": "Long long time ago", "num_samples": 3}'
+```
+
+- Query for tokens to see how your prompt is tokenized, example:
+
+```
+$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens -d '{"prompt": "Long long time ago"}'
+```
+
+To run the UI at top of the API, example:
+
+```
+$ python sample_u.py
 ```
 
 ## References:
