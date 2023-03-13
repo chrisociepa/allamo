@@ -129,7 +129,7 @@ class AllamoConfiguration:
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
-        parser.add_argument('--max_new_tokens', type=int, help='Number of tokens generated in each sample')
+        parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')
         parser.add_argument('--temperature', type=float, help='Temperature value for text generation')
         parser.add_argument('--top_k', type=int, help='Top k most likely tokens to be retained during text generation')
 
