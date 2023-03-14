@@ -11,11 +11,11 @@ Dependencies:
 - [numpy](https://numpy.org/install/)
 - [tiktoken](https://github.com/openai/tiktoken)
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
-- [wandb](https://wandb.ai/)
+- [gradio](https://www.gradio.app/)
 
-## training
+## datasets
 
-Use the script `train.py` to start your training. It reads a `train.bin` and `val.bin` files from the dataset directory. You can create the both files with a single script like this:
+Before you start training a new model, you need to create train and test datasets. The script `train.py` expects 2 files: `train.bin` and `val.bin`. You can create the both files using `prepare_datasets.py` or implementing a simple script like this:
 
 ```
 import numpy as np
@@ -31,6 +31,10 @@ def encode_file(input_file_path, output_file_path, tokenizer_name):
     
 encode_file('raw/dataset1/train.txt', 'data/dataset1/train.bin', 'cl100k_base')  
 ```
+
+## training
+
+Use the script `train.py` to start your training. It reads a `train.bin` and `val.bin` files from the dataset directory. 
 
 The training script can be run on both a single node with one or more GPUs, as well as on multiple nodes with Distributed Data Parallel (DDP).
 
