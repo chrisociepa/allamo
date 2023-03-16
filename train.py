@@ -149,7 +149,7 @@ scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
-if config.init_from == 'resume':
+if config.init_from == 'resume' and 'optimizer' in checkpoint:
     optimizer.load_state_dict(checkpoint['optimizer'])
 
 # compile the model
