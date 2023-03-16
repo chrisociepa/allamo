@@ -39,29 +39,42 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
         
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+class RotaryEmbedding(torch.nn.Module):
+    
+    def __init__(self, dim: int, max_position_embeddings=2048, theta: float = 10000.0):
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+        # Build here to make `torch.jit.trace` work
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.cos_cached = emb.cos()[None, None, :, :]
+        self.sin_cached = emb.sin()[None, None, :, :]
+
+    def forward(self, x, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        return (
+            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype, device=x.device),
+            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype, device=x.device),
+        )
+
+def rotate_half(x):
+    # Rotates half the hidden dims of the input
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    assert 0 <= 1 < x.ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    ndim = x.ndim
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-
-def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    q_ = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
-    k_ = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, q_)
-    q_out = torch.view_as_real(q_ * freqs_cis).flatten(3)
-    k_out = torch.view_as_real(k_ * freqs_cis).flatten(3)
-    return q_out.type_as(q), k_out.type_as(k)
+def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
+    cos = cos[..., offset : q.shape[-2] + offset, :]
+    sin = sin[..., offset : q.shape[-2] + offset, :]
+    q_out = (q * cos) + (rotate_half(q) * sin)
+    k_out = (k * cos) + (rotate_half(k) * sin)
+    return q_out, k_out
 
 class Attention(nn.Module):
 
@@ -80,6 +93,8 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.proj_dropout = nn.Dropout(config.dropout)
         
+        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
+        
         # Flash Attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -87,7 +102,7 @@ class Attention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(self, x: torch.Tensor):
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
@@ -99,15 +114,12 @@ class Attention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         # (B, T, C) -> (B, T, 3 * nh * hs) -> 3 * (B, T, nh, hs)
         q, k ,v  = self.c_attn(x).split(self.n_head * self.head_size, dim=2)
-        k = k.view(B, T, self.n_head, self.head_size) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, self.head_size) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, self.head_size) # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
-        
-        k = k.transpose(1, 2) 
-        q = q.transpose(1, 2)
-        v = v.transpose(1, 2)
+        cos, sin = self.rotary_emb(v, seq_len=k.shape[-2])
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -157,8 +169,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.attention_norm(x))
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -176,7 +188,6 @@ class AllamoTransformer(nn.Module):
             
         print(f"AllamoTransformerConfig: {config}")
 
-        self.freqs_cis = precompute_freqs_cis(config.head_size, config.block_size*2)
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout)
         
@@ -215,12 +226,10 @@ class AllamoTransformer(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         tok_emb = self.tok_embeddings(tokens) # token embeddings of shape (b, t, n_embd)
-        self.freqs_cis = self.freqs_cis.to(tok_emb.device)
-        freqs_cis = self.freqs_cis[:t]
         
         x = self.tok_drop(tok_emb)
         for layer in self.layers:
-            x = layer(x, freqs_cis)
+            x = layer(x)
         x = self.norm(x)
         return x
 
