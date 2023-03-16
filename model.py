@@ -147,15 +147,14 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * (4 * config.n_embd) / 3)
         hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
         
-        self.c_fc    = nn.Linear(dim, hidden_dim, bias=config.bias)
+        self.gate_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
+        self.down_proj = nn.Linear(hidden_dim, dim, bias=config.bias)
+        self.up_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
         self.act_fc  = nn.SiLU() # SwiGLU activation function
-        self.c_proj  = nn.Linear(hidden_dim, dim, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.act_fc(x)
-        x = self.c_proj(x)
+        x = self.down_proj(self.act_fc(self.c_fc(x)) * self.up_proj(x))
         x = self.dropout(x)
         return x
         
