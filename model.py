@@ -85,8 +85,10 @@ class Attention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_head * self.head_size, bias=config.bias)
+        # key, query, value projections for all heads
+        self.q_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
+        self.k_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
+        self.v_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(self.n_head * self.head_size, self.n_embd, bias=config.bias)
         # regularization
@@ -111,12 +113,9 @@ class Attention(nn.Module):
         # nh | number of heads
         B, T, C = x.size()
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        # (B, T, C) -> (B, T, 3 * nh * hs) -> 3 * (B, T, nh, hs)
-        q, k ,v  = self.c_attn(x).split(self.n_head * self.head_size, dim=2)
-        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        k = self.k_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = self.v_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
         cos, sin = self.rotary_emb(v, seq_len=k.shape[-2])
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
