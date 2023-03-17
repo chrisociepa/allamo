@@ -77,6 +77,23 @@ Note: in case your cluster does not have Infiniband interconnect prepend `NCCL_I
 
 The process of finetuning is similar to regular training, but we initialize from a pretrained model and use a smaller learning rate during training. In addition, it is essential to ensure that the model parameters used for finetuning are consistent with those used during pre-training.
 
+## import LLaMA models
+
+Use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
+
+```
+python import_llama_weights.py \
+    --input_data_dir="../llama/7B/" \
+    --input_tokenizer_path="../llama/tokenizer.model" \
+    --output_data_dir="../data/llama-7b/"
+```
+
+Notes: 
+
+1. the import process of the 7B LLaMA model takes ~40GB of RAM and generates 27GB output files.
+2. the script doesn't support sharded models.
+3. the LLaMA tokenizer is loaded using [HuggingFace Transformers](https://huggingface.co/docs/transformers/). Check if your installed version supports `LlamaTokenizer`.
+
 ## sampling / inference
 
 Use the script `sample.py` to sample from a model you trained. For example:
@@ -141,6 +158,23 @@ To run the UI at top of the API, example:
 ```
 $ python sample_u.py
 ```
+
+## running LLaMA 7B on CPU
+
+You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
+
+```
+$ python sample_api.py \
+    --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
+    --llama_tokenizer_path="../data/llama-7b/" \
+    --device=cpu
+```
+
+Note: in order to run the 7B model, you will need ~27GB of RAM during sampling, and an additional ~27GB to load the model at the very beginning.
+
+## efficiency
+
+With [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/) and `torch.compile()`, you can see significant speedup. Using the fused AdamW optimizer and `compile()`, my training ran 30% faster than without these two modes enabled.
 
 ## References:
 

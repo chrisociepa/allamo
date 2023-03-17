@@ -47,6 +47,7 @@ class AllamoSampler:
         vocab_size = config.vocab_size
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
         custom_tokenizer_path = config.custom_tokenizer_path
+        llama_tokenizer_path = config.llama_tokenizer_path
         # look for the meta pickle in case it is available in the dataset folder
         if 'config' in checkpoint and 'dataset' in checkpoint['config']:
             meta_path = os.path.join(config.data_dir, checkpoint['config']['dataset'], 'meta.pkl')
@@ -59,11 +60,17 @@ class AllamoSampler:
                     tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
                 if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
                     custom_tokenizer_path = meta['custom_tokenizer_path']
+                if 'llama_tokenizer_path' in meta and meta['llama_tokenizer_path']:
+                    llama_tokenizer_path = meta['llama_tokenizer_path']
         print(f"Vocab_size: {vocab_size}")
         if custom_tokenizer_path is not None:
             from transformers import PreTrainedTokenizerFast
             tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
             print(f"Custom tokenizer path: {custom_tokenizer_path}")
+        elif llama_tokenizer_path is not None:
+            from transformers import LlamaTokenizer
+            tokenizer = LlamaTokenizer.from_pretrained(llama_tokenizer_path)
+            print(f"LLaMA tokenizer path: {llama_tokenizer_path}")
         elif tiktoken_tokenizer_name is not None:
             import tiktoken
             tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
