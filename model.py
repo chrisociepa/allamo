@@ -149,11 +149,11 @@ class FeedForward(nn.Module):
         self.gate_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=config.bias)
         self.up_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
-        self.act_fc  = nn.SiLU() # SwiGLU activation function
+        self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.down_proj(self.act_fc(self.c_fc(x)) * self.up_proj(x))
+        x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         x = self.dropout(x)
         return x
         
