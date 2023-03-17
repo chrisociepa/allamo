@@ -165,6 +165,8 @@ $ python sample_u.py
 
 ## Running LLaMA 7B on CPU
 
+![sample_ui](assets/allamo_gradio.jpg)
+
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
 ```
