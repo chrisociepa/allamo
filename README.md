@@ -1,6 +1,8 @@
 # ALLaMo
 
-![ALLaMo](assets/allamo_logo.jpg)
+<p align="center">
+  <img src="./assets/allamo_logo.jpg" width=512>
+</p>
 
 This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
 
@@ -178,7 +180,7 @@ Note: in order to run the 7B model, you will need ~27GB of RAM during sampling, 
 
 With [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/) and `torch.compile()`, you can see significant speedup. Using the fused AdamW optimizer and `compile()`, my training ran 30% faster than without these two modes enabled.
 
-### Citation
+## Citation
 
 Please cite this repo if you use it.
 ```
