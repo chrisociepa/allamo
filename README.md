@@ -1,8 +1,10 @@
 # ALLaMo
 
+![ALLaMo](assets/allamo_logo.jpg)
+
 This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
 
-## install
+## Install
 
 Dependencies:
 
@@ -13,7 +15,7 @@ Dependencies:
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
 - [gradio](https://www.gradio.app/)
 
-## datasets
+## Datasets
 
 Before you start training a new model, you need to create train and test datasets. The script `train.py` expects 2 files: `train.bin` and `val.bin`. You can create the both files using `prepare_datasets.py` or implementing a simple script like this:
 
@@ -32,7 +34,7 @@ def encode_file(input_file_path, output_file_path, tokenizer_name):
 encode_file('raw/dataset1/train.txt', 'data/dataset1/train.bin', 'cl100k_base')  
 ```
 
-## training
+## Training
 
 Use the script `train.py` to start your training. It reads a `train.bin` and `val.bin` files from the dataset directory. 
 
@@ -73,11 +75,11 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 
 Note: in case your cluster does not have Infiniband interconnect prepend `NCCL_IB_DISABLE=1`.
 
-## finetuning
+## Finetuning
 
 The process of finetuning is similar to regular training, but we initialize from a pretrained model and use a smaller learning rate during training. In addition, it is essential to ensure that the model parameters used for finetuning are consistent with those used during pre-training.
 
-## import LLaMA models
+## Import LLaMA models
 
 Use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
 
@@ -94,7 +96,7 @@ Notes:
 2. the script doesn't support sharded models.
 3. the LLaMA tokenizer is loaded using [HuggingFace Transformers](https://huggingface.co/docs/transformers/). Check if your installed version supports `LlamaTokenizer`.
 
-## sampling / inference
+## Sampling / Inference
 
 Use the script `sample.py` to sample from a model you trained. For example:
 
@@ -159,7 +161,7 @@ To run the UI at top of the API, example:
 $ python sample_u.py
 ```
 
-## running LLaMA 7B on CPU
+## Running LLaMA 7B on CPU
 
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
@@ -172,9 +174,23 @@ $ python sample_api.py \
 
 Note: in order to run the 7B model, you will need ~27GB of RAM during sampling, and an additional ~27GB to load the model at the very beginning.
 
-## efficiency
+## Efficiency
 
 With [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/) and `torch.compile()`, you can see significant speedup. Using the fused AdamW optimizer and `compile()`, my training ran 30% faster than without these two modes enabled.
+
+### Citation
+
+Please cite this repo if you use it.
+```
+@misc{allamo,
+  author = {Krzysztof Ociepa},
+  title = {ALLaMo: Simple, hackable and fast implementation for medium-sized LLaMA-based models},
+  year = {2023},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/chrisociepa/allamo}},
+}
+```
 
 ## References:
 
