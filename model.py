@@ -4,7 +4,7 @@ The full definition of the model is located in this file.
 
 import math
 import inspect
-from typing import Union, Tuple
+from typing import Optional, Tuple, Union
 from functools import reduce
 from dataclasses import dataclass
 
@@ -85,6 +85,9 @@ class Attention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         
+        # Flash Attention is supported only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        
         # key, query, value projections for all heads
         self.q_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
         self.k_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
@@ -92,19 +95,17 @@ class Attention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(self.n_head * self.head_size, self.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
+        self.attn_dropout = nn.Dropout(config.dropout) if self.flash else None
         self.proj_dropout = nn.Dropout(config.dropout)
         
         self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
-        
-        # Flash Attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor]):
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
@@ -112,6 +113,11 @@ class Attention(nn.Module):
         # hs | head size
         # nh | number of heads
         B, T, C = x.size()
+        
+        if attention_mask is not None and attention_mask.size() != (B, T):
+            raise ValueError(
+                f"Attention mask should be of size {(B, T)}, but is {attention_mask.size()}"
+            )
 
         q = self.q_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         k = self.k_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
@@ -120,14 +126,17 @@ class Attention(nn.Module):
         cos, sin = self.rotary_emb(v, seq_len=k.shape[-2])
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
+        is_causal = attention_mask is None
+        expanded_attention_mask = expanded_attention_mask = attention_mask[:, None, None, :].expand(B, 1, T, T).to(torch.bool) if not is_causal else None
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=expanded_attention_mask, dropout_p=self.dropout, is_causal=is_causal)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = att.masked_fill((self.bias[:,:,:T,:T] == 0 if is_causal else expanded_attention_mask[:,:,:T,:T]), float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -167,8 +176,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor):
-        x = x + self.attention(self.attention_norm(x))
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor]):
+        x = x + self.attention(self.attention_norm(x), attention_mask)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -219,7 +228,7 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def embeddings(self, tokens):
+    def embeddings(self, tokens, attention_mask):
         b, t = tokens.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
@@ -227,22 +236,25 @@ class AllamoTransformer(nn.Module):
         
         x = self.tok_drop(tok_emb)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, attention_mask)
         x = self.norm(x)
         return x
 
-    def forward(self, tokens, targets=None):
-        final_embeddings = self.embeddings(tokens)
-
-        if targets is not None:
+    def forward(self, 
+        input_ids: torch.Tensor, 
+        labels: Optional[torch.Tensor] = None, 
+        attention_mask: Optional[torch.Tensor] = None, 
+        ignore_index: Optional[int] = -1
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        final_embeddings = self.embeddings(input_ids, attention_mask)
+        if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=ignore_index)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
-
         return logits, loss
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
