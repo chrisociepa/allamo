@@ -313,7 +313,7 @@ class AllamoTransformer(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            if tokens.size(1) <= self.config.block_size:
+            if tokens.size(1) > self.config.block_size:
                 tokens = tokens[:, -self.config.block_size:]
             # forward the model to get the logits for the tokens
             logits, _ = self(tokens)
