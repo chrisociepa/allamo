@@ -250,7 +250,11 @@ class AllamoTransformer(nn.Module):
         if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=ignore_index)
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss = F.cross_entropy(shift_logits.view(-1, logits.size(-1)), shift_labels.view(-1), ignore_index=ignore_index)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
