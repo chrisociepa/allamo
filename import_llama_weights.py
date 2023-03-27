@@ -24,14 +24,14 @@ def write_json(text, path):
 def permute(w, dim, n_heads):
     return w.view(n_heads, dim // n_heads // 2, 2, dim).transpose(1, 2).reshape(dim, dim)
     
-def import_model(input_base_path, output_model_path):
+def import_model(input_base_path, output_model_path, max_num_layers, max_block_size):
     print(f"{timestamp()} - start importing llama weights")
     params = read_json(os.path.join(input_base_path, "params.json"))
     
     config = AllamoTransformerConfig()
-    config.block_size = 2048
+    config.block_size = min(max_block_size, 2048) if max_block_size else 2048
     config.vocab_size = 32000
-    config.n_layer = params["n_layers"]
+    config.n_layer = min(max_num_layers, params["n_layers"]) if max_num_layers else params["n_layers"]
     config.n_head = params["n_heads"]
     config.n_embd = params["dim"]
     config.head_size = config.n_embd // config.n_head
@@ -93,14 +93,15 @@ def import_model(input_base_path, output_model_path):
     torch.save(checkpoint, ckpt_file_path)
     print(f"{timestamp()} - checkpoint saved in {ckpt_file_path}")
     
-def import_tokenizer(input_tokenizer_path, output_model_path):
+def import_tokenizer(input_tokenizer_path, output_model_path, max_block_size):
     print(f"{timestamp()} - start importing tokenizer")
+    model_max_length = min(max_block_size, 2048) if max_block_size else 2048
     write_json({}, os.path.join(output_model_path, "special_tokens_map.json"))
     write_json(
         {
             "bos_token": "<s>",
             "eos_token": "</s>",
-            "model_max_length": int(1e30),
+            "model_max_length": model_max_length,
             "tokenizer_class": "LlamaTokenizer",
             "unk_token": "<unk>",
         },
@@ -114,6 +115,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_data_dir', type=str, help='Path to a directory with LLaMA model files')
     parser.add_argument('--input_tokenizer_path', type=str, help='Path to LLaMA tokenizer.model file')
     parser.add_argument('--output_data_dir', type=str, required=True, help='Path to output directory')
+    parser.add_argument('--max_num_layers', type=int, help='Crop layers to make the model smaller')
+    parser.add_argument('--max_block_size', type=int, help='Crop block size to make the model smaller')
     args = parser.parse_args()
 
     os.makedirs(args.output_data_dir, exist_ok=True)
@@ -122,6 +125,6 @@ if __name__ == '__main__':
         import_tokenizer(args.input_tokenizer_path, args.output_data_dir)
 
     if args.input_data_dir:
-        import_model(args.input_data_dir, args.output_data_dir)
+        import_model(args.input_data_dir, args.output_data_dir, args.max_num_layers, args.max_block_size)
     
     print(f"{timestamp()} - import completed")
