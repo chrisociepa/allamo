@@ -16,7 +16,7 @@ class AllamoSampler:
 
         ckpt_path = config.checkpoint_path if config.checkpoint_path else os.path.join(config.out_dir, 'ckpt.pt')
         print(f"Loading checkpoint from {ckpt_path}...")
-        checkpoint = torch.load(ckpt_path, map_location=config.device)
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
         self.__load_model(config, checkpoint)
         self.__load_tokenizer(config, checkpoint)
             
