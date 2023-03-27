@@ -227,7 +227,7 @@ def save_checkpoint(ckpt_file_name):
     print(f"saving checkpoint to {ckpt_file_path}")
     torch.save(checkpoint, ckpt_file_path)
 
-while True:
+while iter_num <= config.max_iters:
 
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
@@ -302,10 +302,6 @@ while True:
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{timestamp} - iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, tokens {processed_tokens}")
     iter_num += 1
-
-    # termination conditions
-    if iter_num > config.max_iters:
-        break
 
 if ddp:
     destroy_process_group()
