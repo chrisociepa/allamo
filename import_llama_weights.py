@@ -98,11 +98,11 @@ def import_tokenizer(input_tokenizer_path, output_model_path):
     write_json({}, os.path.join(output_model_path, "special_tokens_map.json"))
     write_json(
         {
-            "bos_token": "",
-            "eos_token": "",
+            "bos_token": "<s>",
+            "eos_token": "</s>",
             "model_max_length": int(1e30),
             "tokenizer_class": "LlamaTokenizer",
-            "unk_token": "",
+            "unk_token": "<unk>",
         },
         os.path.join(output_model_path, "tokenizer_config.json"),
     )
