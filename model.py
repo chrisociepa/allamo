@@ -212,13 +212,24 @@ class AllamoTransformer(nn.Module):
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
-        print("Model parameters: %.2fM" % (self.get_num_params()/1e6,))
+        model_params, model_bytes = self.estimate_size()
+        model_params /= 1e6
+        model_bytes /= 1024**2
+        print(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
 
-    def get_num_params(self):
+    def estimate_size(self):
         """
-        Return the number of parameters in the model.
+        Return the number of parameters and their size in the model.
         """
-        return sum(p.numel() for p in self.parameters())
+        params = 0
+        bytes = 0
+        for p in self.parameters():
+            params += p.numel()
+            bytes += p.numel() * p.element_size()
+        for b in self.buffers():
+            # don't count buffers as params
+            bytes += b.numel() * b.element_size()
+        return params, bytes
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
