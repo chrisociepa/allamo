@@ -274,10 +274,16 @@ while iter_num <= config.max_iters:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-        losses[micro_step] = loss.item()
-        processed_tokens += X.numel()
+            
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
+
+        if loss.isnan():
+            print(f"{timestamp} - loss is NaN in iter {iter_num} micro_step {micro_step}")
+            continue
+        
+        processed_tokens += X.numel()
+        losses[micro_step] = loss.item()
         # normalize the loss value to account for the number of gradient accumulation steps
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps
