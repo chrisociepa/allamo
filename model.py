@@ -127,7 +127,8 @@ class Attention(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         is_causal = attention_mask is None
-        expanded_attention_mask = expanded_attention_mask = attention_mask[:, None, None, :].expand(B, 1, T, T).to(torch.bool) if not is_causal else None
+        # FIXME: it is still now working as expected. I recommend not using attention_mask
+        expanded_attention_mask = attention_mask[:, None, None, :].expand(B, 1, T, T).tril().to(torch.bool) if not is_causal else None
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
