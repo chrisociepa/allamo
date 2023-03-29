@@ -279,6 +279,7 @@ while iter_num <= config.max_iters:
         X, Y = get_batch('train')
 
         if loss.isnan():
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"{timestamp} - loss is NaN in iter {iter_num} micro_step {micro_step}")
             continue
         
