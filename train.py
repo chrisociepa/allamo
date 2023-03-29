@@ -302,7 +302,8 @@ while iter_num <= config.max_iters:
     # timing and logging
     dt = time.time() - timer
     if iter_num % config.log_interval == 0 and master_process:
-        lossf = losses.mean() # loss as float. note: this is a CPU-GPU sync point
+        max_lossf = losses.max()
+        lossf = torch.where(losses == 0, max_lossf, losses).mean()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{timestamp} - iter {iter_num}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens}")
     iter_num += 1
