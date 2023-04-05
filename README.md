@@ -94,7 +94,7 @@ python import_llama_weights.py \
 
 Notes: 
 
-1. the import process of the 7B LLaMA model takes ~40GB of RAM and generates 27GB output files.
+1. the import process of the 7B LLaMA model takes ~14GB of RAM and generates 13.5GB output files.
 2. the script doesn't support sharded models.
 3. the LLaMA tokenizer is loaded using [HuggingFace Transformers](https://huggingface.co/docs/transformers/). Check if your installed version supports `LlamaTokenizer`.
 
@@ -176,7 +176,7 @@ $ python sample_api.py \
     --device=cpu
 ```
 
-Note: in order to run the 7B model, you will need ~27GB of RAM during sampling, and an additional ~27GB to load the model at the very beginning.
+Note: in order to run the 7B model, you will need ~14GB of RAM.
 
 ## Efficiency
 

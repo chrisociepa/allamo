@@ -40,6 +40,9 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     config.multiple_of = params["multiple_of"]
     config.norm_eps = params["norm_eps"]
     
+    # Switch to half tensors
+    torch.set_default_tensor_type(torch.cuda.HalfTensor)
+
     print(f"{timestamp()} - initializing vanilla model")
     model = AllamoTransformer(config)
     
@@ -50,6 +53,10 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     print(f"{timestamp()} - copying llama weights to the model")
     theta = 10000.0
     inv_freq = 1.0 / (theta ** (torch.arange(0, config.head_size, 2).float() / config.head_size))
+    
+    # Switch back to full tensors
+    torch.set_default_tensor_type(torch.FloatTensor)
+    
     param_count = 0
     index_dict = {"weight_map": {}}
     model_sd = model.state_dict()
