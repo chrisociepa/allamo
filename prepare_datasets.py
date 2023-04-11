@@ -67,14 +67,14 @@ def load_list_of_txt_files(index_file_path, input_data_dir, data_split):
 
 def encode_file(input_file, output_file, tokenizer):
     enc_data = tokenizer.encode(input_file.read())
-    enc_data = np.array(enc_data, dtype=np.uint32)
+    enc_data = np.array(enc_data, dtype=np.uint16)
     enc_data.tofile(output_file)
     tokens = len(enc_data)
     
     # FIXME: it should be a special token for EOF
     files_delimiter = '\n\n\n--------\n\n\n'
     enc_data = tokenizer.encode(files_delimiter)
-    enc_data = np.array(enc_data, dtype=np.uint32)
+    enc_data = np.array(enc_data, dtype=np.uint16)
     enc_data.tofile(output_file)
     tokens += len(enc_data)
     
