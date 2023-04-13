@@ -113,7 +113,7 @@ class AllamoConfiguration:
         parser.add_argument('--n_embd', type=int, help='Number of model dimensions')
         parser.add_argument('--dropout', type=float, help='Enable dropouts globally. Disabled when 0')
         parser.add_argument('--bias', type=bool, help='Enable bias globally. Helpful in finetuning process')
-        parser.add_argument('--multiple_of', type=int, default=64, help='Make SwiGLU hidden layer size multiple of large power of 2')
+        parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
