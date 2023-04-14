@@ -190,7 +190,7 @@ def get_lr(it):
         return config.learning_rate * it / config.warmup_iters
     # 2) if it > lr_decay_iters, return min learning rate
     if it > config.lr_decay_iters:
-        return min_lr
+        return config.min_lr
     # 3) in between, use cosine decay down to min learning rate
     decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
     assert 0 <= decay_ratio <= 1
@@ -243,7 +243,7 @@ while iter_num <= config.max_iters:
         losses = estimate_loss()
         total_batch_size = config.block_size * batch_size * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, total_batch_size {total_batch_size}, tokens {processed_tokens}")
+        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, total_batch_size {total_batch_size:,}, tokens {processed_tokens:,}")
         if config.wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -282,7 +282,7 @@ while iter_num <= config.max_iters:
 
         if loss.isnan():
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"{timestamp} - loss is NaN in iter {iter_num} micro_step {micro_step}")
+            print(f"{timestamp} - loss is NaN in iter {iter_num:,} micro_step {micro_step}")
             continue
         
         processed_tokens += X.numel()
@@ -308,7 +308,7 @@ while iter_num <= config.max_iters:
         max_lossf = losses.max()
         lossf = torch.where(losses == 0, max_lossf, losses).mean()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - iter {iter_num}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens}")
+        print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}")
     iter_num += 1
 
 if ddp:
