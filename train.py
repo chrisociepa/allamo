@@ -189,10 +189,13 @@ def get_lr(it):
     if it < config.warmup_iters:
         return config.learning_rate * it / config.warmup_iters
     # 2) if it > lr_decay_iters, return min learning rate
-    if it > config.lr_decay_iters:
+    if it >= config.lr_decay_iters:
         return config.min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
+    # 3) in between, use cosine decay down to min learning rate with restarts (optional)
+    if config.lr_decay_reset_iters is not None:
+        decay_ratio = (it % config.lr_decay_reset_iters) / config.lr_decay_reset_iters
+    else:
+        decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
@@ -227,6 +230,11 @@ def save_checkpoint(ckpt_file_name):
     ckpt_file_path = os.path.join(config.out_dir, ckpt_file_name)
     print(f"saving checkpoint to {ckpt_file_path}")
     torch.save(checkpoint, ckpt_file_path)
+
+if config.decay_lr:
+    print(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(iter_num)}")
+else:
+    print(f"Using constant learning rate: {config.learning_rate}")
 
 while iter_num <= config.max_iters:
 
@@ -308,7 +316,7 @@ while iter_num <= config.max_iters:
         max_lossf = losses.max()
         lossf = torch.where(losses == 0, max_lossf, losses).mean()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}")
+        print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}, lr {lr:.6f}")
     iter_num += 1
 
 if ddp:

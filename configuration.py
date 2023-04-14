@@ -57,7 +57,8 @@ class AllamoConfiguration:
     grad_clip: float = 1.0 
     decay_lr: bool = True
     warmup_iters: int = 2000
-    lr_decay_iters: int = 600000 
+    lr_decay_iters: int = 600000
+    lr_decay_reset_iters: int = 60000
     min_lr: float = 6e-5 
     backend: str = 'nccl' 
     device: str = 'cuda' 
@@ -91,16 +92,16 @@ class AllamoConfiguration:
         parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by provideded metadata or checkpoint')
         parser.add_argument('--custom_tokenizer_path', type=str, help='Custom tokenizer path. Might be overwritten by provideded metadata or checkpoint')
         parser.add_argument('--llama_tokenizer_path', type=str, help='LLaMA tokenizer path. Might be overwritten by provideded metadata or checkpoint')
-        parser.add_argument('--wandb_log', type=bool)
-        parser.add_argument('--wandb_project', type=str)
-        parser.add_argument('--wandb_run_name', type=str)
+        parser.add_argument('--wandb_log', type=bool, help='Enable logging to wandb')
+        parser.add_argument('--wandb_project', type=str, help='Wandb project name')
+        parser.add_argument('--wandb_run_name', type=str, help='Wandb run name')
         parser.add_argument('--dataset', type=str, help='The name of dataset directory in the data_dir')
         parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--block_size', type=int, help='Block size (aka context size)')
         parser.add_argument('--dataset_seq_train', type=bool, help='Iterate dataset sequentially')
-        parser.add_argument('--dataset_seq_train_start', type=bool, help='Position in tokens to start with')
-        parser.add_argument('--dataset_seq_step_size', type=float, help='Step size when iterate dataset sequentially. E.g. block_size/2')
+        parser.add_argument('--dataset_seq_train_start', type=int, help='Position in tokens to start with')
+        parser.add_argument('--dataset_seq_step_size', type=int, help='Step size when iterate dataset sequentially. E.g. block_size/2')
         parser.add_argument('--batch_size_initial', type=int, help='Initial batch_size value')
         parser.add_argument('--batch_size_max_iter', help='Number of iterations to reach maximum batch_size value')
         parser.add_argument('--batch_size_schedule', type=bool, help='Enable linear batch_size scheduler')
@@ -123,7 +124,8 @@ class AllamoConfiguration:
         parser.add_argument('--grad_clip', type=float, help='Clip gradients at this value. Disabled when 0.')
         parser.add_argument('--decay_lr', type=bool, help='Whether to decay the learning rate')
         parser.add_argument('--warmup_iters', type=int, help='Learning rate is calculated linearly for warmup_iters steps')
-        parser.add_argument('--lr_decay_iters', type=int, help='Learning rate decay iters. When exceeded, the min_lr is used')
+        parser.add_argument('--lr_decay_iters', type=int, help='Learning rate decay iterations. When exceeded, the min_lr is used')
+        parser.add_argument('--lr_decay_reset_iters', type=int, help='Number of iterations for the learning rate decay restart')
         parser.add_argument('--min_lr', type=float, help='Minimum learning rate')
         parser.add_argument('--backend', type=str, help='"nccl", "gloo", etc.')
         parser.add_argument('--device', type=str, help='"cpu", "cuda", "cuda:0", "cuda:1" etc., or try "mps" on macbooks')
@@ -145,6 +147,6 @@ class AllamoConfiguration:
                     setattr(self, k, v)
 
         for arg_name, arg_value in vars(args).items():
-            if arg_value and hasattr(self, arg_name):
+            if arg_value is not None and hasattr(self, arg_name):
                 setattr(self, arg_name, arg_value)
 
