@@ -61,10 +61,10 @@ data_dir = os.path.join(config.data_dir, config.dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
 dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, batch_size-1)
-def get_batch(split):
+def get_batch(split, random=False):
     data = train_data if split == 'train' else val_data
     data_size = len(data)
-    if split == 'train' and config.dataset_seq_train:
+    if random == False and split == 'train' and config.dataset_seq_train:
         global dataset_train_x_start
         ix = torch.zeros(batch_size, dtype=torch.int)
         max_batch_id = dataset_train_x_start + (batch_size-1) * config.dataset_seq_step_size + config.block_size + 1
@@ -173,7 +173,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch(split, True)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
