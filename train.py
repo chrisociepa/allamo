@@ -149,8 +149,10 @@ scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
-if config.init_from == 'resume' and 'optimizer' in checkpoint:
-    optimizer.load_state_dict(checkpoint['optimizer'])
+# FIXME: when a checkpoint is loaded on cpu and model on gpu, loading state dict doesn't work.
+# Moving the checkpoint or its optimizer state on gpu is a waste of memory.
+#if config.init_from == 'resume' and 'optimizer' in checkpoint:
+#    optimizer.load_state_dict(checkpoint['optimizer'])
 
 # compile the model
 if config.compile:
