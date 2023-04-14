@@ -304,7 +304,6 @@ class AllamoTransformer(nn.Module):
             {"params": [param_dict[pn] for pn in sorted(decay)], "weight_decay": weight_decay},
             {"params": [param_dict[pn] for pn in sorted(no_decay)], "weight_decay": 0.0},
         ]
-        # new PyTorch nightly has a new 'fused' option for AdamW that is much faster
         use_fused = (device_type == 'cuda') and ('fused' in inspect.signature(torch.optim.AdamW).parameters)
         print(f"Using fused AdamW: {use_fused}")
         extra_args = dict(fused=True) if use_fused else dict()
