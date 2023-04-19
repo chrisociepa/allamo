@@ -251,7 +251,7 @@ while iter_num <= config.max_iters:
         losses = estimate_loss()
         total_batch_size = config.block_size * batch_size * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, total_batch_size {total_batch_size:,}, tokens {processed_tokens:,}")
+        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {dataset_train_x_start:,}")
         if config.wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -259,7 +259,8 @@ while iter_num <= config.max_iters:
                 "val/loss": losses['val'],
                 "lr": lr,
                 "tokens": processed_tokens,
-                "total_batch_size": total_batch_size
+                "total_batch_size": total_batch_size,
+                "train/ds_offset": dataset_train_x_start
             })
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
