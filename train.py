@@ -267,7 +267,8 @@ while iter_num <= config.max_iters:
             if iter_num > 0:
                 save_checkpoint('ckpt.pt')
         if config.always_save_checkpoint:
-            save_checkpoint('last_eval_ckpt.pt')
+            if iter_num > 0:
+                save_checkpoint('last_eval_ckpt.pt')
     if iter_num == 0 and config.eval_only:
         break
     
