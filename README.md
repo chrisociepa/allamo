@@ -98,6 +98,16 @@ Notes:
 2. the script doesn't support sharded models.
 3. the LLaMA tokenizer is loaded using [HuggingFace Transformers](https://huggingface.co/docs/transformers/). Check if your installed version supports `LlamaTokenizer`.
 
+## Export your model to Hugging Face format
+
+When you have trained your model, you may want to run it in the Hugging Face ecosystem. Using the `export_to_hf.py` script, you can easily convert your model to an HF-compatible LLaMA format. Here's an example of how to run it:
+
+```
+$ python export_to_hf.py \
+    --input_dir="../data/my-llama/" \
+    --output_dir="../data/my-llama-hf/"
+```
+
 ## Sampling / Inference
 
 Use the script `sample.py` to sample from a model you trained. For example:
