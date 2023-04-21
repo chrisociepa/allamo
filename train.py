@@ -97,6 +97,7 @@ if os.path.exists(meta_path):
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
+best_train_loss = 1e9
 best_val_loss = 1e9
 processed_tokens = 0
 transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
@@ -138,6 +139,8 @@ elif config.init_from == 'resume':
     model.load_state_dict(state_dict)
     if 'iter_num' in checkpoint:
         iter_num = checkpoint['iter_num']
+    if 'best_train_loss' in checkpoint:
+        best_train_loss = checkpoint['best_train_loss']
     if 'best_val_loss' in checkpoint:
         best_val_loss = checkpoint['best_val_loss']
     if 'processed_tokens' in checkpoint:
@@ -223,6 +226,7 @@ def save_checkpoint(ckpt_file_name):
         'optimizer': optimizer.state_dict(),
         'model_args': model.config,
         'iter_num': iter_num,
+        'best_train_loss': best_train_loss,
         'best_val_loss': best_val_loss,
         'processed_tokens': processed_tokens,
         'config': config.__dict__,
@@ -251,7 +255,7 @@ while iter_num <= config.max_iters:
         losses = estimate_loss()
         total_batch_size = config.block_size * batch_size * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {dataset_train_x_start:,}")
+        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f} (best: {best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {best_val_loss:.4f}), BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {dataset_train_x_start:,}")
         if config.wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -262,6 +266,8 @@ while iter_num <= config.max_iters:
                 "total_batch_size": total_batch_size,
                 "train/ds_offset": dataset_train_x_start
             })
+        if losses['train'] < best_train_loss:
+            best_train_loss = losses['train']
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
             if iter_num > 0:
