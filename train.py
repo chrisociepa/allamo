@@ -223,7 +223,8 @@ raw_model = model.module if ddp else model # unwrap DDP container if needed
 def save_checkpoint(ckpt_file_name):
     checkpoint = {
         'model': raw_model.state_dict(),
-        'optimizer': optimizer.state_dict(),
+        # FIXME: since we don't init optimizer with its state from checkpoint, so there is no need to save it
+        #'optimizer': optimizer.state_dict(),
         'model_args': model.config,
         'iter_num': iter_num,
         'best_train_loss': best_train_loss,
