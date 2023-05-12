@@ -157,6 +157,8 @@ optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate
 #if config.init_from == 'resume' and 'optimizer' in checkpoint:
 #    optimizer.load_state_dict(checkpoint['optimizer'])
 
+checkpoint = None # free up memory
+
 # compile the model
 if config.compile:
     print("compiling the model... (takes a ~minute)")
