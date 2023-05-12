@@ -302,10 +302,14 @@ while iter_num <= config.max_iters:
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
 
+        # That is not a good idea because it implies an issue with the stability of the model, 
+        # which is why it has been commented out.
+        """
         if loss.isnan():
             timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"{timestamp} - loss is NaN in iter {iter_num:,} micro_step {micro_step}")
             continue
+        """
         
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
