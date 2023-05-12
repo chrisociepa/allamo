@@ -280,8 +280,6 @@ while iter_num <= config.max_iters:
         break
     
     timer = time.time()
-    # collect the loss values in gradient accumulation steps
-    losses = torch.zeros(gradient_accumulation_steps)
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
@@ -293,7 +291,12 @@ while iter_num <= config.max_iters:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-            
+            if gradient_accumulation_steps > 1:
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+
+        # count processed tokens
+        processed_tokens += X.numel()
+
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
 
@@ -302,11 +305,6 @@ while iter_num <= config.max_iters:
             print(f"{timestamp} - loss is NaN in iter {iter_num:,} micro_step {micro_step}")
             continue
         
-        processed_tokens += X.numel()
-        losses[micro_step] = loss.item()
-        # normalize the loss value to account for the number of gradient accumulation steps
-        if gradient_accumulation_steps > 1:
-            loss = loss / gradient_accumulation_steps
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -322,8 +320,9 @@ while iter_num <= config.max_iters:
     # timing and logging
     dt = time.time() - timer
     if iter_num % config.log_interval == 0 and master_process:
-        max_lossf = losses.max()
-        lossf = torch.where(losses == 0, max_lossf, losses).mean()
+        # get loss as float. note: this is a CPU-GPU sync point
+        # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
+        lossf = loss.item() * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}, lr {lr:.6f}")
     iter_num += 1
