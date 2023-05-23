@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 @dataclass
 class AllamoConfiguration:
+
+    load_configuration: bool = True
     init_from: str = 'scratch'
     checkpoint_path: str = None
     seed: int = 1337
@@ -73,7 +75,8 @@ class AllamoConfiguration:
     top_k: int = 100
     
     def __post_init__(self):
-        self.load_values()
+        if self.load_configuration:
+            self.load_values()
     
     def load_values(self):
         parser = argparse.ArgumentParser(description='Allamo allows you to train and evaluate LLaMA-based models.')
