@@ -18,6 +18,7 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
+from simple_data_loader import SimpleDataLoader
 
 config = AllamoConfiguration()
 
@@ -46,55 +47,6 @@ device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in to
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# batch size & gradient_accumulation scheduler
-if config.batch_size_schedule: 
-    config.batch_size_max = config.batch_size
-    config.batch_size = config.batch_size_initial
-if config.grad_accum_schedule: 
-    config.grad_accum_max = config.gradient_accumulation_steps
-    config.gradient_accumulation_steps = config.grad_accum_initial
-batch_size = config.batch_size
-gradient_accumulation_steps = config.gradient_accumulation_steps
-
-# poor man's data loader
-data_dir = os.path.join(config.data_dir, config.dataset)
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, batch_size-1)
-def get_batch(split, random_samples=False):
-    data = train_data if split == 'train' else val_data
-    data_size = len(data)
-    if random_samples == False and split == 'train' and config.dataset_seq_train:
-        global dataset_train_x_start
-        ix = torch.zeros(batch_size, dtype=torch.int)
-        max_batch_id = dataset_train_x_start + (batch_size-1) * config.dataset_seq_step_size + config.block_size + 1
-        if max_batch_id >= data_size:
-            print(f"Batch is exceeding the data size ({max_batch_id} > {data_size}). Reseting cursor to the beginning")
-            dataset_train_x_start = random.randint(0, batch_size-1)
-        for i in range(batch_size):
-            last_x_start = dataset_train_x_start + i * config.dataset_seq_step_size
-            ix[i] = last_x_start
-        dataset_train_x_start = last_x_start + config.dataset_seq_step_size 
-    else:
-        ix = torch.randint(data_size - config.block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+config.block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+config.block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
-    else:
-        x, y = x.to(config.device), y.to(config.device)
-    return x, y
-
-# attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
-if os.path.exists(meta_path):
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
-
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_train_loss = 1e9
@@ -110,11 +62,6 @@ def init_model():
 if config.init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is not None:
-        config.vocab_size = meta_vocab_size
-    else:
-        print(f"defaulting to vocab_size={config.vocab_size}")
     model = init_model()
 elif config.init_from == 'resume':
     print(f"Resuming training from {config.out_dir}")
@@ -171,21 +118,31 @@ if config.compile:
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+    
+# gradient_accumulation scheduler
+if config.grad_accum_schedule: 
+    config.grad_accum_max = config.gradient_accumulation_steps
+    config.gradient_accumulation_steps = config.grad_accum_initial
+gradient_accumulation_steps = config.gradient_accumulation_steps
+
+simple_data_loader = SimpleDataLoader(config)
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    for split in simple_data_loader.splits:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = get_batch(split, True)
+            X, Y = simple_data_loader.get_batch(split, True)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
+    if 'val' not in out:
+        out['val'] = out['train']
     return out
 
 # learning rate decay scheduler (cosine with warmup)
@@ -205,9 +162,6 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
 
-# batch_size scheduler (when enabled) 
-def get_batch_size(it):
-    return min(batch_size + 1, config.batch_size_max) if it % (config.batch_size_max_iter/100) == 0 else batch_size 
 # grad_accum scheduler (when enabled) 
 def get_grad_accum(it):
     return min(gradient_accumulation_steps + 1, config.grad_accum_max) if it % (config.grad_accum_max_iter/100) == 0 else gradient_accumulation_steps 
@@ -218,7 +172,7 @@ if config.wandb_log and master_process:
     wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = simple_data_loader.get_batch('train') # fetch the very first batch
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 
 # helps saving checkpoint to a file
@@ -248,7 +202,7 @@ while iter_num <= config.max_iters:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
     # determine and set batch_size and gradient_accumulation_steps for this iteration 
-    batch_size = get_batch_size(iter_num) if config.batch_size_schedule else batch_size
+    batch_size = simple_data_loader.update_batch_size(iter_num)
     gradient_accumulation_steps = get_grad_accum(iter_num) if config.grad_accum_schedule else gradient_accumulation_steps
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -258,7 +212,7 @@ while iter_num <= config.max_iters:
         losses = estimate_loss()
         total_batch_size = config.block_size * batch_size * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f} (best: {best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {best_val_loss:.4f}), BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {dataset_train_x_start:,}")
+        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f} (best: {best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {best_val_loss:.4f}), BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {simple_data_loader.dataset_train_x_start:,}")
         if config.wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -267,7 +221,7 @@ while iter_num <= config.max_iters:
                 "lr": lr,
                 "tokens": processed_tokens,
                 "total_batch_size": total_batch_size,
-                "train/ds_offset": dataset_train_x_start
+                "train/ds_offset": simple_data_loader.dataset_train_x_start
             })
         if losses['train'] < best_train_loss:
             best_train_loss = losses['train']
@@ -300,7 +254,7 @@ while iter_num <= config.max_iters:
         processed_tokens += X.numel()
 
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y = simple_data_loader.get_batch('train')
 
         # That is not a good idea because it implies an issue with the stability of the model, 
         # which is why it has been commented out.
