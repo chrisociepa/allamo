@@ -137,7 +137,7 @@ def estimate_loss():
         for k in range(config.eval_iters):
             X, Y = simple_data_loader.get_batch(split, True)
             with ctx:
-                logits, loss = model(X, Y)
+                _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -164,7 +164,10 @@ def get_lr(it):
 
 # grad_accum scheduler (when enabled) 
 def get_grad_accum(it):
-    return min(gradient_accumulation_steps + 1, config.grad_accum_max) if it % (config.grad_accum_max_iter/100) == 0 else gradient_accumulation_steps 
+    if config.grad_accum_schedule and it % (config.grad_accum_max_iter/100) == 0:
+        return min(gradient_accumulation_steps + 1, config.grad_accum_max)
+    else:
+        return gradient_accumulation_steps
 
 # logging
 if config.wandb_log and master_process:
@@ -203,7 +206,7 @@ while iter_num <= config.max_iters:
     lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
     # determine and set batch_size and gradient_accumulation_steps for this iteration 
     batch_size = simple_data_loader.update_batch_size(iter_num)
-    gradient_accumulation_steps = get_grad_accum(iter_num) if config.grad_accum_schedule else gradient_accumulation_steps
+    gradient_accumulation_steps = get_grad_accum(iter_num)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -246,7 +249,7 @@ while iter_num <= config.max_iters:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            _, loss = model(X, Y)
             if gradient_accumulation_steps > 1:
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
 
