@@ -22,9 +22,11 @@ class SimpleDataLoader:
         data_dir = os.path.join(config.data_dir, config.dataset)
         self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.batch_size-1)
         self.train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        self.train_data_size = len(self.train_data)
         val_data_path = os.path.join(data_dir, 'val.bin')
         if os.path.exists(val_data_path):
             self.val_data = np.memmap(val_data_path, dtype=np.uint16, mode='r')
+            self.val_data_size = len(self.val_data)
             self.splits = ['train', 'val']
         else:
             self.val_data = None
@@ -35,8 +37,12 @@ class SimpleDataLoader:
         return self.splits
         
     def get_batch(self, split='train', random_samples=False):
-        data = self.train_data if split == 'train' or val_data is None else self.val_data
-        data_size = len(data)
+        if split == 'train' or val_data is None:
+            data = self.train_data
+            data_size = self.train_data_size
+        else:
+            data = self.val_data
+            data_size = self.val_data_size
         if random_samples == False and split == 'train' and self.config.dataset_seq_train:
             ix = torch.zeros(self.batch_size, dtype=torch.int)
             end_of_batch = self.dataset_train_x_start + (self.batch_size-1) * self.config.dataset_seq_step_size + self.config.block_size + 1 >= data_size
