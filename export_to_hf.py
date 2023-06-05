@@ -78,6 +78,8 @@ def write_model(checkpoint_path, hf_model_path):
         "model.norm.weight": loaded["norm.weight"],
         "lm_head.weight": loaded["lm_head.weight"],
     }
+    # Resolve model params dtype, e.g. torch.float16
+    torch_dtype = loaded["lm_head.weight"].dtype
 
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -105,12 +107,12 @@ def write_model(checkpoint_path, hf_model_path):
     del loaded
     gc.collect()
 
-    print(f"{timestamp()} - loading the checkpoint in a LLaMA model.")
-    model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+    print(f"{timestamp()} - loading the checkpoint in a LLaMA model with {torch_dtype} dtype")
+    model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
     # Avoid saving this as part of the config.
     del model.config._name_or_path
 
-    print(f"{timestamp()} - saving in the Transformers format.")
+    print(f"{timestamp()} - saving in the Transformers format")
     model.save_pretrained(hf_model_path)
     shutil.rmtree(tmp_model_path)
     print(f"{timestamp()} - conversion completed!")
