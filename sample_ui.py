@@ -9,7 +9,7 @@ def get_completion(prompt, num_samples, max_new_tokens, temperature, top_k):
     data = {
         "prompt": prompt,
         "num_samples": num_samples,
-        "max_tokens": max_new_tokens,
+        "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_k": top_k
     }
