@@ -2,7 +2,6 @@
 This single file is intended to perform some magic for training/finetuning.
 """
 
-import gc
 import os
 import time
 import math
@@ -172,7 +171,8 @@ def get_grad_accum(it):
 # logging
 if config.wandb_log and master_process:
     import wandb
-    wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=config)
+    wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
 
 # training loop
 X, Y = simple_data_loader.get_batch('train') # fetch the very first batch
@@ -265,15 +265,6 @@ while iter_num <= config.max_iters:
 
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = simple_data_loader.get_batch('train')
-
-        # That is not a good idea because it implies an issue with the stability of the model, 
-        # which is why it has been commented out.
-        """
-        if loss.isnan():
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"{timestamp} - loss is NaN in iter {iter_num:,} micro_step {micro_step}")
-            continue
-        """
         
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
@@ -295,7 +286,6 @@ while iter_num <= config.max_iters:
         lossf = loss.item() * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}, lr {lr:.6f}")
-        gc.collect()
     iter_num += 1
 
 if ddp:
