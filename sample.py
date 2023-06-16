@@ -14,11 +14,14 @@ class AllamoSampler:
         self.config = config
         self.__init_torch(config)
 
-        ckpt_path = config.checkpoint_path if config.checkpoint_path else os.path.join(config.out_dir, 'ckpt.pt')
-        print(f"Loading checkpoint from {ckpt_path}...")
-        checkpoint = torch.load(ckpt_path, map_location='cpu')
-        self.__load_model(config, checkpoint)
-        self.__load_tokenizer(config, checkpoint)
+        ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
+        print(f"Loading checkpoint from {ckpt_dir}...")
+        config_checkpoint = torch.load(os.path.join(ckpt_dir, 'config_ckpt.pt'), map_location='cpu')
+        model_checkpoint = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
+        self.__load_model(config, config_checkpoint, model_checkpoint)
+        self.__load_tokenizer(config, config_checkpoint)
+        del config_checkpoint
+        del model_checkpoint
             
     def __init_torch(self, config: AllamoConfiguration):
         torch.manual_seed(config.seed)
@@ -29,28 +32,27 @@ class AllamoSampler:
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
         self.ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
         
-    def __load_model(self, config: AllamoConfiguration, checkpoint):
-        model = AllamoTransformer(checkpoint['model_args'])
-        state_dict = checkpoint['model']
+    def __load_model(self, config: AllamoConfiguration, config_checkpoint, model_checkpoint):
+        model = AllamoTransformer(config_checkpoint['model_args'])
         unwanted_prefix = '_orig_mod.'
-        for k,v in list(state_dict.items()):
+        for k,v in list(model_checkpoint.items()):
             if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-        model.load_state_dict(state_dict)
+                model_checkpoint[k[len(unwanted_prefix):]] = model_checkpoint.pop(k)
+        model.load_state_dict(model_checkpoint)
         model.eval()
         model.to(config.device)
         if config.compile:
             model = torch.compile(model) # requires PyTorch 2.0 (optional)
         self.model = model
         
-    def __load_tokenizer(self, config: AllamoConfiguration, checkpoint):
+    def __load_tokenizer(self, config: AllamoConfiguration, config_checkpoint):
         vocab_size = config.vocab_size
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
         custom_tokenizer_path = config.custom_tokenizer_path
         llama_tokenizer_path = config.llama_tokenizer_path
         # look for the meta pickle in case it is available in the dataset folder
-        if 'config' in checkpoint and 'dataset' in checkpoint['config']:
-            meta_path = os.path.join(config.data_dir, checkpoint['config']['dataset'], 'meta.pkl')
+        if 'config' in config_checkpoint and 'dataset' in config_checkpoint['config']:
+            meta_path = os.path.join(config.data_dir, config_checkpoint['config']['dataset'], 'meta.pkl')
             if os.path.exists(meta_path):
                 print(f"Loading meta from {meta_path}...")
                 with open(meta_path, 'rb') as f:

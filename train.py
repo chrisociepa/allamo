@@ -2,6 +2,7 @@
 This single file is intended to perform some magic for training/finetuning.
 """
 
+import gc
 import os
 import time
 import math
@@ -66,32 +67,33 @@ if config.init_from == 'scratch':
 elif config.init_from == 'resume':
     print(f"Resuming training from {config.out_dir}")
     # resume training from a checkpoint
-    ckpt_path = config.checkpoint_path if config.checkpoint_path else os.path.join(config.out_dir, 'ckpt.pt')
-    print(f"Loading checkpoint from {ckpt_path}...")
-    checkpoint = torch.load(ckpt_path, map_location='cpu')
-    checkpoint_model_args = checkpoint['model_args']
+    ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
+    print(f"Loading checkpoint from {ckpt_dir}...")
+    config_checkpoint = torch.load(os.path.join(ckpt_dir, 'config_ckpt.pt'), map_location='cpu')
+    checkpoint_model_args = config_checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in transformer_config_fields:
         assert hasattr(config, k), f"Config object does not have {k} field"
         if hasattr(checkpoint_model_args, k): # useful only for the backward compatibility
             setattr(config, k, getattr(checkpoint_model_args, k))
+    if 'iter_num' in config_checkpoint:
+        iter_num = config_checkpoint['iter_num']
+    if 'best_train_loss' in config_checkpoint:
+        best_train_loss = config_checkpoint['best_train_loss']
+    if 'best_val_loss' in config_checkpoint:
+        best_val_loss = config_checkpoint['best_val_loss']
+    if 'processed_tokens' in config_checkpoint:
+        processed_tokens = config_checkpoint['processed_tokens']
+    del config_checkpoint
     model = init_model()
-    state_dict = checkpoint['model']
-    # ignore unwanted checkpoint files
+    state_dict = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
     unwanted_prefix = '_orig_mod.'
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-    if 'iter_num' in checkpoint:
-        iter_num = checkpoint['iter_num']
-    if 'best_train_loss' in checkpoint:
-        best_train_loss = checkpoint['best_train_loss']
-    if 'best_val_loss' in checkpoint:
-        best_val_loss = checkpoint['best_val_loss']
-    if 'processed_tokens' in checkpoint:
-        processed_tokens = checkpoint['processed_tokens']
+    del state_dict
 model.to(config.device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -99,12 +101,10 @@ scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
-# FIXME: when a checkpoint is loaded on cpu and model on gpu, loading state dict doesn't work.
-# Moving the checkpoint or its optimizer state on gpu is a waste of memory.
-#if config.init_from == 'resume' and 'optimizer' in checkpoint:
-#    optimizer.load_state_dict(checkpoint['optimizer'])
-
-checkpoint = None # free up memory
+if config.init_from == 'resume':
+    optimizer_checkpoint = torch.load(os.path.join(ckpt_dir, 'optimizer_ckpt.pt'), map_location=config.device)
+    optimizer.load_state_dict(optimizer_checkpoint)
+    del optimizer_checkpoint
 
 # compile the model
 if config.compile:
@@ -181,9 +181,6 @@ raw_model = model.module if ddp else model # unwrap DDP container if needed
 # helps saving checkpoint to a file
 def save_checkpoint(ckpt_file_name):
     checkpoint = {
-        'model': raw_model.state_dict(),
-        # FIXME: since we don't init optimizer with its state from checkpoint, so there is no need to save it
-        #'optimizer': optimizer.state_dict(),
         'model_args': model.config,
         'iter_num': iter_num,
         'best_train_loss': best_train_loss,
@@ -191,9 +188,19 @@ def save_checkpoint(ckpt_file_name):
         'processed_tokens': processed_tokens,
         'config': config.__dict__,
     }
-    ckpt_file_path = os.path.join(config.out_dir, ckpt_file_name)
-    print(f"saving checkpoint to {ckpt_file_path}")
+    ckpt_file_path = os.path.join(config.out_dir, 'config_' + ckpt_file_name)
+    print(f"saving config checkpoint to {ckpt_file_path}")
     torch.save(checkpoint, ckpt_file_path)
+    
+    ckpt_file_path = os.path.join(config.out_dir, 'model_' + ckpt_file_name)
+    print(f"saving model checkpoint to {ckpt_file_path}")
+    torch.save(raw_model.state_dict(), ckpt_file_path)
+    
+    ckpt_file_path = os.path.join(config.out_dir, 'optimizer_' + ckpt_file_name)
+    print(f"saving optimizer checkpoint to {ckpt_file_path}")
+    torch.save(optimizer.state_dict(), ckpt_file_path)
+    print(f"checkpoint files saved in {config.out_dir}")
+
 
 if config.decay_lr:
     print(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(iter_num)}")
@@ -288,6 +295,7 @@ while iter_num <= config.max_iters:
         lossf = loss.item() * gradient_accumulation_steps
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}, lr {lr:.6f}")
+        gc.collect()
     iter_num += 1
 
 if ddp:
