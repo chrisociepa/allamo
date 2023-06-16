@@ -101,9 +101,13 @@ scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 # optimizer
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 if config.init_from == 'resume':
-    optimizer_checkpoint = torch.load(os.path.join(ckpt_dir, 'optimizer_ckpt.pt'), map_location=config.device)
-    optimizer.load_state_dict(optimizer_checkpoint)
-    del optimizer_checkpoint
+    optimizer_checkpoint_path = os.path.join(ckpt_dir, 'optimizer_ckpt.pt')
+    if os.path.exists(optimizer_checkpoint_path):
+        optimizer_checkpoint = torch.load(optimizer_checkpoint_path, map_location=config.device)
+        optimizer.load_state_dict(optimizer_checkpoint)
+        del optimizer_checkpoint
+    else:
+        print("Optimizer checkpoint not found. Initializing from scratch")
 
 # compile the model
 if config.compile:
