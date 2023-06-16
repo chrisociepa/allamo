@@ -21,13 +21,22 @@ class SimpleDataLoader:
             
         data_dir = os.path.join(config.data_dir, config.dataset)
         self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.batch_size-1)
-        self.train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        train_data_path = os.path.join(data_dir, 'train.bin')
+        if config.in_memory_data:
+            self.train_data = torch.from_numpy(np.fromfile(train_data_path, dtype=np.uint16).astype(np.int64))
+        else:
+            self.train_data = np.memmap(train_data_path, dtype=np.uint16, mode='r')
         self.train_data_size = len(self.train_data)
+        print(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
         val_data_path = os.path.join(data_dir, 'val.bin')
         if os.path.exists(val_data_path):
-            self.val_data = np.memmap(val_data_path, dtype=np.uint16, mode='r')
+            if config.in_memory_data:
+                self.val_data = torch.from_numpy(np.fromfile(val_data_path, dtype=np.uint16).astype(np.int64))
+            else:
+                self.val_data = np.memmap(val_data_path, dtype=np.uint16, mode='r')
             self.val_data_size = len(self.val_data)
             self.splits = ['train', 'val']
+            print(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
         else:
             self.val_data = None
             self.splits = ['train']
@@ -35,6 +44,12 @@ class SimpleDataLoader:
             
     def get_splits(self):
         return self.splits
+        
+    def __get_sample(self, data, start, end):
+        if self.config.in_memory_data:
+            return data[start:end]
+        else:
+            return torch.from_numpy((data[start:end]).astype(np.int64))
         
     def get_batch(self, split='train', random_samples=False):
         if split == 'train' or val_data is None:
@@ -62,8 +77,8 @@ class SimpleDataLoader:
                 self.dataset_train_x_start = last_x_start + self.config.dataset_seq_step_size 
         else:
             ix = torch.randint(data_size - self.config.block_size, (self.batch_size,))
-        x = torch.stack([torch.from_numpy((data[i:i+self.config.block_size]).astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+self.config.block_size]).astype(np.int64)) for i in ix])
+        x = torch.stack([self.__get_sample(data, i, i+self.config.block_size) for i in ix])
+        y = torch.stack([self.__get_sample(data, i+1, i+1+self.config.block_size) for i in ix])
         if 'cuda' in self.config.device:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)

@@ -16,6 +16,7 @@ class AllamoConfiguration:
     seed: int = 1337
     data_dir: str = 'data'
     out_dir: str = 'out'
+    in_memory_data: bool = False
     eval_interval: int = 1000
     log_interval: int = 1
     eval_iters: int = 200
@@ -86,6 +87,7 @@ class AllamoConfiguration:
         parser.add_argument('--seed', type=int, help='The desired seed for generating random numbers')
         parser.add_argument('--data_dir', type=str, help='Directory where datasets exist')
         parser.add_argument('--out_dir', type=str, help='Output directory for checkpoints')
+        parser.add_argument('--in_memory_data', type=bool, help='Store data in memory')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
