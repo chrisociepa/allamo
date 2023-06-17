@@ -31,13 +31,12 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
+        
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        input_dtype = x.dtype
+        variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return (self.weight * x).to(input_dtype)
         
 class RotaryEmbedding(torch.nn.Module):
     
@@ -52,14 +51,15 @@ class RotaryEmbedding(torch.nn.Module):
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.cos_cached = emb.cos()[None, None, :, :]
-        self.sin_cached = emb.sin()[None, None, :, :]
+        dtype = torch.get_default_dtype()
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         return (
-            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype, device=x.device),
-            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype, device=x.device),
+            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
         )
 
 def rotate_half(x):
@@ -114,11 +114,6 @@ class Attention(nn.Module):
         # nh | number of heads
         B, T, C = x.size()
         
-        if attention_mask is not None and attention_mask.size() != (B, T):
-            raise ValueError(
-                f"Attention mask should be of size {(B, T)}, but is {attention_mask.size()}"
-            )
-
         q = self.q_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         k = self.k_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = self.v_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
@@ -126,18 +121,14 @@ class Attention(nn.Module):
         cos, sin = self.rotary_emb(v, seq_len=k.shape[-2])
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        is_causal = attention_mask is None
-        # FIXME: it is still now working as expected. I recommend not using attention_mask
-        expanded_attention_mask = attention_mask[:, None, None, :].expand(B, 1, T, T).tril().to(torch.bool) if not is_causal else None
-
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=expanded_attention_mask, dropout_p=self.dropout, is_causal=is_causal)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill((self.bias[:,:,:T,:T] == 0 if is_causal else expanded_attention_mask[:,:,:T,:T]), float('-inf'))
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -240,13 +231,12 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def embeddings(self, tokens, attention_mask):
-        b, t = tokens.size()
+    def embeddings(self, input_ids, attention_mask):
+        b, t = input_ids.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
-        tok_emb = self.tok_embeddings(tokens) # token embeddings of shape (b, t, n_embd)
-        
-        x = self.tok_drop(tok_emb)
+        x = self.tok_embeddings(input_ids) # token embeddings of shape (b, t, n_embd)
+        x = self.tok_drop(x)
         for layer in self.layers:
             x = layer(x, attention_mask)
         x = self.norm(x)

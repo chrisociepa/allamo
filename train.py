@@ -283,8 +283,8 @@ while iter_num <= config.max_iters:
     optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
-    dt = time.time() - timer
     if iter_num % config.log_interval == 0 and master_process:
+        dt = time.time() - timer
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
