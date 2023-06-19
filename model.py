@@ -40,41 +40,32 @@ class RMSNorm(torch.nn.Module):
         
 class RotaryEmbedding(torch.nn.Module):
     
-    def __init__(self, dim: int, max_position_embeddings=2048, theta: float = 10000.0):
+    def __init__(self, dim: int, max_seq_len=2048, theta: float = 10000.0):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
 
-        # Build here to make `torch.jit.trace` work
-        self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        t = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
         dtype = torch.get_default_dtype()
         self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
-
-    def forward(self, x, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        return (
-            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
-            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
-        )
-
-def rotate_half(x):
-    # Rotates half the hidden dims of the input
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
-    cos = cos[..., offset : q.shape[-2] + offset, :]
-    sin = sin[..., offset : q.shape[-2] + offset, :]
-    q_out = (q * cos) + (rotate_half(q) * sin)
-    k_out = (k * cos) + (rotate_half(k) * sin)
-    return q_out, k_out
+        
+    def forward(self, q, k):
+        # q,k: [bs, num_attention_heads, seq_len, head_size]
+        cos = self.cos_cached[:, :, :q.shape[-2], ...].to(dtype=q.dtype)
+        sin = self.sin_cached[:, :, :q.shape[-2], ...].to(dtype=q.dtype)
+        q_out = (q * cos) + (self.__rotate_half(q) * sin)
+        k_out = (k * cos) + (self.__rotate_half(k) * sin)
+        return q_out, k_out
+    
+    def __rotate_half(self, x):
+        # Rotates half the hidden dims of the input
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
 class Attention(nn.Module):
 
@@ -118,8 +109,7 @@ class Attention(nn.Module):
         k = self.k_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = self.v_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        cos, sin = self.rotary_emb(v, seq_len=k.shape[-2])
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q, k = self.rotary_emb(q, k)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
