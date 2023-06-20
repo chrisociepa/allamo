@@ -2,6 +2,7 @@
 This single file is intended to perform some magic for training/finetuning.
 """
 
+import gc
 import os
 import time
 import math
@@ -210,6 +211,10 @@ if config.decay_lr:
     print(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(iter_num)}")
 else:
     print(f"Using constant learning rate: {config.learning_rate}")
+
+# sometimes, during script restart, the training process fails to start due to OOM caused by memory fragmentation
+gc.collect()
+torch.cuda.empty_cache()
 
 while iter_num <= config.max_iters:
 
