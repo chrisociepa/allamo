@@ -129,7 +129,7 @@ if __name__ == '__main__':
     os.makedirs(args.output_data_dir, exist_ok=True)
     
     if args.input_tokenizer_path:
-        import_tokenizer(args.input_tokenizer_path, args.output_data_dir)
+        import_tokenizer(args.input_tokenizer_path, args.output_data_dir, args.max_block_size)
 
     if args.input_data_dir:
         import_model(args.input_data_dir, args.output_data_dir, args.max_num_layers, args.max_block_size)
