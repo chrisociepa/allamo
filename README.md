@@ -6,6 +6,8 @@
 
 This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
 
+If you want to see how we have trained a 1B model for the Polish language, please read [this article](https://azurro.pl/apt-1b-base-en/) on our website.
+
 ## Install
 
 Dependencies:
@@ -46,7 +48,7 @@ To run on a single node with 1 GPU, example:
 
 ```
 $ python train.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --wandb_log=True
 ```
 
@@ -54,7 +56,7 @@ To run on a single node with 8 GPU with DDP, example:
 
 ```
 $ torchrun --standalone --nproc_per_node=8 train.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --wandb_log=True
 ```
 
@@ -63,7 +65,7 @@ To run on 2+ nodes with DDP, example:
 
 ```
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --wandb_log=True
 ```
 
@@ -71,7 +73,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 
 ```
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --wandb_log=True
 ```
 
@@ -114,7 +116,7 @@ Use the script `sample.py` to sample from a model you trained. For example:
 
 ```
 $ python sample.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
     --top_k=200 \
@@ -126,7 +128,7 @@ You can also prompt the model with some text from a file prefixing its path with
 
 ```
 $ python sample.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
     --top_k=200 \
@@ -142,7 +144,7 @@ To run the API with a pretrained model, example:
 
 ```
 $ python sample_api.py \
-    --config="../config/train_allamo_cl100k_base.json" \
+    --config="./config/train_1B.json" \
     --max_new_tokens=10 \
     --temperature=0.7 \
     --top_k=200 \
