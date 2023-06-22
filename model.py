@@ -86,8 +86,8 @@ class Attention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(self.n_head * self.head_size, self.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout) if self.flash else None
-        self.proj_dropout = nn.Dropout(config.dropout)
+        self.attn_dropout = nn.Dropout(config.dropout) if self.flash and config.dropout != 0 else None
+        self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
         self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
 
@@ -120,12 +120,15 @@ class Attention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
+            if self.attn_dropout is not None:
+                att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_size) # re-assemble all head outputs side by side
 
         # output projection
-        y = self.proj_dropout(self.c_proj(y)) # (B, T, nh * hs) -> (B, T, C)
+        y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
+        if self.proj_dropout is not None:
+            y = self.proj_dropout(y)
         return y
 
 
@@ -141,18 +144,18 @@ class FeedForward(nn.Module):
         self.down_proj = nn.Linear(hidden_dim, dim, bias=config.bias)
         self.up_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
         self.act_fn  = nn.SiLU() # SwiGLU activation function
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
 
     def forward(self, x):
         x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        x = self.dropout(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
         return x
         
 class TransformerBlock(nn.Module):
 
-    def __init__(self, layer_id: int, config: AllamoTransformerConfig):
+    def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        self.layer_id = layer_id
         self.attention = Attention(config)
         self.feed_forward = FeedForward(config)
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
@@ -170,6 +173,7 @@ class AllamoTransformer(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.max_seq_len = config.block_size
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
@@ -178,11 +182,11 @@ class AllamoTransformer(nn.Module):
         print(f"AllamoTransformerConfig: {config}")
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
-        self.tok_drop = nn.Dropout(config.dropout)
+        self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(TransformerBlock(layer_id, config))
+            self.layers.append(TransformerBlock(config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -223,10 +227,11 @@ class AllamoTransformer(nn.Module):
 
     def embeddings(self, input_ids, attention_mask):
         b, t = input_ids.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        assert t <= self.max_seq_len, f"Cannot forward sequence of length {t}, block size is only {self.max_seq_len}"
 
         x = self.tok_embeddings(input_ids) # token embeddings of shape (b, t, n_embd)
-        x = self.tok_drop(x)
+        if self.tok_drop is not None:
+            x = self.tok_drop(x)
         for layer in self.layers:
             x = layer(x, attention_mask)
         x = self.norm(x)
@@ -288,8 +293,8 @@ class AllamoTransformer(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            if tokens.size(1) > self.config.block_size:
-                tokens = tokens[:, -self.config.block_size:]
+            if tokens.size(1) > self.max_seq_len:
+                tokens = tokens[:, -self.max_seq_len:]
             # forward the model to get the logits for the tokens
             logits, _ = self(tokens)
             # pluck the logits at the final step and scale by desired temperature

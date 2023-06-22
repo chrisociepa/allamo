@@ -86,6 +86,7 @@ elif config.init_from == 'resume':
     if 'processed_tokens' in config_checkpoint:
         processed_tokens = config_checkpoint['processed_tokens']
     del config_checkpoint
+    del checkpoint_model_args
     model = init_model()
     state_dict = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
     unwanted_prefix = '_orig_mod.'
