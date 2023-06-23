@@ -1,6 +1,7 @@
 """
 Very simple, poor man's data loader
 """
+import gc
 import numpy as np
 import os
 import random
@@ -26,7 +27,7 @@ class SimpleDataLoader:
             self.dataset_train_x_start = 0
         train_data_path = os.path.join(data_dir, 'train.bin')
         if config.in_memory_data:
-            self.train_data = torch.from_numpy(np.fromfile(train_data_path, dtype=np.uint16).astype(np.int64))
+            self.train_data = np.fromfile(train_data_path, dtype=np.uint16)
         else:
             self.train_data = np.memmap(train_data_path, dtype=np.uint16, mode='r')
         self.train_data_size = len(self.train_data)
@@ -34,7 +35,7 @@ class SimpleDataLoader:
         val_data_path = os.path.join(data_dir, 'val.bin')
         if os.path.exists(val_data_path):
             if config.in_memory_data:
-                self.val_data = torch.from_numpy(np.fromfile(val_data_path, dtype=np.uint16).astype(np.int64))
+                self.val_data = np.fromfile(val_data_path, dtype=np.uint16)
             else:
                 self.val_data = np.memmap(val_data_path, dtype=np.uint16, mode='r')
             self.val_data_size = len(self.val_data)
@@ -48,14 +49,8 @@ class SimpleDataLoader:
     def get_splits(self):
         return self.splits
         
-    def __get_sample(self, data, start, end):
-        if self.config.in_memory_data:
-            return data[start:end]
-        else:
-            return torch.from_numpy((data[start:end]).astype(np.int64))
-        
     def get_batch(self, split='train', random_samples=False):
-        if split == 'train' or val_data is None:
+        if split == 'train' or self.val_data is None:
             data = self.train_data
             data_size = self.train_data_size
         else:
@@ -80,8 +75,8 @@ class SimpleDataLoader:
                 self.dataset_train_x_start = last_x_start + self.config.dataset_seq_step_size 
         else:
             ix = torch.randint(data_size - self.config.block_size, (self.batch_size,))
-        x = torch.stack([self.__get_sample(data, i, i+self.config.block_size) for i in ix])
-        y = torch.stack([self.__get_sample(data, i+1, i+1+self.config.block_size) for i in ix])
+        x = torch.stack([torch.from_numpy(data[i:i+self.config.block_size].astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy(data[i+1:i+1+self.config.block_size].astype(np.int64)) for i in ix])
         if 'cuda' in self.config.device:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)
