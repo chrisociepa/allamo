@@ -20,7 +20,10 @@ class SimpleDataLoader:
             self.batch_size = config.batch_size
             
         data_dir = os.path.join(config.data_dir, config.dataset)
-        self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.batch_size-1)
+        if self.config.dataset_seq_train:
+            self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.config.block_size)
+        else:
+            self.dataset_train_x_start = 0
         train_data_path = os.path.join(data_dir, 'train.bin')
         if config.in_memory_data:
             self.train_data = torch.from_numpy(np.fromfile(train_data_path, dtype=np.uint16).astype(np.int64))
