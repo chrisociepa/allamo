@@ -82,7 +82,7 @@ class AllamoConfiguration:
     def load_values(self):
         parser = argparse.ArgumentParser(description='Allamo allows you to train and evaluate LLaMA-based models.')
         parser.add_argument('--config', help='Path to a json configuration file')
-        parser.add_argument('--init_from', type=str, choices=['scratch', 'resume'], help='Start from scratch or resume')
+        parser.add_argument('--init_from', type=str, choices=['scratch', 'resume', 'resume_last'], help='Start from scratch or resume from best or last checkpoint')
         parser.add_argument('--checkpoint_path', type=str, help='Custom input checkpoint path')
         parser.add_argument('--seed', type=int, help='The desired seed for generating random numbers')
         parser.add_argument('--data_dir', type=str, help='Directory where datasets exist')

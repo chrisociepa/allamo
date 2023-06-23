@@ -21,282 +21,304 @@ from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 from simple_data_loader import SimpleDataLoader
 
-config = AllamoConfiguration()
+class AllamoTrainer:
 
-# various inits, derived attributes, I/O setup
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-if ddp:
-    init_process_group(backend=config.backend)
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(config.device)
-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-    seed_offset = ddp_rank # each process gets a different seed
-else:
-    # if not ddp, we are running on a single gpu, and one process
-    master_process = True
-    seed_offset = 0
-
-if master_process:
-    os.makedirs(config.out_dir, exist_ok=True)
-torch.manual_seed(config.seed + seed_offset)
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-# note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-
-# init these up here, can override if init_from='resume' (i.e. from a checkpoint)
-iter_num = 0
-best_train_loss = 1e9
-best_val_loss = 1e9
-processed_tokens = 0
-transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
-def init_model():
-    model_args = {k: getattr(config, k) for k in transformer_config_fields}
-    modelConf = AllamoTransformerConfig(**model_args)
-    model = AllamoTransformer(modelConf)
-    return model
-    
-if config.init_from == 'scratch':
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    model = init_model()
-elif config.init_from == 'resume':
-    print(f"Resuming training from {config.out_dir}")
-    # resume training from a checkpoint
-    ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
-    print(f"Loading checkpoint from {ckpt_dir}...")
-    config_checkpoint = torch.load(os.path.join(ckpt_dir, 'config_ckpt.pt'), map_location='cpu')
-    checkpoint_model_args = config_checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in transformer_config_fields:
-        assert hasattr(config, k), f"Config object does not have {k} field"
-        if hasattr(checkpoint_model_args, k): # useful only for the backward compatibility
-            setattr(config, k, getattr(checkpoint_model_args, k))
-    if 'iter_num' in config_checkpoint:
-        iter_num = config_checkpoint['iter_num']
-    if 'best_train_loss' in config_checkpoint:
-        best_train_loss = config_checkpoint['best_train_loss']
-    if 'best_val_loss' in config_checkpoint:
-        best_val_loss = config_checkpoint['best_val_loss']
-    if 'processed_tokens' in config_checkpoint:
-        processed_tokens = config_checkpoint['processed_tokens']
-    del config_checkpoint
-    del checkpoint_model_args
-    model = init_model()
-    state_dict = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    del state_dict
-model.to(config.device)
-
-# initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
-
-# optimizer
-optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
-if config.init_from == 'resume':
-    optimizer_checkpoint_path = os.path.join(ckpt_dir, 'optimizer_ckpt.pt')
-    if os.path.exists(optimizer_checkpoint_path):
-        optimizer_checkpoint = torch.load(optimizer_checkpoint_path, map_location=config.device)
-        optimizer.load_state_dict(optimizer_checkpoint)
-        del optimizer_checkpoint
-    else:
-        print("Optimizer checkpoint not found. Initializing from scratch")
-
-# compile the model
-if config.compile:
-    print("compiling the model... (takes a ~minute)")
-    try:
-        model = torch.compile(model) # requires PyTorch 2.0
-        print("Model compiled and ready to use")
-    except Exception as err:
-        print(f"Model compile not supported: {err}")
-
-# wrap model into DDP container
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-    
-# gradient_accumulation scheduler
-if config.grad_accum_schedule: 
-    config.grad_accum_max = config.gradient_accumulation_steps
-    config.gradient_accumulation_steps = config.grad_accum_initial
-gradient_accumulation_steps = config.gradient_accumulation_steps
-
-simple_data_loader = SimpleDataLoader(config)
-
-# helps estimate an arbitrarily accurate loss over either split using many batches
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in simple_data_loader.splits:
-        losses = torch.zeros(config.eval_iters)
-        for k in range(config.eval_iters):
-            X, Y = simple_data_loader.get_batch(split, True)
-            with ctx:
-                _, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    if 'val' not in out:
-        out['val'] = out['train']
-    return out
-
-# learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < config.warmup_iters:
-        return config.learning_rate * it / config.warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it >= config.lr_decay_iters:
-        return config.min_lr
-    # 3) in between, use cosine decay down to min learning rate with restarts (optional)
-    if config.lr_decay_reset_iters is not None:
-        decay_ratio = (it % config.lr_decay_reset_iters) / config.lr_decay_reset_iters
-    else:
-        decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return config.min_lr + coeff * (config.learning_rate - config.min_lr)
-
-# grad_accum scheduler (when enabled) 
-def get_grad_accum(it):
-    if config.grad_accum_schedule and it % (config.grad_accum_max_iter/100) == 0:
-        return min(gradient_accumulation_steps + 1, config.grad_accum_max)
-    else:
-        return gradient_accumulation_steps
-
-# logging
-if config.wandb_log and master_process:
-    import wandb
-    wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
-
-# training loop
-X, Y = simple_data_loader.get_batch('train') # fetch the very first batch
-raw_model = model.module if ddp else model # unwrap DDP container if needed
-
-# helps saving checkpoint to a file
-def save_checkpoint(ckpt_file_name):
-    checkpoint = {
-        'model_args': model.config,
-        'iter_num': iter_num,
-        'best_train_loss': best_train_loss,
-        'best_val_loss': best_val_loss,
-        'processed_tokens': processed_tokens,
-        'config': config.__dict__,
-    }
-    ckpt_file_path = os.path.join(config.out_dir, 'config_' + ckpt_file_name)
-    print(f"saving config checkpoint to {ckpt_file_path}")
-    torch.save(checkpoint, ckpt_file_path)
-    
-    ckpt_file_path = os.path.join(config.out_dir, 'model_' + ckpt_file_name)
-    print(f"saving model checkpoint to {ckpt_file_path}")
-    torch.save(raw_model.state_dict(), ckpt_file_path)
-    
-    ckpt_file_path = os.path.join(config.out_dir, 'optimizer_' + ckpt_file_name)
-    print(f"saving optimizer checkpoint to {ckpt_file_path}")
-    torch.save(optimizer.state_dict(), ckpt_file_path)
-    print(f"checkpoint files saved in {config.out_dir}")
-
-
-if config.decay_lr:
-    print(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(iter_num)}")
-else:
-    print(f"Using constant learning rate: {config.learning_rate}")
-
-# sometimes, during script restart, the training process fails to start due to OOM caused by memory fragmentation
-gc.collect()
-torch.cuda.empty_cache()
-
-while iter_num <= config.max_iters:
-
-    # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
-    # determine and set batch_size and gradient_accumulation_steps for this iteration 
-    batch_size = simple_data_loader.update_batch_size(iter_num)
-    gradient_accumulation_steps = get_grad_accum(iter_num)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-    # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % config.eval_interval == 0 and master_process:
-        losses = estimate_loss()
-        total_batch_size = config.block_size * batch_size * gradient_accumulation_steps
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - step {iter_num:,}: train loss {losses['train']:.4f} (best: {best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {best_val_loss:.4f}), BS {total_batch_size:,}, tokens {processed_tokens:,}, DS offset {simple_data_loader.dataset_train_x_start:,}")
-        if config.wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "tokens": processed_tokens,
-                "total_batch_size": total_batch_size,
-                "train/ds_offset": simple_data_loader.dataset_train_x_start
-            })
-        if losses['train'] < best_train_loss:
-            best_train_loss = losses['train']
-        if losses['val'] < best_val_loss:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                save_checkpoint('ckpt.pt')
-        if config.always_save_checkpoint:
-            if iter_num > 0:
-                save_checkpoint('last_eval_ckpt.pt')
-    if iter_num == 0 and config.eval_only:
-        break
-    
-    timer = time.time()
-    # forward backward update, with optional gradient accumulation to simulate larger batch size
-    # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
-        if ddp:
-            # in DDP training we only need to sync gradients at the last micro step.
-            # the official way to do this is with model.no_sync() context manager, but
-            # I really dislike that this bloats the code and forces us to repeat code
-            # looking at the source of that context manager, it just toggles this variable
-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-        with ctx:
-            _, loss = model(X, Y)
-            if gradient_accumulation_steps > 1:
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-
-        # count processed tokens
-        processed_tokens += X.numel()
-
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = simple_data_loader.get_batch('train')
+    def __init__(self, config: AllamoConfiguration, ddp=False):
+        self.config = config
+        self.ddp = ddp
+        self.__init_torch(config)
         
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if config.grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+        self.iter_num = 0
+        self.best_train_loss = 1e9
+        self.best_val_loss = 1e9
+        self.processed_tokens = 0
+        self.__init_training(config)
+        
+        self.simple_data_loader = SimpleDataLoader(config)
+            
+    def __init_torch(self, config: AllamoConfiguration):
+        if self.ddp:
+            init_process_group(backend=config.backend)
+            ddp_rank = int(os.environ['RANK'])
+            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
+            device = f'cuda:{self.ddp_local_rank}'
+            torch.cuda.set_device(config.device)
+            self.master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+            self.seed_offset = ddp_rank # each process gets a different seed
+        else:
+            # if not ddp, we are running on a single gpu, and one process
+            self.master_process = True
+            self.seed_offset = 0
+    
+        if self.master_process:
+            os.makedirs(config.out_dir, exist_ok=True)
+        torch.manual_seed(config.seed + self.seed_offset)
+        torch.cuda.manual_seed(config.seed + self.seed_offset)
+        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+        self.device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
+        self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
+        
+    def __init_training(self, config: AllamoConfiguration):
+        transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
+        
+        checkpoint_name = None
+        if config.init_from == 'resume':
+            checkpoint_name = 'ckpt.pt'
+        elif config.init_from == 'resume_last':
+            checkpoint_name = 'last_eval_ckpt.pt'
+            
+        if checkpoint_name is not None:
+            print(f"Resuming training from {config.out_dir}")
+            # resume training from a checkpoint
+            ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
+            print(f"Loading {checkpoint_name} checkpoint files from {ckpt_dir}...")
+            config_checkpoint = torch.load(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), map_location='cpu')
+            checkpoint_model_args = config_checkpoint['model_args']
+            # force these config attributes to be equal otherwise we can't even resume training
+            # the rest of the attributes (e.g. dropout) can stay as desired from command line
+            for k in transformer_config_fields:
+                assert hasattr(config, k), f"Config object does not have {k} field"
+                if hasattr(checkpoint_model_args, k): # useful only for the backward compatibility
+                    setattr(config, k, getattr(checkpoint_model_args, k))
+            if 'iter_num' in config_checkpoint:
+                self.iter_num = config_checkpoint['iter_num']
+            if 'best_train_loss' in config_checkpoint:
+                self.best_train_loss = config_checkpoint['best_train_loss']
+            if 'best_val_loss' in config_checkpoint:
+                self.best_val_loss = config_checkpoint['best_val_loss']
+            if 'processed_tokens' in config_checkpoint:
+                self.processed_tokens = config_checkpoint['processed_tokens']
+            del config_checkpoint
+            del checkpoint_model_args
+            
+        model_args = {k: getattr(config, k) for k in transformer_config_fields}
+        modelConf = AllamoTransformerConfig(**model_args)
+        model = AllamoTransformer(modelConf)
+        if checkpoint_name is None:
+            print("Initialized a new model from scratch")
+        else:
+            state_dict = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}'), map_location='cpu')
+            unwanted_prefix = '_orig_mod.'
+            for k,v in list(state_dict.items()):
+                if k.startswith(unwanted_prefix):
+                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+            model.load_state_dict(state_dict)
+            del state_dict
+            print("Loaded model from the checkpoint")
+            
+        model.to(config.device)
 
-    # timing and logging
-    if iter_num % config.log_interval == 0 and master_process:
-        dt = time.time() - timer
-        # get loss as float. note: this is a CPU-GPU sync point
-        # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{timestamp} - iter {iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {processed_tokens:,}, lr {lr:.6f}")
-    iter_num += 1
+        # initialize a GradScaler. If enabled=False scaler is a no-op
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
+        
+        # optimizer
+        self.optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), self.device_type)
+        if checkpoint_name is not None:
+            optimizer_checkpoint_path = os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}')
+            if os.path.exists(optimizer_checkpoint_path):
+                optimizer_checkpoint = torch.load(optimizer_checkpoint_path, map_location=config.device)
+                self.optimizer.load_state_dict(optimizer_checkpoint)
+                del optimizer_checkpoint
+            else:
+                print("Optimizer checkpoint file not found. Initializing optimizer from scratch")
+                
+        # compile the model
+        if config.compile:
+            print("compiling the model... (takes a ~minute)")
+            try:
+                model = torch.compile(model) # requires PyTorch 2.0
+                print("Model compiled and ready to use")
+            except Exception as err:
+                print(f"Model compile not supported: {err}")
 
-if ddp:
-    destroy_process_group()
+        # wrap model into DDP container
+        if self.ddp:
+            model = DDP(model, device_ids=[self.ddp_local_rank])
+        self.model = model
+        self.raw_model = model.module if self.ddp else model # unwrap DDP container if needed
+                
+        # gradient_accumulation scheduler
+        if config.grad_accum_schedule: 
+            config.grad_accum_max = config.gradient_accumulation_steps
+            config.gradient_accumulation_steps = config.grad_accum_initial
+        self.gradient_accumulation_steps = config.gradient_accumulation_steps
+        
+        if config.decay_lr:
+            print(f"Cosing decay learning rate enabled. Currect learning rate: {self.get_lr(self.iter_num)}")
+        else:
+            print(f"Using constant learning rate: {config.learning_rate}")
+
+    # helps estimate an arbitrarily accurate loss over either split using many batches
+    @torch.no_grad()
+    def estimate_loss(self):
+        out = {}
+        self.model.eval()
+        for split in self.simple_data_loader.splits:
+            losses = torch.zeros(self.config.eval_iters)
+            for k in range(self.config.eval_iters):
+                X, Y = self.simple_data_loader.get_batch(split, True)
+                with self.ctx:
+                    _, loss = self.model(X, Y)
+                losses[k] = loss.item()
+            out[split] = losses.mean()
+        self.model.train()
+        if 'val' not in out:
+            out['val'] = out['train']
+        return out
+
+    # learning rate decay scheduler (cosine with warmup)
+    def get_lr(self, it):
+        # 1) linear warmup for warmup_iters steps
+        if it < self.config.warmup_iters:
+            return self.config.learning_rate * it / self.config.warmup_iters
+        # 2) if it > lr_decay_iters, return min learning rate
+        if it >= self.config.lr_decay_iters:
+            return self.config.min_lr
+        # 3) in between, use cosine decay down to min learning rate with restarts (optional)
+        if self.config.lr_decay_reset_iters is not None:
+            decay_ratio = (it % self.config.lr_decay_reset_iters) / self.config.lr_decay_reset_iters
+        else:
+            decay_ratio = (it - self.config.warmup_iters) / (self.config.lr_decay_iters - self.config.warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+        return self.config.min_lr + coeff * (self.config.learning_rate - self.config.min_lr)
+
+    # grad_accum scheduler (when enabled) 
+    def get_grad_accum(self, it):
+        if self.config.grad_accum_schedule and it % (self.config.grad_accum_max_iter/100) == 0:
+            return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
+        else:
+            return self.gradient_accumulation_steps
+
+    # helps saving checkpoint to a file
+    def save_checkpoint(self, ckpt_file_name):
+        checkpoint = {
+            'model_args': self.model.config,
+            'iter_num': self.iter_num,
+            'best_train_loss': self.best_train_loss,
+            'best_val_loss': self.best_val_loss,
+            'processed_tokens': self.processed_tokens,
+            'config': self.config.__dict__,
+        }
+        ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
+        print(f"saving config checkpoint to {ckpt_file_path}")
+        torch.save(checkpoint, ckpt_file_path)
+        
+        ckpt_file_path = os.path.join(self.config.out_dir, 'model_' + ckpt_file_name)
+        print(f"saving model checkpoint to {ckpt_file_path}")
+        torch.save(self.raw_model.state_dict(), ckpt_file_path)
+        
+        ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
+        print(f"saving optimizer checkpoint to {ckpt_file_path}")
+        torch.save(self.optimizer.state_dict(), ckpt_file_path)
+        print(f"checkpoint files saved in {config.out_dir}")
+        
+    def train(self):
+        # training loop
+        X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
+
+        while self.iter_num <= self.config.max_iters:
+
+            # determine and set the learning rate for this iteration
+            lr = self.get_lr(self.iter_num) if self.config.decay_lr else self.config.learning_rate
+            # determine and set batch_size and gradient_accumulation_steps for this iteration 
+            micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
+            self.gradient_accumulation_steps = self.get_grad_accum(self.iter_num)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+
+            # evaluate the loss on train/val sets and write checkpoints
+            if self.iter_num % self.config.eval_interval == 0 and self.master_process:
+                losses = self.estimate_loss()
+                total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"{timestamp} - step {self.iter_num:,}: train loss {losses['train']:.4f} (best: {self.best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {self.best_val_loss:.4f}), BS {total_batch_size:,}, tokens {self.processed_tokens:,}, DS offset {self.simple_data_loader.dataset_train_x_start:,}")
+                if self.config.wandb_log:
+                    wandb.log({
+                        "iter": self.iter_num,
+                        "train/loss": losses['train'],
+                        "val/loss": losses['val'],
+                        "lr": lr,
+                        "tokens": self.processed_tokens,
+                        "total_batch_size": total_batch_size,
+                        "train/ds_offset": self.simple_data_loader.dataset_train_x_start
+                    })
+                if losses['train'] < self.best_train_loss:
+                    self.best_train_loss = losses['train']
+                if losses['val'] < self.best_val_loss:
+                    self.best_val_loss = losses['val']
+                    if self.iter_num > 0:
+                        self.save_checkpoint('ckpt.pt')
+                if self.config.always_save_checkpoint:
+                    if self.iter_num > 0:
+                        self.save_checkpoint('last_eval_ckpt.pt')
+            
+            if self.config.eval_only:
+                break
+            
+            timer = time.time()
+            # forward backward update, with optional gradient accumulation to simulate larger batch size
+            # and using the GradScaler if data type is float16
+            for micro_step in range(self.gradient_accumulation_steps):
+                if self.ddp:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    # the official way to do this is with model.no_sync() context manager, but
+                    # I really dislike that this bloats the code and forces us to repeat code
+                    # looking at the source of that context manager, it just toggles this variable
+                    self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
+                with self.ctx:
+                    _, loss = self.model(X, Y)
+                    if self.gradient_accumulation_steps > 1:
+                        loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
+
+                # count processed tokens
+                self.processed_tokens += X.numel()
+
+                # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                X, Y = self.simple_data_loader.get_batch('train')
+                
+                # backward pass, with gradient scaling if training in fp16
+                self.scaler.scale(loss).backward()
+            # clip the gradient
+            if self.config.grad_clip != 0.0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            # step the optimizer and scaler if training in fp16
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            # flush the gradients as soon as we can, no need for this memory anymore
+            self.optimizer.zero_grad(set_to_none=True)
+
+            # timing and logging
+            if self.iter_num % self.config.log_interval == 0 and self.master_process:
+                dt = time.time() - timer
+                # get loss as float. note: this is a CPU-GPU sync point
+                # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
+                lossf = loss.item() * self.gradient_accumulation_steps
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}")
+            self.iter_num += 1
+            
+        print("Training finished!")
+
+if __name__ == '__main__':
+    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+    config = AllamoConfiguration()
+    trainer = AllamoTrainer(config, ddp)
+    
+    # logging
+    if config.wandb_log and trainer.master_process:
+        import wandb
+        wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
+    
+    # clean up after initialization
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    trainer.train()  
+      
+    if ddp:
+        destroy_process_group()
