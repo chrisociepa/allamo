@@ -68,6 +68,10 @@ class AllamoTrainer:
             checkpoint_name = 'ckpt.pt'
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt.pt'
+        else:
+            if os.path.join(config.out_dir, 'config_ckpt.pt') or os.path.join(config.out_dir, 'model_ckpt.pt') or os.path.join(config.out_dir, 'optimizer_ckpt.pt'):
+                print("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
+                exit()
             
         if checkpoint_name is not None:
             print(f"Resuming training from {config.out_dir}")
