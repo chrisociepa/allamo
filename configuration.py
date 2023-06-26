@@ -17,6 +17,7 @@ class AllamoConfiguration:
     data_dir: str = 'data'
     out_dir: str = 'out'
     in_memory_data: bool = False
+    reload_datasets_interval: int = -1
     eval_interval: int = 1000
     log_interval: int = 1
     eval_iters: int = 200
@@ -67,6 +68,7 @@ class AllamoConfiguration:
     device: str = 'cuda' 
     dtype: str = 'float16'
     compile: bool = False
+    compile_mode: str = 'default'
     
     # inference params
     prompt: str = "\n" 
@@ -88,6 +90,7 @@ class AllamoConfiguration:
         parser.add_argument('--data_dir', type=str, help='Directory where datasets exist')
         parser.add_argument('--out_dir', type=str, help='Output directory for checkpoints')
         parser.add_argument('--in_memory_data', type=bool, help='Store data in memory')
+        parser.add_argument('--reload_datasets_interval', type=int, help='Number of iterations when datasets are reloaded')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
@@ -136,6 +139,7 @@ class AllamoConfiguration:
         parser.add_argument('--device', type=str, help='"cpu", "cuda", "cuda:0", "cuda:1" etc., or try "mps" on macbooks')
         parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'float16'], help='Type of tensor to be used in the model')
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
+        parser.add_argument('--compile_mode', type=str, choices=['default', 'reduce-overhead', 'max-autotune'], help='Specifies what the PyTorch compiler should be optimizing while compiling')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')

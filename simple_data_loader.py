@@ -5,6 +5,7 @@ import gc
 import numpy as np
 import os
 import random
+import time
 import torch
 from configuration import AllamoConfiguration
 
@@ -20,31 +21,47 @@ class SimpleDataLoader:
         else:
             self.batch_size = config.batch_size
             
-        data_dir = os.path.join(config.data_dir, config.dataset)
         if self.config.dataset_seq_train:
             self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.config.block_size)
         else:
             self.dataset_train_x_start = 0
+        self.__load_datasets()
+        print(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
+        if self.val_data is None:
+            self.splits = ['train']
+            print(f"Val dataset is missing. Testing only on the train dataset")
+        else:
+            self.splits = ['train', 'val']
+            print(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
+            
+    def __load_datasets(self):
+        data_dir = os.path.join(self.config.data_dir, self.config.dataset)
         train_data_path = os.path.join(data_dir, 'train.bin')
-        if config.in_memory_data:
+        if self.config.in_memory_data:
             self.train_data = np.fromfile(train_data_path, dtype=np.uint16)
         else:
             self.train_data = np.memmap(train_data_path, dtype=np.uint16, mode='r')
         self.train_data_size = len(self.train_data)
-        print(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
+        
         val_data_path = os.path.join(data_dir, 'val.bin')
         if os.path.exists(val_data_path):
-            if config.in_memory_data:
+            if self.config.in_memory_data:
                 self.val_data = np.fromfile(val_data_path, dtype=np.uint16)
             else:
                 self.val_data = np.memmap(val_data_path, dtype=np.uint16, mode='r')
             self.val_data_size = len(self.val_data)
-            self.splits = ['train', 'val']
-            print(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
         else:
             self.val_data = None
-            self.splits = ['train']
-            print(f"Val dataset is missing. Testing only on the train dataset")
+            
+    def reload_datasets(self):
+        timer = time.time()
+        del self.train_data
+        if self.val_data is not None:
+            del self.val_data
+        
+        self.__load_datasets()
+        dt = time.time() - timer
+        print(f"Datasets reloaded in {dt*1000:.2f}ms")
             
     def get_splits(self):
         return self.splits

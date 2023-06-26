@@ -69,7 +69,9 @@ class AllamoTrainer:
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt.pt'
         else:
-            if os.path.join(config.out_dir, 'config_ckpt.pt') or os.path.join(config.out_dir, 'model_ckpt.pt') or os.path.join(config.out_dir, 'optimizer_ckpt.pt'):
+            if os.path.exists(os.path.join(config.out_dir, 'config_ckpt.pt')) \
+                or os.path.exists(os.path.join(config.out_dir, 'model_ckpt.pt')) \
+                or os.path.exists(os.path.join(config.out_dir, 'optimizer_ckpt.pt')):
                 print("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
             
@@ -128,11 +130,11 @@ class AllamoTrainer:
             else:
                 print("Optimizer checkpoint file not found. Initializing optimizer from scratch")
                 
-        # compile the model
+        # compile the model - requires PyTorch 2.0
         if config.compile:
             print("compiling the model... (takes a ~minute)")
             try:
-                model = torch.compile(model) # requires PyTorch 2.0
+                model = torch.compile(model, mode=config.compile_mode)
                 print("Model compiled and ready to use")
             except Exception as err:
                 print(f"Model compile not supported: {err}")
@@ -261,6 +263,12 @@ class AllamoTrainer:
             
             if self.config.eval_only:
                 break
+            
+            # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
+            if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:
+                self.simple_data_loader.reload_datasets()
+                gc.collect()
+                torch.cuda.empty_cache()
             
             timer = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
