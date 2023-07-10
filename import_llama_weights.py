@@ -92,13 +92,17 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
         param_count += v.numel()
     print(f"{timestamp()} - {param_count} params imported to the model")
         
-    checkpoint = {
-        'model': model_sd,
+    ckpt_file_name = 'import_ckpt.pt'
+    config_checkpoint = {
         'model_args': config
     }
-    ckpt_file_path = os.path.join(output_model_path, 'import_ckpt.pt')
-    torch.save(checkpoint, ckpt_file_path)
-    print(f"{timestamp()} - checkpoint saved in {ckpt_file_path}")
+    ckpt_file_path = os.path.join(output_model_path, 'config_' + ckpt_file_name)
+    print(f"saving config checkpoint to {ckpt_file_path}")
+    torch.save(config_checkpoint, ckpt_file_path)
+    ckpt_file_path = os.path.join(output_model_path, 'model_' + ckpt_file_name)
+    print(f"saving model checkpoint to {ckpt_file_path}")
+    torch.save(model_sd, ckpt_file_path)
+    print(f"{timestamp()} - checkpoint files saved in {output_model_path}")
     
 def import_tokenizer(input_tokenizer_path, output_model_path, max_block_size):
     print(f"{timestamp()} - start importing tokenizer")
