@@ -46,7 +46,6 @@ class AllamoSampler:
         self.model = model
         
     def __load_tokenizer(self, config: AllamoConfiguration, config_checkpoint):
-        vocab_size = config.vocab_size
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
         custom_tokenizer_path = config.custom_tokenizer_path
         llama_tokenizer_path = config.llama_tokenizer_path
@@ -57,14 +56,12 @@ class AllamoSampler:
                 print(f"Loading meta from {meta_path}...")
                 with open(meta_path, 'rb') as f:
                     meta = pickle.load(f)
-                vocab_size = meta['vocab_size']
                 if 'tiktoken_tokenizer_name' in meta and meta['tiktoken_tokenizer_name']:
                     tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
                 if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
                     custom_tokenizer_path = meta['custom_tokenizer_path']
                 if 'llama_tokenizer_path' in meta and meta['llama_tokenizer_path']:
                     llama_tokenizer_path = meta['llama_tokenizer_path']
-        print(f"Vocab_size: {vocab_size}")
         if custom_tokenizer_path is not None:
             from transformers import PreTrainedTokenizerFast
             tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
@@ -79,6 +76,8 @@ class AllamoSampler:
             print(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
         else:
             raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
+        # ensure that the tokenizer and model vocabulary sizes are equal
+        assert len(tokenizer) == self.model.config.vocab_size
         self.tokenizer = tokenizer
     
     def tokenize_prompt(self, text: str):
