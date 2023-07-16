@@ -149,7 +149,15 @@ class AllamoTrainer:
         if config.grad_accum_schedule: 
             config.grad_accum_max = config.gradient_accumulation_steps
             config.gradient_accumulation_steps = config.grad_accum_initial
+            print(f"Gradient accumulation scheduler enabled. Current gradient accumulation steps: {config.gradient_accumulation_steps}")
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
+        
+        # layers_multiplicator scheduler
+        if config.layers_multiplicator_schedule: 
+            config.layers_multiplicator_max = config.layers_multiplicator
+            config.layers_multiplicator = config.layers_multiplicator_initial
+            print(f"Layers multiplicator scheduler enabled. Current layers multiplicator: {config.layers_multiplicator}")
+        self.layers_multiplicator = config.layers_multiplicator
         
         if config.decay_lr:
             print(f"Cosing decay learning rate enabled. Currect learning rate: {self.get_lr(self.iter_num)}")
@@ -166,7 +174,7 @@ class AllamoTrainer:
             for k in range(self.config.eval_iters):
                 X, Y = self.simple_data_loader.get_batch(split, True)
                 with self.ctx:
-                    _, loss = self.model(X, Y)
+                    _, loss = self.model(X, Y, layers_multiplicator=self.layers_multiplicator)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         self.model.train()
@@ -193,10 +201,19 @@ class AllamoTrainer:
 
     # grad_accum scheduler (when enabled) 
     def get_grad_accum(self, it):
-        if self.config.grad_accum_schedule and it % (self.config.grad_accum_max_iter/100) == 0:
+        if self.gradient_accumulation_steps < self.config.grad_accum_max and \
+            self.config.grad_accum_schedule and it % (self.config.grad_accum_max_iter/100) == 0:
             return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
         else:
             return self.gradient_accumulation_steps
+            
+    # layers_multiplicator scheduler (when enabled) 
+    def get_layers_multiplicator(self, iter_num):
+        if self.layers_multiplicator < self.config.layers_multiplicator_max and \
+            iter_num >= self.config.layers_multiplicator_warmup_iters and \
+            iter_num % (self.config.layers_multiplicator_max_iter/100) == 0:
+            return min(self.layers_multiplicator + 1, self.config.layers_multiplicator_max)
+        return self.layers_multiplicator
 
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name):
@@ -224,16 +241,18 @@ class AllamoTrainer:
     def train(self):
         # training loop
         X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
-
+        
         while self.iter_num <= self.config.max_iters:
 
-            # determine and set the learning rate for this iteration
+            # determine and set layers multiplicator and learning rate for this iteration
+            self.layers_multiplicator = self.get_layers_multiplicator(self.iter_num) if self.config.layers_multiplicator_schedule else self.config.layers_multiplicator
             lr = self.get_lr(self.iter_num) if self.config.decay_lr else self.config.learning_rate
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+                
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
             self.gradient_accumulation_steps = self.get_grad_accum(self.iter_num)
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
 
             # evaluate the loss on train/val sets and write checkpoints
             if self.iter_num % self.config.eval_interval == 0 and self.master_process:
@@ -246,6 +265,7 @@ class AllamoTrainer:
                         "iter": self.iter_num,
                         "train/loss": losses['train'],
                         "val/loss": losses['val'],
+                        "lm": self.layers_multiplicator,
                         "lr": lr,
                         "tokens": self.processed_tokens,
                         "total_batch_size": total_batch_size,
@@ -281,7 +301,7 @@ class AllamoTrainer:
                     # looking at the source of that context manager, it just toggles this variable
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
-                    _, loss = self.model(X, Y)
+                    _, loss = self.model(X, Y, layers_multiplicator=self.layers_multiplicator)
                     if self.gradient_accumulation_steps > 1:
                         loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
 
@@ -310,7 +330,7 @@ class AllamoTrainer:
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
                 lossf = loss.item() * self.gradient_accumulation_steps
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}")
+                print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, lm {self.layers_multiplicator}")
             self.iter_num += 1
             
         print("Training finished!")

@@ -4,14 +4,15 @@ import requests
 
 API_URL = "http://localhost:5000/completions"
 
-def get_completion(prompt, num_samples, max_new_tokens, temperature, top_k):
+def get_completion(prompt, num_samples, max_new_tokens, temperature, top_k, layers_multiplicator):
     headers = {"Content-Type": "application/json"}
     data = {
         "prompt": prompt,
         "num_samples": num_samples,
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
-        "top_k": top_k
+        "top_k": top_k,
+        "layers_multiplicator": layers_multiplicator
     }
     response = requests.post(API_URL, headers=headers, json=data)
     response.raise_for_status()
@@ -24,7 +25,8 @@ iface = gr.Interface(
         gr.inputs.Number(default=1, label="Number of samples to generate"), \
         gr.inputs.Number(default=50, label="Number of tokens to generate in each sample"), \
         gr.Slider(0.1, 1.9, step=0.1, value=0.8, label="Temperature value for text generation"), \
-        gr.inputs.Number(default=200, label="Top k most likely tokens to be retained during text generation") \
+        gr.inputs.Number(default=200, label="Top k most likely tokens to be retained during text generation"), \
+        gr.inputs.Number(default=0, label="Override the layers multiplicator") \
     ],
     outputs="text",
     title="Text Completion with Allamo",

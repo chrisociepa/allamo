@@ -89,23 +89,23 @@ class AllamoSampler:
         prompt_tokens = torch.unsqueeze(prompt_tokens, 0)
         return prompt_tokens
         
-    def generate_embeddings(self, text: str):
+    def generate_embeddings(self, text: str, layers_multiplicator: int):
         if text:
             with torch.no_grad():
                 with self.ctx:
                     prompt_tokens = self.encode_prompt(text)
-                    embeddings = self.model.generate_embeddings(prompt_tokens)
+                    embeddings = self.model.generate_embeddings(prompt_tokens, layers_multiplicator)
                     embeddings = torch.squeeze(embeddings[:, [-1], :]) # use only the last position
                     return embeddings.tolist()
         return []
                 
-    def generate_completions(self, text: str, samples: int, new_tokens: int, temperature: float, top_k: int):
+    def generate_completions(self, text: str, samples: int, new_tokens: int, temperature: float, top_k: int, layers_multiplicator: int):
         result = []
         with torch.no_grad():
             with self.ctx:
                 prompt_tokens = self.encode_prompt(text)
                 for k in range(samples):
-                    y = self.model.generate(prompt_tokens, new_tokens, temperature=temperature, top_k=top_k)
+                    y = self.model.generate(prompt_tokens, new_tokens, temperature=temperature, top_k=top_k, layers_multiplicator=layers_multiplicator)
                     result.append(self.tokenizer.decode(y[0].tolist()).strip())
         return result
 
@@ -119,7 +119,7 @@ if __name__ == '__main__':
         with open(config.prompt[5:], 'r', encoding='utf-8') as f:
             config.prompt = f.read()
             
-    completions = sampler.generate_completions(config.prompt, config.num_samples, config.max_new_tokens, temperature=config.temperature, top_k=config.top_k)
+    completions = sampler.generate_completions(config.prompt, config.num_samples, config.max_new_tokens, temperature=config.temperature, top_k=config.top_k, layers_multiplicator=config.layers_multiplicator)
     print("Completions:")
     for completion in completions:
         print(completion)

@@ -16,7 +16,7 @@ class SimpleDataLoader:
         self.epoch = 0
         
         if config.batch_size_schedule: 
-            self.batch_size_max = config.batch_size
+            self.config.batch_size_max = config.batch_size
             self.batch_size = config.batch_size_initial
         else:
             self.batch_size = config.batch_size
@@ -102,7 +102,7 @@ class SimpleDataLoader:
         return x, y
         
     def update_batch_size(self, iter_num):
-        if self.config.batch_size_schedule:
+        if self.config.batch_size_schedule and self.batch_size < self.config.batch_size_max:
             self.batch_size = min(self.batch_size + 1, self.config.batch_size_max) if iter_num % (self.config.batch_size_max_iter/100) == 0 else self.batch_size 
         return self.batch_size
         
