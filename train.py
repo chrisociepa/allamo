@@ -85,8 +85,7 @@ class AllamoTrainer:
             # force these config attributes to be equal otherwise we can't even resume training
             # the rest of the attributes (e.g. dropout) can stay as desired from command line
             for k in transformer_config_fields:
-                assert hasattr(config, k), f"Config object does not have {k} field"
-                if hasattr(checkpoint_model_args, k): # useful only for the backward compatibility
+                if hasattr(config, k) and hasattr(checkpoint_model_args, k):
                     setattr(config, k, getattr(checkpoint_model_args, k))
             if 'iter_num' in config_checkpoint:
                 self.iter_num = config_checkpoint['iter_num']
@@ -99,7 +98,7 @@ class AllamoTrainer:
             del config_checkpoint
             del checkpoint_model_args
             
-        model_args = {k: getattr(config, k) for k in transformer_config_fields}
+        model_args = {k: getattr(config, k) for k in transformer_config_fields if hasattr(config, k)}
         modelConf = AllamoTransformerConfig(**model_args)
         model = AllamoTransformer(modelConf)
         if checkpoint_name is None:
