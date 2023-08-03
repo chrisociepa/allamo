@@ -25,6 +25,7 @@ class AllamoTransformerConfig:
     bias: bool = True # True: bias in Linears. False: a bit better and faster
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
+    flash_attention_version: int = 0
 
 class RMSNorm(torch.nn.Module):
     """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
@@ -76,9 +77,7 @@ class Attention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        
-        # Flash Attention is supported only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash_attention_version = config.flash_attention_version
         
         # key, query, value projections for all heads
         self.q_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
@@ -87,33 +86,41 @@ class Attention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(self.n_head * self.head_size, self.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout) if self.flash and config.dropout != 0 else None
+        self.attn_dropout = nn.Dropout(config.dropout) if self.flash_attention_version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
         self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
 
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+        if self.flash_attention_version == 0:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor]):
+    def forward(self, q_x: torch.Tensor, kv_x: Optional[torch.Tensor] = None):
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
         # C  | embeddings size
         # hs | head size
         # nh | number of heads
-        B, T, C = x.size()
+        B, T, C = q_x.size()
         
-        q = self.q_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        k = self.k_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = self.v_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        if kv_x is None:
+            kv_x = q_x # self attention
+        
+        q = self.q_proj(q_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        k = self.k_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = self.v_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
         q, k = self.rotary_emb(q, k)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
+        if self.flash_attention_version == 2:
+            # Flash Attention 2 requires (B, T, nh, hs)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True).transpose(1, 2)
+        elif self.flash_attention_version == 1:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
@@ -153,7 +160,7 @@ class FeedForward(nn.Module):
             x = self.dropout(x)
         return x
         
-class TransformerBlock(nn.Module):
+class SelfAttentionBlock(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
@@ -162,8 +169,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor]):
-        x = x + self.attention(self.attention_norm(x), attention_mask)
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.attention_norm(x))
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -173,13 +180,13 @@ class AllamoTransformer(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
+        config.flash_attention_version = self.__detect_flash_attention_version()
         self.config = config
         self.max_seq_len = config.block_size
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
             print(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
-            
         print(f"AllamoTransformerConfig: {config}")
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
@@ -187,7 +194,7 @@ class AllamoTransformer(nn.Module):
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(TransformerBlock(config))
+            self.layers.append(SelfAttentionBlock(config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -203,6 +210,21 @@ class AllamoTransformer(nn.Module):
         model_params /= 1e6
         model_bytes /= 1024**2
         print(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
+
+    def __detect_flash_attention_version(self):
+        try:
+            from flash_attn import flash_attn_func
+        except ImportError:
+            print("Flash Attention 2 is not installed.")
+        else:
+            print("Using Flash Attention 2")
+            return 2
+        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            print("Using Flash Attention 1")
+            return 1
+        else:
+            print("WARNING: using slow attention")
+            return 0
 
     def estimate_size(self):
         """
@@ -226,7 +248,12 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def embeddings(self, input_ids, attention_mask, layers_multiplicator=None):
+    def apply_layers(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def embeddings(self, input_ids, layers_multiplicator=None):
         b, t = input_ids.size()
         assert t <= self.max_seq_len, f"Cannot forward sequence of length {t}, block size is only {self.max_seq_len}"
 
@@ -237,11 +264,9 @@ class AllamoTransformer(nn.Module):
         layers_multiplicator = layers_multiplicator if layers_multiplicator is not None and layers_multiplicator >= 1 else self.config.layers_multiplicator
         if layers_multiplicator > 1:
             for m in range(layers_multiplicator):
-                for layer in self.layers:
-                    x = layer(x, attention_mask)
+                x = self.apply_layers(x)
         else:
-            for layer in self.layers:
-                x = layer(x, attention_mask)
+            x = self.apply_layers(x)
         
         x = self.norm(x)
         return x
@@ -249,11 +274,10 @@ class AllamoTransformer(nn.Module):
     def forward(self, 
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
-        attention_mask: Optional[torch.Tensor] = None, 
         ignore_index: Optional[int] = -1,
         layers_multiplicator: Optional[int] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        final_embeddings = self.embeddings(input_ids, attention_mask, layers_multiplicator)
+        final_embeddings = self.embeddings(input_ids, layers_multiplicator)
         if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
