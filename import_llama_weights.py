@@ -9,6 +9,8 @@ import torch
 import shutil
 from model import AllamoTransformerConfig, AllamoTransformer
 
+DEFAULT_BLOCK_SIZE = 4096
+
 def timestamp():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -29,7 +31,7 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     params = read_json(os.path.join(input_base_path, "params.json"))
     
     config = AllamoTransformerConfig()
-    config.block_size = min(max_block_size, 2048) if max_block_size else 2048
+    config.block_size = min(max_block_size, DEFAULT_BLOCK_SIZE) if max_block_size else DEFAULT_BLOCK_SIZE
     config.vocab_size = 32000
     config.n_layer = min(max_num_layers, params["n_layers"]) if max_num_layers else params["n_layers"]
     config.n_head = params["n_heads"]
@@ -106,7 +108,7 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     
 def import_tokenizer(input_tokenizer_path, output_model_path, max_block_size):
     print(f"{timestamp()} - start importing tokenizer")
-    model_max_length = min(max_block_size, 2048) if max_block_size else 2048
+    model_max_length = min(max_block_size, DEFAULT_BLOCK_SIZE) if max_block_size else DEFAULT_BLOCK_SIZE
     write_json({}, os.path.join(output_model_path, "special_tokens_map.json"))
     write_json(
         {
