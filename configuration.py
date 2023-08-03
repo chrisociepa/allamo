@@ -45,12 +45,12 @@ class AllamoConfiguration:
     grad_accum_max_iter: int = 2000
     grad_accum_schedule: bool = False
     grad_accum_max: int = 8
-    layers_multiplicator_warmup_iters: int = 1000
-    layers_multiplicator_initial: int = 1
-    layers_multiplicator_max_iter: int = 11000
-    layers_multiplicator_max: int = 40
-    layers_multiplicator_schedule: bool = False
-    layers_multiplicator: int = 1
+    layers_iters_warmup_iters: int = 1000
+    layers_iters_initial: int = 1
+    layers_iters_max_iter: int = 11000
+    layers_iters_max: int = 40
+    layers_iters_schedule: bool = False
+    layers_iters: int = 1
     n_layer: int = 12
     n_head: int = 12
     head_size: int = 64
@@ -123,11 +123,11 @@ class AllamoConfiguration:
         parser.add_argument('--grad_accum_initial', type=int, help='Initial gradient_accumulation_steps value')
         parser.add_argument('--grad_accum_max_iter', type=int, help='Number of iterations to reach maximum gradient_accumulation_steps value')
         parser.add_argument('--grad_accum_schedule', type=bool, help='Enable linear gradient_accumulation_steps scheduler')
-        parser.add_argument('--layers_multiplicator_warmup_iters', type=int, help='Scheduler will start after the layers_multiplicator_warmup_iters iterations')
-        parser.add_argument('--layers_multiplicator_initial', type=int, help='Initial layers_multiplicator value')
-        parser.add_argument('--layers_multiplicator_max_iter', type=int, help='Number of iterations to reach maximum layers_multiplicator value')
-        parser.add_argument('--layers_multiplicator_schedule', type=bool, help='Enable linear layers_multiplicator scheduler')
-        parser.add_argument('--layers_multiplicator', type=int, help='Layers multiplicator')
+        parser.add_argument('--layers_iters_warmup_iters', type=int, help='Scheduler will start after layers_iters_warmup_iters training iterations')
+        parser.add_argument('--layers_iters_initial', type=int, help='Initial layers_iters value')
+        parser.add_argument('--layers_iters_max_iter', type=int, help='Number of training iterations to reach maximum layers_iters value')
+        parser.add_argument('--layers_iters_schedule', type=bool, help='Enable linear layers_iters scheduler')
+        parser.add_argument('--layers_iters', type=int, help='Layers iterations')
         parser.add_argument('--n_layer', type=int, help='Number of layers')
         parser.add_argument('--n_head', type=int, help='Number of heads')
         parser.add_argument('--head_size', type=int, help='Often calculated as n_embd/n_head')

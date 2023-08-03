@@ -17,7 +17,7 @@ class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
     residual_attention: bool = False
-    layers_multiplicator: int = 1
+    layers_iters: int = 1
     n_layer: int = 12
     head_size: Union[None, int] = None
     n_head: int = 12
@@ -267,12 +267,15 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def get_layers_iters(self, custom_layers_iters):
+        return max(1, custom_layers_iters if custom_layers_iters is not None and custom_layers_iters >= 1 else self.config.layers_iters)
+
     def apply_layers(self, x):
         for layer in self.layers:
             x = layer(x)
         return x
 
-    def embeddings(self, input_ids, layers_multiplicator=None):
+    def embeddings(self, input_ids, custom_layers_iters=None):
         b, t = input_ids.size()
         assert t <= self.max_seq_len, f"Cannot forward sequence of length {t}, block size is only {self.max_seq_len}"
 
@@ -280,8 +283,7 @@ class AllamoTransformer(nn.Module):
         if self.tok_drop is not None:
             x = self.tok_drop(x)
             
-        layers_multiplicator = max(1, layers_multiplicator if layers_multiplicator is not None and layers_multiplicator >= 1 else self.config.layers_multiplicator)
-        for m in range(layers_multiplicator):
+        for m in range(self.get_layers_iters(custom_layers_iters)):
             if self.residual_attention is None:
                 x = self.apply_layers(x)
             else:
@@ -294,9 +296,9 @@ class AllamoTransformer(nn.Module):
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
         ignore_index: Optional[int] = -1,
-        layers_multiplicator: Optional[int] = None
+        custom_layers_iters: Optional[int] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        final_embeddings = self.embeddings(input_ids, layers_multiplicator)
+        final_embeddings = self.embeddings(input_ids, custom_layers_iters)
         if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
@@ -334,11 +336,11 @@ class AllamoTransformer(nn.Module):
         return optimizer
         
     @torch.no_grad()
-    def generate_embeddings(self, tokens, layers_multiplicator=None):
-        return self.embeddings(tokens, layers_multiplicator=layers_multiplicator)
+    def generate_embeddings(self, tokens, custom_layers_iters=None):
+        return self.embeddings(tokens, custom_layers_iters=custom_layers_iters)
 
     @torch.no_grad()
-    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None, layers_multiplicator=None):
+    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None, custom_layers_iters=None):
         """
         Take a conditioning sequence of tokens (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -349,7 +351,7 @@ class AllamoTransformer(nn.Module):
             if tokens.size(1) > self.max_seq_len:
                 tokens = tokens[:, -self.max_seq_len:]
             # forward the model to get the logits for the tokens
-            logits, _ = self(tokens, layers_multiplicator=layers_multiplicator)
+            logits, _ = self(tokens, custom_layers_iters=custom_layers_iters)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
