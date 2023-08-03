@@ -59,6 +59,7 @@ class AllamoConfiguration:
     bias: bool = False 
     multiple_of: int = 256
     norm_eps: float = 1e-5
+    residual_attention: bool = False
     learning_rate: float = 6e-4
     max_iters: int = 600000
     weight_decay: float = 1e-1
@@ -135,6 +136,7 @@ class AllamoConfiguration:
         parser.add_argument('--bias', type=bool, help='Enable bias globally. Helpful in finetuning process')
         parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
+        parser.add_argument('--residual_attention', type=bool, help='Enable residual attention')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
         parser.add_argument('--weight_decay', type=float, help='Max learning rate')

@@ -16,6 +16,7 @@ from torch.nn import functional as F
 class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
+    residual_attention: bool = False
     layers_multiplicator: int = 1
     n_layer: int = 12
     head_size: Union[None, int] = None
@@ -174,6 +175,22 @@ class SelfAttentionBlock(nn.Module):
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
+class ResidualAttentionBlock(nn.Module):
+
+    def __init__(self, config: AllamoTransformerConfig):
+        super().__init__()
+        self.attention = Attention(config)
+        self.feed_forward = FeedForward(config)
+        self.q_attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
+        self.kv_attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
+        self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
+
+    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor):
+        # add kv_x instead of q_x as in opposite to the cross attention block
+        x = kv_x + self.attention(self.q_attention_norm(q_x), self.kv_attention_norm(kv_x))
+        x = x + self.feed_forward(self.ffn_norm(x))
+        return x
+
 class AllamoTransformer(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
@@ -195,6 +212,8 @@ class AllamoTransformer(nn.Module):
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
             self.layers.append(SelfAttentionBlock(config))
+        
+        self.residual_attention = ResidualAttentionBlock(config) if self.config.residual_attention else None
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -261,12 +280,12 @@ class AllamoTransformer(nn.Module):
         if self.tok_drop is not None:
             x = self.tok_drop(x)
             
-        layers_multiplicator = layers_multiplicator if layers_multiplicator is not None and layers_multiplicator >= 1 else self.config.layers_multiplicator
-        if layers_multiplicator > 1:
-            for m in range(layers_multiplicator):
+        layers_multiplicator = max(1, layers_multiplicator if layers_multiplicator is not None and layers_multiplicator >= 1 else self.config.layers_multiplicator)
+        for m in range(layers_multiplicator):
+            if self.residual_attention is None:
                 x = self.apply_layers(x)
-        else:
-            x = self.apply_layers(x)
+            else:
+                x = self.residual_attention(x, self.apply_layers(x))
         
         x = self.norm(x)
         return x
