@@ -70,6 +70,25 @@ class RotaryEmbedding(torch.nn.Module):
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
+class FeedForward(nn.Module):
+
+    def __init__(self, config: AllamoTransformerConfig):
+        super().__init__()
+        hidden_dim = int(2 * (4 * config.n_embd) / 3)
+        hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+        
+        self.gate_proj = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.down_proj = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
+        self.up_proj = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.act_fn  = nn.SiLU() # SwiGLU activation function
+        self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
+
+    def forward(self, x):
+        x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return x
+
 class Attention(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
@@ -139,27 +158,6 @@ class Attention(nn.Module):
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
         return y
-
-
-class FeedForward(nn.Module):
-
-    def __init__(self, config: AllamoTransformerConfig):
-        super().__init__()
-        dim = config.n_embd
-        hidden_dim = int(2 * (4 * config.n_embd) / 3)
-        hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
-        
-        self.gate_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=config.bias)
-        self.up_proj = nn.Linear(dim, hidden_dim, bias=config.bias)
-        self.act_fn  = nn.SiLU() # SwiGLU activation function
-        self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
-
-    def forward(self, x):
-        x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        if self.dropout is not None:
-            x = self.dropout(x)
-        return x
         
 class SelfAttentionBlock(nn.Module):
 
@@ -211,9 +209,7 @@ class AllamoTransformer(nn.Module):
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(SelfAttentionBlock(config))
-        
-        self.residual_attention = ResidualAttentionBlock(config) if self.config.residual_attention else None
+            self.layers.append(ResidualAttentionBlock(config) if self.config.residual_attention else SelfAttentionBlock(config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -266,39 +262,47 @@ class AllamoTransformer(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def get_layers_iters(self, custom_layers_iters):
-        return max(1, custom_layers_iters if custom_layers_iters is not None and custom_layers_iters >= 1 else self.config.layers_iters)
-
-    def apply_layers(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-    def embeddings(self, input_ids, custom_layers_iters=None):
-        b, t = input_ids.size()
+            
+    def token_embeddings(self, input_ids):
+        _, t = input_ids.size()
         assert t <= self.max_seq_len, f"Cannot forward sequence of length {t}, block size is only {self.max_seq_len}"
 
         x = self.tok_embeddings(input_ids) # token embeddings of shape (b, t, n_embd)
         if self.tok_drop is not None:
             x = self.tok_drop(x)
-            
-        for m in range(self.get_layers_iters(custom_layers_iters)):
-            if self.residual_attention is None:
-                x = self.apply_layers(x)
+        return x
+
+    def get_layers_iters(self, custom_layers_iters):
+        layers_iters = self.config.layers_iters
+        if custom_layers_iters is not None and custom_layers_iters >= 1:
+            layers_iters = custom_layers_iters
+        return max(1, layers_iters)
+
+    def apply_layers(self, x, custom_layers_iters=None):
+        for _ in range(self.get_layers_iters(custom_layers_iters)):
+            if self.config.residual_attention:
+                residual = x
+                for layer in self.layers:
+                    x = layer(residual, x)
             else:
-                x = self.residual_attention(x, self.apply_layers(x))
-        
-        x = self.norm(x)
+                for layer in self.layers:
+                    x = layer(x)
         return x
 
     def forward(self, 
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
         ignore_index: Optional[int] = -1,
-        custom_layers_iters: Optional[int] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        final_embeddings = self.embeddings(input_ids, custom_layers_iters)
+        custom_layers_iters: Optional[int] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
+        if inputs_embeds is not None:
+            b, t, n_embd = inputs_embeds.size()
+            assert t <= self.max_seq_len, f"Cannot forward embeddings of length {t}, block size is only {self.max_seq_len}"
+        else:
+            inputs_embeds = self.token_embeddings(input_ids)
+        hidden_states = self.apply_layers(inputs_embeds, custom_layers_iters)
+        final_embeddings = self.norm(hidden_states)
         if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
@@ -307,7 +311,7 @@ class AllamoTransformer(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
-        return logits, loss
+        return logits, loss, hidden_states
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
@@ -337,7 +341,10 @@ class AllamoTransformer(nn.Module):
         
     @torch.no_grad()
     def generate_embeddings(self, tokens, custom_layers_iters=None):
-        return self.embeddings(tokens, custom_layers_iters=custom_layers_iters)
+        x = self.token_embeddings(tokens)
+        x = self.apply_layers(x, custom_layers_iters)
+        x = self.norm(x)
+        return x
 
     @torch.no_grad()
     def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None, custom_layers_iters=None):
@@ -351,7 +358,7 @@ class AllamoTransformer(nn.Module):
             if tokens.size(1) > self.max_seq_len:
                 tokens = tokens[:, -self.max_seq_len:]
             # forward the model to get the logits for the tokens
-            logits, _ = self(tokens, custom_layers_iters=custom_layers_iters)
+            logits = self(tokens, custom_layers_iters=custom_layers_iters)[0]
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

@@ -112,7 +112,6 @@ class AllamoTrainer:
             model.load_state_dict(state_dict)
             del state_dict
             print("Loaded model from the checkpoint")
-            
         model.to(config.device)
 
         # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -173,7 +172,7 @@ class AllamoTrainer:
             for k in range(self.config.eval_iters):
                 X, Y = self.simple_data_loader.get_batch(split, True)
                 with self.ctx:
-                    _, loss = self.model(X, Y, custom_layers_iters=self.layers_iters)
+                    _, loss, _ = self.model(X, Y, custom_layers_iters=self.layers_iters)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         self.model.train()
@@ -292,26 +291,31 @@ class AllamoTrainer:
             timer = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             # and using the GradScaler if data type is float16
+            micro_steps = self.gradient_accumulation_steps * self.layers_iters
             for micro_step in range(self.gradient_accumulation_steps):
-                if self.ddp:
-                    # in DDP training we only need to sync gradients at the last micro step.
-                    # the official way to do this is with model.no_sync() context manager, but
-                    # I really dislike that this bloats the code and forces us to repeat code
-                    # looking at the source of that context manager, it just toggles this variable
-                    self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
-                with self.ctx:
-                    _, loss = self.model(X, Y, custom_layers_iters=self.layers_iters)
-                    if self.gradient_accumulation_steps > 1:
-                        loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
-
-                # count processed tokens
-                self.processed_tokens += X.numel()
-
-                # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.simple_data_loader.get_batch('train')
+                inputs_embeds = None
+                for layers_iter in range(self.layers_iters):
+                    if self.ddp:
+                        # in DDP training we only need to sync gradients at the last micro step.
+                        # the official way to do this is with model.no_sync() context manager, but
+                        # I really dislike that this bloats the code and forces us to repeat code
+                        # looking at the source of that context manager, it just toggles this variable
+                        self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1 and layers_iter == self.layers_iters - 1)
+                    with self.ctx:
+                        _, loss, inputs_embeds = self.model(X, Y, custom_layers_iters=1, inputs_embeds=inputs_embeds)
+                        if micro_steps > 1:
+                            loss = loss / micro_steps # scale the loss to account for micro steps (gradient accumulation and layer iterations)
+                    
+                    if layers_iter == self.layers_iters - 1:
+                        # count processed tokens
+                        self.processed_tokens += X.numel()
+                        # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                        X, Y = self.simple_data_loader.get_batch('train')
+                    
+                    # backward pass, with gradient scaling if training in fp16
+                    self.scaler.scale(loss).backward()
+                    inputs_embeds = inputs_embeds.detach()
                 
-                # backward pass, with gradient scaling if training in fp16
-                self.scaler.scale(loss).backward()
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
@@ -327,7 +331,7 @@ class AllamoTrainer:
                 dt = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-                lossf = loss.item() * self.gradient_accumulation_steps
+                lossf = loss.item() * micro_steps
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, li {self.layers_iters}")
             self.iter_num += 1
