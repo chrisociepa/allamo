@@ -46,7 +46,7 @@ class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim: int, max_seq_len=2048, theta: float = 10000.0):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         t = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
@@ -109,13 +109,11 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout) if self.flash_attention_version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
-        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
-
         if self.flash_attention_version == 0:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, q_x: torch.Tensor, kv_x: Optional[torch.Tensor] = None):
+    def forward(self, q_x: torch.Tensor, kv_x: Optional[torch.Tensor] = None, rotary_emb: RotaryEmbedding):
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
@@ -131,7 +129,7 @@ class Attention(nn.Module):
         k = self.k_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = self.v_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        q, k = self.rotary_emb(q, k)
+        q, k = rotary_emb(q, k)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash_attention_version == 2:
@@ -168,8 +166,8 @@ class SelfAttentionBlock(nn.Module):
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor):
-        x = x + self.attention(self.attention_norm(x))
+    def forward(self, x: torch.Tensor, rotary_emb: RotaryEmbedding):
+        x = x + self.attention(self.attention_norm(x), rotary_emb)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -183,9 +181,9 @@ class ResidualAttentionBlock(nn.Module):
         self.kv_attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor):
+    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor, rotary_emb: RotaryEmbedding):
         # add kv_x instead of q_x as in opposite to the cross attention block
-        x = kv_x + self.attention(self.q_attention_norm(q_x), self.kv_attention_norm(kv_x))
+        x = kv_x + self.attention(self.q_attention_norm(q_x), self.kv_attention_norm(kv_x), rotary_emb)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -213,6 +211,8 @@ class AllamoTransformer(nn.Module):
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
 
         # init all weights
         self.apply(self._init_weights)
@@ -283,10 +283,10 @@ class AllamoTransformer(nn.Module):
             if self.config.residual_attention:
                 residual = x
                 for layer in self.layers:
-                    x = layer(residual, x)
+                    x = layer(residual, x, self.rotary_emb)
             else:
                 for layer in self.layers:
-                    x = layer(x)
+                    x = layer(x, self.rotary_emb)
         return x
 
     def forward(self, 
