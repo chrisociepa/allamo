@@ -12,6 +12,12 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# Flash Attention 2
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    pass
+
 @dataclass
 class AllamoTransformerConfig:
     block_size: int = 1024
@@ -113,7 +119,7 @@ class Attention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, q_x: torch.Tensor, kv_x: Optional[torch.Tensor] = None, rotary_emb: RotaryEmbedding):
+    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor, rotary_emb: RotaryEmbedding):
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
@@ -167,7 +173,7 @@ class SelfAttentionBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
     def forward(self, x: torch.Tensor, rotary_emb: RotaryEmbedding):
-        x = x + self.attention(self.attention_norm(x), rotary_emb)
+        x = x + self.attention(self.attention_norm(x), None, rotary_emb)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -227,13 +233,11 @@ class AllamoTransformer(nn.Module):
         print(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
 
     def __detect_flash_attention_version(self):
-        try:
-            from flash_attn import flash_attn_func
-        except ImportError:
-            print("Flash Attention 2 is not installed.")
-        else:
+        if 'flash_attn_func' in globals() and callable(globals()['flash_attn_func']):
             print("Using Flash Attention 2")
             return 2
+        else:
+            print("Flash Attention 2 is not installed.")
         if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
             print("Using Flash Attention 1")
             return 1
