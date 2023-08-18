@@ -109,6 +109,9 @@ class AllamoTrainer:
             for k,v in list(state_dict.items()):
                 if k.startswith(unwanted_prefix):
                     state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+            for k,v in list(state_dict.items()):
+                if k.endswith('.rotary_emb.inv_freq'):
+                    state_dict.pop(k)
             model.load_state_dict(state_dict)
             del state_dict
             print("Loaded model from the checkpoint")
@@ -165,20 +168,27 @@ class AllamoTrainer:
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
     def estimate_loss(self):
-        out = {}
+        losses_out = {}
+        accuraces = {}
         self.model.eval()
         for split in self.simple_data_loader.splits:
             losses = torch.zeros(self.config.eval_iters)
+            correct_preds = 0
+            total_preds = 0
             for k in range(self.config.eval_iters):
                 X, Y = self.simple_data_loader.get_batch(split, True)
                 with self.ctx:
-                    _, loss, _ = self.model(X, Y, custom_layers_iters=self.layers_iters)
+                    logits, loss, _ = self.model(X, Y, custom_layers_iters=self.layers_iters)
                 losses[k] = loss.item()
-            out[split] = losses.mean()
+                total_preds += Y.size(0)
+                correct_preds += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
+            losses_out[split] = losses.mean()
+            accuraces[split] = correct_preds / total_preds
         self.model.train()
-        if 'val' not in out:
-            out['val'] = out['train']
-        return out
+        if 'val' not in losses_out:
+            losses_out['val'] = losses_out['train']
+            accuraces['val'] = accuraces['train']
+        return losses_out, accuraces
 
     # learning rate decay scheduler (cosine with warmup)
     def get_lr(self, it):
@@ -254,15 +264,23 @@ class AllamoTrainer:
 
             # evaluate the loss on train/val sets and write checkpoints
             if self.iter_num % self.config.eval_interval == 0 and self.master_process:
-                losses = self.estimate_loss()
+                losses, accuraces = self.estimate_loss()
+                train_loss = losses['train']
+                val_loss = losses['val']
+                train_ppl = torch.exp(train_loss)
+                val_ppl = torch.exp(val_loss)
                 total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"{timestamp} - step {self.iter_num:,}: train loss {losses['train']:.4f} (best: {self.best_train_loss:.4f}), val loss {losses['val']:.4f} (best: {self.best_val_loss:.4f}), BS {total_batch_size:,}, tokens {self.processed_tokens:,}, DS offset {self.simple_data_loader.dataset_train_x_start:,}")
+                print(f"{timestamp} - iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} (best loss={self.best_val_loss:.4f}), tokens {self.processed_tokens:,}")
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
-                        "train/loss": losses['train'],
-                        "val/loss": losses['val'],
+                        "train/loss": train_loss,
+                        "val/loss": val_loss,
+                        "train/ppl": train_ppl,
+                        "val/ppl": val_ppl,
+                        "train/acc": accuraces['train'],
+                        "val/acc": accuraces['val'],
                         "li": self.layers_iters,
                         "lr": lr,
                         "tokens": self.processed_tokens,
@@ -288,6 +306,7 @@ class AllamoTrainer:
                 gc.collect()
                 torch.cuda.empty_cache()
             
+            accuracy = 0
             timer = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             # and using the GradScaler if data type is float16
@@ -302,13 +321,15 @@ class AllamoTrainer:
                         # looking at the source of that context manager, it just toggles this variable
                         self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1 and layers_iter == self.layers_iters - 1)
                     with self.ctx:
-                        _, loss, inputs_embeds = self.model(X, Y, custom_layers_iters=1, inputs_embeds=inputs_embeds)
+                        logits, loss, inputs_embeds = self.model(X, Y, custom_layers_iters=1, inputs_embeds=inputs_embeds)
                         if micro_steps > 1:
                             loss = loss / micro_steps # scale the loss to account for micro steps (gradient accumulation and layer iterations)
                     
                     if layers_iter == self.layers_iters - 1:
                         # count processed tokens
                         self.processed_tokens += X.numel()
+                        # calculate accuracy
+                        accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
                         # immediately async prefetch next batch while model is doing the forward pass on the GPU
                         X, Y = self.simple_data_loader.get_batch('train')
                     
@@ -332,8 +353,9 @@ class AllamoTrainer:
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
                 lossf = loss.item() * micro_steps
+                ppl = torch.exp(torch.tensor(lossf))
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, li {self.layers_iters}")
+                print(f"{timestamp} - iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, iter time {dt*1000:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}")
             self.iter_num += 1
             
         print("Training finished!")
