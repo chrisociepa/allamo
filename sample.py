@@ -1,6 +1,7 @@
 """
 Use this file to sample from a trained model.
 """
+import logging
 import os
 import pickle
 from contextlib import nullcontext
@@ -11,11 +12,12 @@ from configuration import AllamoConfiguration
 class AllamoSampler:
 
     def __init__(self, config: AllamoConfiguration):
+        self.logger = logging.getLogger('AllamoSampler')
         self.config = config
         self.__init_torch(config)
 
         ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
-        print(f"Loading checkpoint from {ckpt_dir}...")
+        self.logger.info(f"Loading checkpoint from {ckpt_dir}...")
         config_checkpoint = torch.load(os.path.join(ckpt_dir, 'config_ckpt.pt'), map_location='cpu')
         model_checkpoint = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
         self.__load_model(config, config_checkpoint, model_checkpoint)
@@ -53,7 +55,7 @@ class AllamoSampler:
         if 'config' in config_checkpoint and 'dataset' in config_checkpoint['config']:
             meta_path = os.path.join(config.data_dir, config_checkpoint['config']['dataset'], 'meta.pkl')
             if os.path.exists(meta_path):
-                print(f"Loading meta from {meta_path}...")
+                self.logger.info(f"Loading meta from {meta_path}...")
                 with open(meta_path, 'rb') as f:
                     meta = pickle.load(f)
                 if 'tiktoken_tokenizer_name' in meta and meta['tiktoken_tokenizer_name']:
@@ -65,15 +67,15 @@ class AllamoSampler:
         if custom_tokenizer_path is not None:
             from transformers import PreTrainedTokenizerFast
             tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
-            print(f"Custom tokenizer path: {custom_tokenizer_path}")
+            self.logger.info(f"Custom tokenizer path: {custom_tokenizer_path}")
         elif llama_tokenizer_path is not None:
             from transformers import LlamaTokenizer
             tokenizer = LlamaTokenizer.from_pretrained(llama_tokenizer_path)
-            print(f"LLaMA tokenizer path: {llama_tokenizer_path}")
+            self.logger.info(f"LLaMA tokenizer path: {llama_tokenizer_path}")
         elif tiktoken_tokenizer_name is not None:
             import tiktoken
             tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
-            print(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
+            self.logger.info(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
         else:
             raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
         # ensure that the tokenizer and model vocabulary sizes are equal
@@ -111,6 +113,11 @@ class AllamoSampler:
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
+    logger = logging.getLogger('AllamoSamplerMain')
+
     config = AllamoConfiguration()
     sampler = AllamoSampler(config)
 
@@ -120,8 +127,8 @@ if __name__ == '__main__':
             config.prompt = f.read()
             
     completions = sampler.generate_completions(config.prompt, config.num_samples, config.max_new_tokens, temperature=config.temperature, top_k=config.top_k)
-    print("Completions:")
+    logger.info("Completions:")
     for completion in completions:
-        print(completion)
-        print('----------------')
+        logger.info(completion)
+        logger.info('----------------')
 

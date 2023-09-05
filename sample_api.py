@@ -1,6 +1,11 @@
+import logging
 from flask import Flask, request, jsonify
 from sample import AllamoSampler
 from configuration import AllamoConfiguration
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
 
 config = AllamoConfiguration()
 sampler = AllamoSampler(config)
@@ -11,7 +16,7 @@ def tokens():
     payload = request.json
     prompt = payload.get('prompt') if 'prompt' in payload else None
     tokens = sampler.tokenize_prompt(prompt)
-    return jsonify({'tokens': tokens})
+    return jsonify({'tokens': tokens, 'length': len(tokens)})
 
 @app.route('/embeddings', methods=['POST'])
 def embeddings():

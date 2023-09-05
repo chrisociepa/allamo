@@ -18,6 +18,7 @@ Dependencies:
 - [tiktoken](https://github.com/openai/tiktoken)
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
 - [gradio](https://www.gradio.app/)
+- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2
 
 ## Datasets
 

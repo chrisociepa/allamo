@@ -7,6 +7,13 @@ import os.path
 import pandas as pd
 import pickle
 
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
+logger = logging.getLogger('DatasetCreator')
+
+EOS_TOKEN = "</s>"
+
 def init_tokenizer(output_dir, tiktoken_tokenizer_name, custom_tokenizer_path):
     vocab_size = None
     metadata_file_path = os.path.join(output_dir, 'meta.pkl')
@@ -19,7 +26,7 @@ def init_tokenizer(output_dir, tiktoken_tokenizer_name, custom_tokenizer_path):
             tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
         if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
             custom_tokenizer_path = meta['custom_tokenizer_path']
-        print(f"Metadata loaded from {metadata_file_path}")
+        logger.info(f"Metadata loaded from {metadata_file_path}")
 
     if custom_tokenizer_path:
         from transformers import PreTrainedTokenizerFast
@@ -28,7 +35,7 @@ def init_tokenizer(output_dir, tiktoken_tokenizer_name, custom_tokenizer_path):
             vocab_size = len(tokenizer)
         with open(metadata_file_path, 'wb') as meta_file:
             pickle.dump({'vocab_size': vocab_size, 'custom_tokenizer_path': custom_tokenizer_path}, meta_file)
-        print(f"Custom tokenizer loaded from {custom_tokenizer_path}. Vocab_size: {vocab_size}")
+        logger.info(f"Custom tokenizer loaded from {custom_tokenizer_path}. Vocab_size: {vocab_size}")
     elif tiktoken_tokenizer_name:
         import tiktoken
         tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
@@ -36,7 +43,7 @@ def init_tokenizer(output_dir, tiktoken_tokenizer_name, custom_tokenizer_path):
             vocab_size = tokenizer.max_token_value + 1 # values start from 0
         with open(metadata_file_path, 'wb') as meta_file:
             pickle.dump({'vocab_size': vocab_size, 'tiktoken_tokenizer_name': tiktoken_tokenizer_name}, meta_file)
-        print(f"Tiktoken tokenizer loaded from {tiktoken_tokenizer_name}. Vocab_size: {vocab_size}")
+        logger.info(f"Tiktoken tokenizer loaded from {tiktoken_tokenizer_name}. Vocab_size: {vocab_size}")
     else:
         raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
 
@@ -61,7 +68,7 @@ def load_list_of_txt_files(index_file_path, input_data_dir, data_split):
     else:
         raise Exception('Either an index file or an input data dir must be provided')
     
-    print(f"{len(txt_files_df)} txt files found to process")
+    logger.info(f"{len(txt_files_df)} txt files found to process")
     return txt_files_df
     
 
@@ -71,9 +78,7 @@ def encode_file(input_file, output_file, tokenizer):
     enc_data.tofile(output_file)
     tokens = len(enc_data)
     
-    # FIXME: it should be a special token for EOF
-    files_delimiter = '\n\n\n--------\n\n\n'
-    enc_data = tokenizer.encode(files_delimiter)
+    enc_data = tokenizer.encode(EOS_TOKEN)
     enc_data = np.array(enc_data, dtype=np.uint16)
     enc_data.tofile(output_file)
     tokens += len(enc_data)
@@ -92,21 +97,21 @@ def create_datasets(txt_files_df, tokenizer, input_data_dir, output_data_dir):
         for _, row in txt_files_df.iterrows():
             filename = os.path.join(input_data_dir, row['File']) if input_data_dir else row['File']
             if not os.path.isfile(filename):
-                print(f"File {filename} does not exist.")
+                logger.info(f"File {filename} does not exist.")
                 continue
             with open(filename, 'r', encoding="utf-8") as txt_file:
-                print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Start processing {filename}")
+                logger.info(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Start processing {filename}")
                 if row['Split'] == 'test':
                     tokens = encode_file(txt_file, val_file, tokenizer)
                     val_tokens += tokens
                 else:
                     tokens = encode_file(txt_file, train_file, tokenizer)
                     train_tokens += tokens
-                print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {filename} added ({tokens} tokens) to the {row['Split']} dataset")
+                logger.info(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {filename} added ({tokens} tokens) to the {row['Split']} dataset")
                 files_cnt += 1
                     
     total_tokens = train_tokens + val_tokens
-    print(f"Datasets created in {output_data_dir} from {files_cnt} files. Tokens: {total_tokens:,} (Train: {train_tokens:,} Val: {val_tokens:,})")
+    logger.info(f"Datasets created in {output_data_dir} from {files_cnt} files. Tokens: {total_tokens:,} (Train: {train_tokens:,} Val: {val_tokens:,})")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Prepare your datasets')

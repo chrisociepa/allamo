@@ -72,7 +72,7 @@ class AllamoConfiguration:
     
     # inference params
     prompt: str = "\n" 
-    num_samples: int = 5 
+    num_samples: int = 1 
     max_new_tokens: int = 50 
     temperature: float = 0.8 
     top_k: int = 100
