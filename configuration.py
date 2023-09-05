@@ -45,12 +45,6 @@ class AllamoConfiguration:
     grad_accum_max_iter: int = 2000
     grad_accum_schedule: bool = False
     grad_accum_max: int = 8
-    layers_iters_warmup_iters: int = 1000
-    layers_iters_initial: int = 1
-    layers_iters_max_iter: int = 11000
-    layers_iters_max: int = 40
-    layers_iters_schedule: bool = False
-    layers_iters: int = 1
     n_layer: int = 12
     n_head: int = 12
     head_size: int = 64
@@ -59,7 +53,6 @@ class AllamoConfiguration:
     bias: bool = False 
     multiple_of: int = 256
     norm_eps: float = 1e-5
-    residual_attention: bool = False
     learning_rate: float = 6e-4
     max_iters: int = 600000
     weight_decay: float = 1e-1
@@ -79,7 +72,7 @@ class AllamoConfiguration:
     
     # inference params
     prompt: str = "\n" 
-    num_samples: int = 5 
+    num_samples: int = 1 
     max_new_tokens: int = 50 
     temperature: float = 0.8 
     top_k: int = 100
@@ -123,11 +116,6 @@ class AllamoConfiguration:
         parser.add_argument('--grad_accum_initial', type=int, help='Initial gradient_accumulation_steps value')
         parser.add_argument('--grad_accum_max_iter', type=int, help='Number of iterations to reach maximum gradient_accumulation_steps value')
         parser.add_argument('--grad_accum_schedule', type=bool, help='Enable linear gradient_accumulation_steps scheduler')
-        parser.add_argument('--layers_iters_warmup_iters', type=int, help='Scheduler will start after layers_iters_warmup_iters training iterations')
-        parser.add_argument('--layers_iters_initial', type=int, help='Initial layers_iters value')
-        parser.add_argument('--layers_iters_max_iter', type=int, help='Number of training iterations to reach maximum layers_iters value')
-        parser.add_argument('--layers_iters_schedule', type=bool, help='Enable linear layers_iters scheduler')
-        parser.add_argument('--layers_iters', type=int, help='Layers iterations')
         parser.add_argument('--n_layer', type=int, help='Number of layers')
         parser.add_argument('--n_head', type=int, help='Number of heads')
         parser.add_argument('--head_size', type=int, help='Often calculated as n_embd/n_head')
@@ -136,7 +124,6 @@ class AllamoConfiguration:
         parser.add_argument('--bias', type=bool, help='Enable bias globally. Helpful in finetuning process')
         parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
-        parser.add_argument('--residual_attention', type=bool, help='Enable residual attention')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
         parser.add_argument('--weight_decay', type=float, help='Max learning rate')

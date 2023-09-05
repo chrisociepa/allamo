@@ -4,6 +4,7 @@ The full definition of the model is located in this file.
 
 import math
 import inspect
+import logging
 from typing import Optional, Tuple, Union
 from functools import reduce
 from dataclasses import dataclass
@@ -22,8 +23,6 @@ except ImportError:
 class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
-    residual_attention: bool = False
-    layers_iters: int = 1
     n_layer: int = 12
     head_size: Union[None, int] = None
     n_head: int = 12
@@ -177,26 +176,11 @@ class SelfAttentionBlock(nn.Module):
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-class ResidualAttentionBlock(nn.Module):
-
-    def __init__(self, config: AllamoTransformerConfig):
-        super().__init__()
-        self.attention = Attention(config)
-        self.feed_forward = FeedForward(config)
-        self.q_attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-        self.kv_attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-        self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
-
-    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor, rotary_emb: RotaryEmbedding):
-        # add kv_x instead of q_x as in opposite to the cross attention block
-        x = kv_x + self.attention(self.q_attention_norm(q_x), self.kv_attention_norm(kv_x), rotary_emb)
-        x = x + self.feed_forward(self.ffn_norm(x))
-        return x
-
 class AllamoTransformer(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
+        self.logger = logging.getLogger('AllamoTransformer')
         assert config.vocab_size is not None
         assert config.block_size is not None
         config.flash_attention_version = self.__detect_flash_attention_version()
@@ -205,15 +189,15 @@ class AllamoTransformer(nn.Module):
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
-            print(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
-        print(f"AllamoTransformerConfig: {config}")
+            self.logger.info(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
+        self.logger.info(f"AllamoTransformerConfig: {config}")
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(ResidualAttentionBlock(config) if self.config.residual_attention else SelfAttentionBlock(config))
+            self.layers.append(SelfAttentionBlock(config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -230,19 +214,19 @@ class AllamoTransformer(nn.Module):
         model_params, model_bytes = self.estimate_size()
         model_params /= 1e6
         model_bytes /= 1024**2
-        print(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
+        self.logger.info(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
 
     def __detect_flash_attention_version(self):
         if 'flash_attn_func' in globals() and callable(globals()['flash_attn_func']):
-            print("Using Flash Attention 2")
+            self.logger.info("Using Flash Attention 2")
             return 2
         else:
-            print("Flash Attention 2 is not installed.")
+            self.logger.info("Flash Attention 2 is not installed.")
         if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
-            print("Using Flash Attention 1")
+            self.logger.info("Using Flash Attention 1")
             return 1
         else:
-            print("WARNING: using slow attention")
+            self.logger.info("WARNING: using slow attention")
             return 0
 
     def estimate_size(self):
@@ -276,28 +260,15 @@ class AllamoTransformer(nn.Module):
             x = self.tok_drop(x)
         return x
 
-    def get_layers_iters(self, custom_layers_iters):
-        layers_iters = self.config.layers_iters
-        if custom_layers_iters is not None and custom_layers_iters >= 1:
-            layers_iters = custom_layers_iters
-        return max(1, layers_iters)
-
-    def apply_layers(self, x, custom_layers_iters=None):
-        for _ in range(self.get_layers_iters(custom_layers_iters)):
-            if self.config.residual_attention:
-                residual = x
-                for layer in self.layers:
-                    x = layer(residual, x, self.rotary_emb)
-            else:
-                for layer in self.layers:
-                    x = layer(x, self.rotary_emb)
+    def apply_layers(self, x):
+        for layer in self.layers:
+            x = layer(x, self.rotary_emb)
         return x
 
     def forward(self, 
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
         ignore_index: Optional[int] = -1,
-        custom_layers_iters: Optional[int] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
         if inputs_embeds is not None:
@@ -305,7 +276,7 @@ class AllamoTransformer(nn.Module):
             assert t <= self.max_seq_len, f"Cannot forward embeddings of length {t}, block size is only {self.max_seq_len}"
         else:
             inputs_embeds = self.token_embeddings(input_ids)
-        hidden_states = self.apply_layers(inputs_embeds, custom_layers_iters)
+        hidden_states = self.apply_layers(inputs_embeds)
         final_embeddings = self.norm(hidden_states)
         if labels is not None:
             # if we are given some desired targets also calculate the loss
@@ -332,26 +303,26 @@ class AllamoTransformer(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"Decayed parameter tensors: {len(decay_params):,}, with {num_decay_params:,} parameters")
-        print(f"Non-decayed parameter tensors: {len(nodecay_params):,}, with {num_nodecay_params:,} parameters")
+        self.logger.info(f"Decayed parameter tensors: {len(decay_params):,}, with {num_decay_params:,} parameters")
+        self.logger.info(f"Non-decayed parameter tensors: {len(nodecay_params):,}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"Using fused AdamW: {use_fused}")
+        self.logger.info(f"Using fused AdamW: {use_fused}")
 
         return optimizer
         
     @torch.no_grad()
-    def generate_embeddings(self, tokens, custom_layers_iters=None):
+    def generate_embeddings(self, tokens):
         x = self.token_embeddings(tokens)
-        x = self.apply_layers(x, custom_layers_iters)
+        x = self.apply_layers(x)
         x = self.norm(x)
         return x
 
     @torch.no_grad()
-    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None, custom_layers_iters=None):
+    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of tokens (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -362,7 +333,7 @@ class AllamoTransformer(nn.Module):
             if tokens.size(1) > self.max_seq_len:
                 tokens = tokens[:, -self.max_seq_len:]
             # forward the model to get the logits for the tokens
-            logits = self(tokens, custom_layers_iters=custom_layers_iters)[0]
+            logits = self(tokens)[0]
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

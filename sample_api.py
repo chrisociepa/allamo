@@ -1,6 +1,11 @@
+import logging
 from flask import Flask, request, jsonify
 from sample import AllamoSampler
 from configuration import AllamoConfiguration
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
 
 config = AllamoConfiguration()
 sampler = AllamoSampler(config)
@@ -17,8 +22,7 @@ def tokens():
 def embeddings():
     payload = request.json
     prompt = payload.get('prompt') if 'prompt' in payload else None
-    custom_layers_iters = int(payload.get('custom_layers_iters')) if 'custom_layers_iters' in payload else -1
-    embeddings = sampler.generate_embeddings(prompt, custom_layers_iters)
+    embeddings = sampler.generate_embeddings(prompt)
     return jsonify({'embeddings': embeddings})
     
 @app.route('/completions', methods=['POST'])
@@ -29,8 +33,7 @@ def completions():
     max_new_tokens = int(payload.get('max_new_tokens')) if 'max_new_tokens' in payload else config.max_new_tokens
     temperature = float(payload.get('temperature')) if 'temperature' in payload else config.temperature
     top_k = int(payload.get('top_k')) if 'top_k' in payload else config.top_k
-    custom_layers_iters = int(payload.get('custom_layers_iters')) if 'custom_layers_iters' in payload else -1
-    completions = sampler.generate_completions(prompt, num_samples, max_new_tokens, temperature, top_k, custom_layers_iters)
+    completions = sampler.generate_completions(prompt, num_samples, max_new_tokens, temperature, top_k)
     return jsonify({'completions': completions})
     
 if __name__ == '__main__':

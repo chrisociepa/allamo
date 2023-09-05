@@ -4,14 +4,17 @@ Use this file to import Huggingface LlamaForCausalLM weights to ALLaMo model.
 import argparse
 import datetime
 import json
+import logging
 import os
 import torch
 import shutil
 from model import AllamoTransformerConfig, AllamoTransformer
 from transformers import LlamaForCausalLM
 
-def timestamp():
-    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    handlers=[logging.StreamHandler()])
+logger = logging.getLogger('AllamoModelImporter')
 
 def read_json(path):
     with open(path, "r") as f:
@@ -32,9 +35,9 @@ def compute_intermediate_size(config):
     return config.multiple_of * ((int(config.n_embd * 8 / 3) + config.multiple_of - 1) // config.multiple_of)
     
 def import_model(hf_model_path, output_model_path):
-    print(f"{timestamp()} - start importing Huggingface LlamaForCausalLM weights")
+    print(f"start importing Huggingface LlamaForCausalLM weights")
     hf_model = LlamaForCausalLM.from_pretrained(hf_model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
-    print(f"{timestamp()} - Huggingface LlamaForCausalLM model loaded")
+    print(f"Huggingface LlamaForCausalLM model loaded")
     
     config = AllamoTransformerConfig()
     config.block_size = hf_model.config.max_position_embeddings
@@ -49,7 +52,7 @@ def import_model(hf_model_path, output_model_path):
     config.norm_eps = hf_model.config.rms_norm_eps
     assert hf_model.config.intermediate_size == compute_intermediate_size(config)
 
-    print(f"{timestamp()} - initializing vanilla ALLaMo model")
+    print(f"initializing vanilla ALLaMo model")
     # Open LLaMA models are delivered with float16 weights
     torch.set_default_tensor_type(torch.HalfTensor)
     model = AllamoTransformer(config)
@@ -73,7 +76,7 @@ def import_model(hf_model_path, output_model_path):
     state_dicts_map["norm.weight"] = "model.norm.weight"
     state_dicts_map["lm_head.weight"] = "lm_head.weight"
     
-    print(f"{timestamp()} - checking params coverage")
+    print(f"checking params coverage")
     for k, v in model_sd.items():
         if k not in state_dicts_map:
             print(f"{k} param won't be updated in the ALLaMo model!")
@@ -82,19 +85,19 @@ def import_model(hf_model_path, output_model_path):
         if k not in state_dicts_map.values():
             print(f"{k} param won't be copied to the ALLaMo model!")
     
-    print(f"{timestamp()} - copying params to the ALLaMo model")
+    print(f"copying params to the ALLaMo model")
     param_count = 0
     for k, v in state_dicts_map.items():
         assert sd_hf_model[v].shape == model_sd[k].shape
         with torch.no_grad():
             model_sd[k].copy_(sd_hf_model[v])
         param_count += model_sd[k].numel()
-    print(f"{timestamp()} - {param_count} params copied to the ALLaMo model")
+    print(f"{param_count} params copied to the ALLaMo model")
     
     for k, _ in model_sd.items():
         if not torch.all(torch.eq(model_sd[k], sd_hf_model[state_dicts_map[k]])):
             print(f"{k} param in the ALLaMo model is not the same as {state_dicts_map[k]} param in the source model!")
-    print(f"{timestamp()} - params checked")
+    print(f"params checked")
     
     ckpt_file_name = 'ckpt.pt' #'import_ckpt.pt'
     config_checkpoint = {
@@ -106,7 +109,7 @@ def import_model(hf_model_path, output_model_path):
     ckpt_file_path = os.path.join(output_model_path, 'model_' + ckpt_file_name)
     print(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(model_sd, ckpt_file_path)
-    print(f"{timestamp()} - checkpoint files saved in {output_model_path}")
+    print(f"checkpoint files saved in {output_model_path}")
     
 def main():
     parser = argparse.ArgumentParser(description='Import Huggingface LlamaForCausalLM weights to ALLaMo model')
@@ -128,5 +131,5 @@ def main():
     
 if __name__ == '__main__':
     main()    
-    print(f"{timestamp()} - import completed")
+    print(f"import completed")
     

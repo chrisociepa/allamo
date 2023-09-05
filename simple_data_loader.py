@@ -1,7 +1,7 @@
 """
 Very simple, poor man's data loader
 """
-import gc
+import logging
 import numpy as np
 import os
 import random
@@ -12,6 +12,7 @@ from configuration import AllamoConfiguration
 class SimpleDataLoader:
 
     def __init__(self, config: AllamoConfiguration):
+        self.logger = logging.getLogger('AllamoSimpleDataLoader')
         self.config = config
         self.epoch = 0
         
@@ -26,13 +27,13 @@ class SimpleDataLoader:
         else:
             self.dataset_train_x_start = 0
         self.__load_datasets()
-        print(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
+        self.logger.info(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
         if self.val_data is None:
             self.splits = ['train']
-            print(f"Val dataset is missing. Testing only on the train dataset")
+            self.logger.info(f"Val dataset is missing. Testing only on the train dataset")
         else:
             self.splits = ['train', 'val']
-            print(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
+            self.logger.info(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
             
     def __load_datasets(self):
         data_dir = os.path.join(self.config.data_dir, self.config.dataset)
@@ -61,7 +62,7 @@ class SimpleDataLoader:
         
         self.__load_datasets()
         dt = time.time() - timer
-        print(f"Datasets reloaded in {dt*1000:.2f}ms")
+        self.logger.info(f"Datasets reloaded in {dt*1000:.2f}ms")
             
     def get_splits(self):
         return self.splits
@@ -86,7 +87,7 @@ class SimpleDataLoader:
                 
             if end_of_batch:
                 self.epoch += 1
-                print(f"Staring new epoch: {self.epoch}")
+                self.logger.info(f"Staring new epoch: {self.epoch}")
                 self.dataset_train_x_start = random.randint(0, self.batch_size-1)
             else:    
                 self.dataset_train_x_start = last_x_start + self.config.dataset_seq_step_size 
@@ -105,5 +106,4 @@ class SimpleDataLoader:
         if self.config.batch_size_schedule and self.batch_size < self.config.batch_size_max:
             self.batch_size = min(self.batch_size + 1, self.config.batch_size_max) if iter_num % (self.config.batch_size_max_iter/100) == 0 else self.batch_size 
         return self.batch_size
-        
         
