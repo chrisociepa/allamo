@@ -40,7 +40,11 @@ class AllamoTrainer:
         
     def __init_logger(self, config: AllamoConfiguration):
         run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        log_file_path = os.path.join(config.out_dir, f'train-{run_timestamp_str}.log')
+        if self.ddp:
+            log_file_name_base = f'train-{run_timestamp_str}-r{self.ddp_rank}-lr{self.ddp_local_rank}'
+        else:
+            log_file_name_base = f'train-{run_timestamp_str}'
+        log_file_path = os.path.join(config.out_dir, f'{log_file_name_base}.log')
         logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[logging.StreamHandler(), logging.FileHandler(log_file_path)])
@@ -49,12 +53,14 @@ class AllamoTrainer:
     def __init_torch(self, config: AllamoConfiguration):
         if self.ddp:
             init_process_group(backend=config.backend)
-            ddp_rank = int(os.environ['RANK'])
+            self.ddp_rank = int(os.environ['RANK'])
             self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-            device = f'cuda:{self.ddp_local_rank}'
+            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+            print(f"RANK: {self.ddp_rank}, LOCAL_RANK: {self.ddp_local_rank}, WORLD_SIZE: {self.ddp_world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}")
+            config.device = f'cuda:{self.ddp_local_rank}'
             torch.cuda.set_device(config.device)
-            self.master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-            self.seed_offset = ddp_rank # each process gets a different seed
+            self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
+            self.seed_offset = self.ddp_rank # each process gets a different seed
         else:
             # if not ddp, we are running on a single gpu, and one process
             self.master_process = True
@@ -71,8 +77,12 @@ class AllamoTrainer:
         self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
         
     def __init_training(self, config: AllamoConfiguration):
+        if self.ddp:
+            # world_size number of processes will be training simultaneously, so we can scale
+            # down the desired gradient accumulation iterations per process proportionally
+            assert config.gradient_accumulation_steps % self.ddp_world_size == 0
+            config.gradient_accumulation_steps //= self.ddp_world_size
         transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
-        
         checkpoint_name = None
         if config.init_from == 'resume':
             checkpoint_name = 'ckpt.pt'
@@ -221,7 +231,7 @@ class AllamoTrainer:
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name):
         checkpoint = {
-            'model_args': self.model.config,
+            'model_args': self.raw_model.config,
             'iter_num': self.iter_num,
             'best_train_loss': self.best_train_loss,
             'best_val_loss': self.best_val_loss,
@@ -274,6 +284,8 @@ class AllamoTrainer:
             micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
             self.gradient_accumulation_steps = self.get_grad_accum(self.iter_num)
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
+            if self.ddp:
+                total_batch_size *= self.ddp_world_size
 
             # evaluate the loss on train/val sets and write checkpoints
             if eval_iter:
@@ -338,7 +350,7 @@ class AllamoTrainer:
                         loss = loss / micro_steps # scale the loss to account for micro steps
                 
                 # count processed tokens
-                self.processed_tokens += X.numel()
+                self.processed_tokens += X.numel() * self.ddp_world_size if self.ddp else X.numel()
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
                     # calculate accuracy. note: this is a CPU-GPU sync point!
                     accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)

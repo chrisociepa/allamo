@@ -15,9 +15,10 @@ Dependencies:
 - Python 3
 - [pytorch](https://pytorch.org)
 - [numpy](https://numpy.org/install/)
-- [tiktoken](https://github.com/openai/tiktoken)
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
-- [gradio](https://www.gradio.app/)
+- [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
+- [tiktoken](https://github.com/openai/tiktoken) - optional
+- [gradio](https://www.gradio.app/) - optional, for demo UI
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2
 
 ## Datasets
@@ -56,7 +57,7 @@ $ python train.py \
 To run on a single node with 8 GPU with DDP, example:
 
 ```
-$ torchrun --standalone --nproc_per_node=8 train.py \
+$ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
 ```
@@ -65,7 +66,7 @@ To run on 2+ nodes with DDP, example:
 - Run on the first (master) node with example IP 123.456.123.456:
 
 ```
-$ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
+$ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
 ```
@@ -73,7 +74,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 - Run on the worker node(s):
 
 ```
-$ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
+$ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
 ```
