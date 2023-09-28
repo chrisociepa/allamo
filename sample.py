@@ -38,7 +38,10 @@ class AllamoSampler:
         model = AllamoTransformer(config_checkpoint['model_args'])
         unwanted_prefix = '_orig_mod.'
         for k,v in list(model_checkpoint.items()):
-            if k.startswith(unwanted_prefix):
+            if k.endswith('.rotary_emb.inv_freq'):
+                # For backward compatibility, where we had it in the checkpoint
+                model_checkpoint.pop(k)
+            elif k.startswith(unwanted_prefix):
                 model_checkpoint[k[len(unwanted_prefix):]] = model_checkpoint.pop(k)
         model.load_state_dict(model_checkpoint)
         model.eval()

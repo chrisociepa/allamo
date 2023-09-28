@@ -127,11 +127,11 @@ class AllamoTrainer:
             state_dict = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}'), map_location='cpu')
             unwanted_prefix = '_orig_mod.'
             for k,v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-            for k,v in list(state_dict.items()):
                 if k.endswith('.rotary_emb.inv_freq'):
+                    # For backward compatibility, where we had it in the checkpoint
                     state_dict.pop(k)
+                elif k.startswith(unwanted_prefix):
+                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
             model.load_state_dict(state_dict)
             del state_dict
             self.logger.info("Loaded model from the checkpoint")

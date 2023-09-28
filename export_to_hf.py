@@ -32,22 +32,21 @@ def write_model(checkpoint_path, hf_model_path):
     tmp_model_path = os.path.join(hf_model_path, "tmp")
     os.makedirs(tmp_model_path, exist_ok=True)
     
-    checkpoint_path = checkpoint_path if checkpoint_path.endswith('.pt') else os.path.join(checkpoint_path, 'ckpt.pt')
     logger.info(f"loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    allamo_transformer_config = checkpoint['model_args']
+    config_checkpoint = torch.load(os.path.join(checkpoint_path, 'config_ckpt.pt'), map_location='cpu')
+    model_checkpoint = torch.load(os.path.join(checkpoint_path, 'model_ckpt.pt'), map_location='cpu')
 
+    allamo_transformer_config = config_checkpoint['model_args']
     n_layers = allamo_transformer_config.n_layer
     n_heads = allamo_transformer_config.n_head
     dim = allamo_transformer_config.n_embd
     dims_per_head = allamo_transformer_config.head_size
 
     logger.info(f"converting all parameters from the checkpoint model")
-    loaded = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
-    for k,v in list(loaded.items()):
+    for k,v in list(model_checkpoint.items()):
         if k.startswith(unwanted_prefix):
-            loaded[k[len(unwanted_prefix):]] = loaded.pop(k)
+            model_checkpoint[k[len(unwanted_prefix):]] = model_checkpoint.pop(k)
             
     param_count = 0
     index_dict = {"weight_map": {}}
@@ -55,16 +54,16 @@ def write_model(checkpoint_path, hf_model_path):
         logger.info(f"converting weights in layer {layer_i}")
         filename = f"pytorch_model-{layer_i + 1}-of-{n_layers + 1}.bin"
         state_dict = {
-            f"model.layers.{layer_i}.self_attn.q_proj.weight": loaded[f"layers.{layer_i}.attention.q_proj.weight"],
-            f"model.layers.{layer_i}.self_attn.k_proj.weight": loaded[f"layers.{layer_i}.attention.k_proj.weight"],
-            f"model.layers.{layer_i}.self_attn.v_proj.weight": loaded[f"layers.{layer_i}.attention.v_proj.weight"],
-            f"model.layers.{layer_i}.self_attn.o_proj.weight": loaded[f"layers.{layer_i}.attention.c_proj.weight"],
-            f"model.layers.{layer_i}.self_attn.rotary_emb.inv_freq": loaded[f"layers.{layer_i}.attention.rotary_emb.inv_freq"],
-            f"model.layers.{layer_i}.mlp.gate_proj.weight": loaded[f"layers.{layer_i}.feed_forward.gate_proj.weight"],
-            f"model.layers.{layer_i}.mlp.down_proj.weight": loaded[f"layers.{layer_i}.feed_forward.down_proj.weight"],
-            f"model.layers.{layer_i}.mlp.up_proj.weight": loaded[f"layers.{layer_i}.feed_forward.up_proj.weight"],
-            f"model.layers.{layer_i}.input_layernorm.weight": loaded[f"layers.{layer_i}.attention_norm.weight"],
-            f"model.layers.{layer_i}.post_attention_layernorm.weight": loaded[f"layers.{layer_i}.ffn_norm.weight"]
+            f"model.layers.{layer_i}.self_attn.q_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.q_proj.weight"],
+            f"model.layers.{layer_i}.self_attn.k_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.k_proj.weight"],
+            f"model.layers.{layer_i}.self_attn.v_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.v_proj.weight"],
+            f"model.layers.{layer_i}.self_attn.o_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.c_proj.weight"],
+            #f"model.layers.{layer_i}.self_attn.rotary_emb.inv_freq": model_checkpoint[f"layers.{layer_i}.attention.rotary_emb.inv_freq"],
+            f"model.layers.{layer_i}.mlp.gate_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.weight"],
+            f"model.layers.{layer_i}.mlp.down_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.weight"],
+            f"model.layers.{layer_i}.mlp.up_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.weight"],
+            f"model.layers.{layer_i}.input_layernorm.weight": model_checkpoint[f"layers.{layer_i}.attention_norm.weight"],
+            f"model.layers.{layer_i}.post_attention_layernorm.weight": model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
         }
         for k, v in state_dict.items():
             index_dict["weight_map"][k] = filename
@@ -73,12 +72,12 @@ def write_model(checkpoint_path, hf_model_path):
 
     filename = f"pytorch_model-{n_layers + 1}-of-{n_layers + 1}.bin"
     state_dict = {
-        "model.embed_tokens.weight": loaded["tok_embeddings.weight"],
-        "model.norm.weight": loaded["norm.weight"],
-        "lm_head.weight": loaded["lm_head.weight"],
+        "model.embed_tokens.weight": model_checkpoint["tok_embeddings.weight"],
+        "model.norm.weight": model_checkpoint["norm.weight"],
+        "lm_head.weight": model_checkpoint["lm_head.weight"],
     }
     # Resolve model params dtype, e.g. torch.float16
-    torch_dtype = loaded["lm_head.weight"].dtype
+    torch_dtype = model_checkpoint["lm_head.weight"].dtype
 
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -103,7 +102,8 @@ def write_model(checkpoint_path, hf_model_path):
 
     # Make space so we can load the model properly now.
     del state_dict
-    del loaded
+    del config_checkpoint
+    del model_checkpoint
     gc.collect()
 
     logger.info(f"loading the checkpoint in a LLaMA model with {torch_dtype} dtype")
