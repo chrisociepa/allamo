@@ -39,6 +39,7 @@ def write_model(checkpoint_path, hf_model_path):
     allamo_transformer_config = config_checkpoint['model_args']
     n_layers = allamo_transformer_config.n_layer
     n_heads = allamo_transformer_config.n_head
+    num_kv_heads = allamo_transformer_config.num_kv_heads
     dim = allamo_transformer_config.n_embd
     dims_per_head = allamo_transformer_config.head_size
 
@@ -94,6 +95,7 @@ def write_model(checkpoint_path, hf_model_path):
         hidden_size=dim,
         intermediate_size=compute_intermediate_size(allamo_transformer_config),
         num_attention_heads=n_heads,
+        num_key_value_heads=num_kv_heads,
         num_hidden_layers=n_layers,
         rms_norm_eps=allamo_transformer_config.norm_eps,
     )

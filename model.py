@@ -24,6 +24,7 @@ class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
     n_layer: int = 12
+    num_kv_heads: Union[None, int] = None
     head_size: Union[None, int] = None
     n_head: int = 12
     n_embd: int = 768
@@ -99,17 +100,21 @@ class Attention(nn.Module):
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
         self.head_size = config.head_size
-        self.n_head = config.n_head
+        self.num_heads = config.n_head
+        self.num_kv_heads = config.num_kv_heads
+        self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.flash_attention_version = config.flash_attention_version
         
+        assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
+        
         # key, query, value projections for all heads
-        self.q_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
-        self.k_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
-        self.v_proj = nn.Linear(self.n_embd, self.n_head * self.head_size, bias=config.bias)
+        self.q_proj = nn.Linear(self.n_embd, self.num_heads * self.head_size, bias=config.bias)
+        self.k_proj = nn.Linear(self.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
+        self.v_proj = nn.Linear(self.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(self.n_head * self.head_size, self.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(self.num_heads * self.head_size, self.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout) if self.flash_attention_version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
@@ -130,11 +135,15 @@ class Attention(nn.Module):
         if kv_x is None:
             kv_x = q_x # self attention
         
-        q = self.q_proj(q_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        k = self.k_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = self.v_proj(kv_x).view(B, T, self.n_head, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = self.q_proj(q_x).view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        k = self.k_proj(kv_x).view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = self.v_proj(kv_x).view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
         q, k = rotary_emb(q, k)
+        
+        if self.num_key_value_groups > 1:
+            k = self.repeat_kv(k, self.num_key_value_groups)
+            v = self.repeat_kv(v, self.num_key_value_groups)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash_attention_version == 2:
@@ -154,13 +163,21 @@ class Attention(nn.Module):
             if self.attn_dropout is not None:
                 att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_size) # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
 
         # output projection
         y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
         return y
+        
+    def repeat_kv(self, x: torch.Tensor, num_key_value_groups: int) -> torch.Tensor:
+        # (B, num_kv_heads, T, hs) -> (B, nh, T, hs)
+        if num_key_value_groups == 1:
+            return x
+        B, num_kv_heads, T, hs = x.shape
+        x = x[:, :, None, :, :].expand(B, num_kv_heads, num_key_value_groups, T, hs)
+        return x.reshape(B, num_kv_heads * num_key_value_groups, T, hs)
         
 class SelfAttentionBlock(nn.Module):
 
@@ -190,6 +207,8 @@ class AllamoTransformer(nn.Module):
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
             self.logger.info(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
+        if config.num_kv_heads is None:
+            config.num_kv_heads = config.n_head
         self.logger.info(f"AllamoTransformerConfig: {config}")
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)

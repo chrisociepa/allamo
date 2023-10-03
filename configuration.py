@@ -48,6 +48,7 @@ class AllamoConfiguration:
     n_layer: int = 12
     n_head: int = 12
     head_size: int = 64
+    num_kv_heads: int = None
     n_embd: int = 768
     dropout: float = 0.0 
     bias: bool = False 
@@ -119,6 +120,7 @@ class AllamoConfiguration:
         parser.add_argument('--n_layer', type=int, help='Number of layers')
         parser.add_argument('--n_head', type=int, help='Number of heads')
         parser.add_argument('--head_size', type=int, help='Often calculated as n_embd/n_head')
+        parser.add_argument('--num_kv_heads', type=int, help='Number of key-value heads')
         parser.add_argument('--n_embd', type=int, help='Number of model dimensions')
         parser.add_argument('--dropout', type=float, help='Enable dropouts globally. Disabled when 0')
         parser.add_argument('--bias', type=bool, help='Enable bias globally. Helpful in finetuning process')
