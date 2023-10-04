@@ -14,39 +14,22 @@ logger = logging.getLogger('DatasetCreator')
 
 EOS_TOKEN = "</s>"
 
-def init_tokenizer(output_dir, tiktoken_tokenizer_name, custom_tokenizer_path):
+def init_tokenizer(output_dir, tiktoken_tokenizer_name, hf_tokenizer_path):
     vocab_size = None
-    metadata_file_path = os.path.join(output_dir, 'meta.pkl')
-    if os.path.exists(metadata_file_path):
-        # Load the metadata from the file
-        with open(metadata_file_path, 'rb') as meta_file:
-            meta = pickle.load(meta_file)
-        vocab_size = meta['vocab_size']
-        if 'tiktoken_tokenizer_name' in meta and meta['tiktoken_tokenizer_name']:
-            tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
-        if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
-            custom_tokenizer_path = meta['custom_tokenizer_path']
-        logger.info(f"Metadata loaded from {metadata_file_path}")
-
-    if custom_tokenizer_path:
-        from transformers import PreTrainedTokenizerFast
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
+    if hf_tokenizer_path:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_path)
         if vocab_size is None:
             vocab_size = len(tokenizer)
-        with open(metadata_file_path, 'wb') as meta_file:
-            pickle.dump({'vocab_size': vocab_size, 'custom_tokenizer_path': custom_tokenizer_path}, meta_file)
-        logger.info(f"Custom tokenizer loaded from {custom_tokenizer_path}. Vocab_size: {vocab_size}")
+        logger.info(f"HuggingFace {hf_tokenizer_path} tokenizer loaded with the vocab size {vocab_size}")
     elif tiktoken_tokenizer_name:
         import tiktoken
         tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
         if vocab_size is None:
             vocab_size = tokenizer.max_token_value + 1 # values start from 0
-        with open(metadata_file_path, 'wb') as meta_file:
-            pickle.dump({'vocab_size': vocab_size, 'tiktoken_tokenizer_name': tiktoken_tokenizer_name}, meta_file)
-        logger.info(f"Tiktoken tokenizer loaded from {tiktoken_tokenizer_name}. Vocab_size: {vocab_size}")
+        logger.info(f"Tiktoken {tiktoken_tokenizer_name} tokenizer loaded with the vocab size {vocab_size}")
     else:
-        raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
-
+        raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a HuggingFace tokenizer')
     return tokenizer
 
 def load_list_of_txt_files(index_file_path, input_data_dir, data_split):
@@ -120,10 +103,10 @@ if __name__ == '__main__':
     parser.add_argument('--data_split', type=str, default='train', choices=['train', 'test'], help='Data split')
     parser.add_argument('--output_data_dir', type=str, required=True, help='Path to a directory for output dataset files')
     parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name')
-    parser.add_argument('--custom_tokenizer_path', type=str, help='Custom tokenizer path')
+    parser.add_argument('--hf_tokenizer_path', type=str, help='HuggingFace tokenizer path')
     
     args = parser.parse_args()
-    tokenizer = init_tokenizer(args.output_data_dir, args.tiktoken_tokenizer_name, args.custom_tokenizer_path)
+    tokenizer = init_tokenizer(args.output_data_dir, args.tiktoken_tokenizer_name, args.hf_tokenizer_path)
     txt_files_df = load_list_of_txt_files(args.index_file, args.input_data_dir, args.data_split)
     create_datasets(txt_files_df, tokenizer, args.input_data_dir, args.output_data_dir)
     

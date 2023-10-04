@@ -52,35 +52,17 @@ class AllamoSampler:
         
     def __load_tokenizer(self, config: AllamoConfiguration, config_checkpoint):
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
-        custom_tokenizer_path = config.custom_tokenizer_path
-        llama_tokenizer_path = config.llama_tokenizer_path
-        # look for the meta pickle in case it is available in the dataset folder
-        if 'config' in config_checkpoint and 'dataset' in config_checkpoint['config']:
-            meta_path = os.path.join(config.data_dir, config_checkpoint['config']['dataset'], 'meta.pkl')
-            if os.path.exists(meta_path):
-                self.logger.info(f"Loading meta from {meta_path}...")
-                with open(meta_path, 'rb') as f:
-                    meta = pickle.load(f)
-                if 'tiktoken_tokenizer_name' in meta and meta['tiktoken_tokenizer_name']:
-                    tiktoken_tokenizer_name = meta['tiktoken_tokenizer_name']
-                if 'custom_tokenizer_path' in meta and meta['custom_tokenizer_path']:
-                    custom_tokenizer_path = meta['custom_tokenizer_path']
-                if 'llama_tokenizer_path' in meta and meta['llama_tokenizer_path']:
-                    llama_tokenizer_path = meta['llama_tokenizer_path']
-        if custom_tokenizer_path is not None:
-            from transformers import PreTrainedTokenizerFast
-            tokenizer = PreTrainedTokenizerFast(tokenizer_file=custom_tokenizer_path)
-            self.logger.info(f"Custom tokenizer path: {custom_tokenizer_path}")
-        elif llama_tokenizer_path is not None:
-            from transformers import LlamaTokenizer
-            tokenizer = LlamaTokenizer.from_pretrained(llama_tokenizer_path)
-            self.logger.info(f"LLaMA tokenizer path: {llama_tokenizer_path}")
+        hf_tokenizer_path = config.hf_tokenizer_path
+        if hf_tokenizer_path is not None:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_path)
+            self.logger.info(f"HuggingFace tokenizer loaded: {hf_tokenizer_path}")
         elif tiktoken_tokenizer_name is not None:
             import tiktoken
             tokenizer = tiktoken.get_encoding(tiktoken_tokenizer_name)
-            self.logger.info(f"Tiktoken tokenizer name: {tiktoken_tokenizer_name}")
+            self.logger.info(f"Tiktoken tokenizer loaded: {tiktoken_tokenizer_name}")
         else:
-            raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a custom tokenizer')
+            raise Exception('Tokenizer is not provided. Please specify either a Tiktoken tokenizer or a HuggingFace tokenizer')
         # ensure that the tokenizer and model vocabulary sizes are equal
         assert len(tokenizer) == self.model.config.vocab_size
         self.tokenizer = tokenizer

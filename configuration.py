@@ -25,8 +25,7 @@ class AllamoConfiguration:
     always_save_checkpoint: bool = True
     vocab_size: int = 100277
     tiktoken_tokenizer_name: str = 'cl100k_base'
-    custom_tokenizer_path: str = None
-    llama_tokenizer_path: str = None
+    hf_tokenizer_path: str = None
     wandb_log: bool = False
     wandb_project: str = 'allamo'
     wandb_run_name: str = 'allamo-run-' + str(time.time())
@@ -97,10 +96,9 @@ class AllamoConfiguration:
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
         parser.add_argument('--eval_only', type=bool, help='Exit right after the first evaluation. Indicates no training.')
         parser.add_argument('--always_save_checkpoint', type=bool, help='Enable saving the last checkpoint')
-        parser.add_argument('--vocab_size', type=int, help='Vacabulary size. Might be overwritten by provideded metadata or checkpoint')
-        parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by provideded metadata or checkpoint')
-        parser.add_argument('--custom_tokenizer_path', type=str, help='Custom tokenizer path. Might be overwritten by provideded metadata or checkpoint')
-        parser.add_argument('--llama_tokenizer_path', type=str, help='LLaMA tokenizer path. Might be overwritten by provideded metadata or checkpoint')
+        parser.add_argument('--vocab_size', type=int, help='Vacabulary size. Might be overwritten by checkpoint')
+        parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by checkpoint')
+        parser.add_argument('--hf_tokenizer_path', type=str, help='HuggingFace tokenizer path. Might be overwritten by checkpoint')
         parser.add_argument('--wandb_log', type=bool, help='Enable logging to wandb')
         parser.add_argument('--wandb_project', type=str, help='Wandb project name')
         parser.add_argument('--wandb_run_name', type=str, help='Wandb run name')
