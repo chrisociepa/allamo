@@ -13,11 +13,13 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# Flash Attention 2
+_flash_attention_version = 1 if hasattr(torch.nn.functional, 'scaled_dot_product_attention') else 0
 try:
     from flash_attn import flash_attn_func
+    _flash_attention_version = 2
+    _flash_attn_2_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 except ImportError:
-    pass
+    _flash_attn_2_supports_window_size = False
 
 @dataclass
 class AllamoTransformerConfig:
@@ -32,7 +34,7 @@ class AllamoTransformerConfig:
     bias: bool = True # True: bias in Linears. False: a bit better and faster
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
-    flash_attention_version: int = 0
+    sliding_window: int = None
 
 class RMSNorm(torch.nn.Module):
     """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
@@ -105,7 +107,7 @@ class Attention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        self.flash_attention_version = config.flash_attention_version
+        self.sliding_window = config.sliding_window if _flash_attn_2_supports_window_size else None
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
@@ -116,10 +118,10 @@ class Attention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(self.num_heads * self.head_size, self.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout) if self.flash_attention_version == 0 and config.dropout != 0 else None
+        self.attn_dropout = nn.Dropout(config.dropout) if _flash_attention_version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
-        if self.flash_attention_version == 0:
+        if _flash_attention_version == 0:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
@@ -146,15 +148,19 @@ class Attention(nn.Module):
             v = self.repeat_kv(v, self.num_key_value_groups)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash_attention_version == 2:
+        if _flash_attention_version == 2:
             # Flash Attention 2 requires (B, T, nh, hs)
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
-            y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True).transpose(1, 2)
-        elif self.flash_attention_version == 1:
+            if self.sliding_window:            
+                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
+            else:
+                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
+        elif _flash_attention_version == 1:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = y.transpose(1, 2)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -163,9 +169,10 @@ class Attention(nn.Module):
             if self.attn_dropout is not None:
                 att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
+            y = y.transpose(1, 2)
 
         # output projection
+        y = y.contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
         y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
@@ -200,7 +207,6 @@ class AllamoTransformer(nn.Module):
         self.logger = logging.getLogger('AllamoTransformer')
         assert config.vocab_size is not None
         assert config.block_size is not None
-        config.flash_attention_version = self.__detect_flash_attention_version()
         self.config = config
         self.max_seq_len = config.block_size
         if config.head_size is None:
@@ -210,6 +216,7 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         self.logger.info(f"AllamoTransformerConfig: {config}")
+        self.__log_flash_attention_version()
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
@@ -235,18 +242,17 @@ class AllamoTransformer(nn.Module):
         model_bytes /= 1024**2
         self.logger.info(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
 
-    def __detect_flash_attention_version(self):
-        if 'flash_attn_func' in globals() and callable(globals()['flash_attn_func']):
+    def __log_flash_attention_version(self):
+        if _flash_attention_version == 2:
             self.logger.info("Using Flash Attention 2")
-            return 2
-        else:
-            self.logger.info("Flash Attention 2 is not installed.")
-        if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+            if _flash_attn_2_supports_window_size and self.config.sliding_window:
+                self.logger.info("Using sliding window")
+        elif _flash_attention_version == 1:
             self.logger.info("Using Flash Attention 1")
-            return 1
-        else:
+        elif _flash_attention_version == 0:
             self.logger.info("WARNING: using slow attention")
-            return 0
+        else:
+            raise Exception('Unsupported Flash Attention version!')
 
     def estimate_size(self):
         """
