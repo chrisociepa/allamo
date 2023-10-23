@@ -75,7 +75,7 @@ class SimpleDataLoader:
             data = self.val_data
             data_size = self.val_data_size
         if random_samples == False and split == 'train' and self.config.dataset_seq_train:
-            ix = torch.zeros(self.batch_size, dtype=torch.int)
+            ix = torch.zeros(self.batch_size, dtype=torch.int64)
             end_of_batch = self.dataset_train_x_start + (self.batch_size-1) * self.config.dataset_seq_step_size + self.config.block_size + 1 >= data_size
             if end_of_batch:
                 # align to the right
