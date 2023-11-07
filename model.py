@@ -26,6 +26,8 @@ except ImportError:
 class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
+    rope_freq_base: int = 10000
+    rope_freq_scale: float = 1.0
     n_layer: int = 12
     num_kv_heads: Union[None, int] = None
     head_size: Union[None, int] = None
@@ -53,9 +55,9 @@ class RMSNorm(torch.nn.Module):
         
 class RotaryEmbedding(torch.nn.Module):
     
-    def __init__(self, dim, max_position_embeddings=2048, base=10000):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, scale=1.0):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (scale * (base ** (torch.arange(0, dim, 2).float() / dim)))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         t = torch.arange(max_position_embeddings, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
@@ -230,7 +232,6 @@ class AllamoTransformer(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        self.max_seq_len = config.block_size
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
@@ -250,7 +251,7 @@ class AllamoTransformer(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2)
+        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2, config.rope_freq_base, config.rope_freq_scale)
 
         # init all weights
         self.apply(self._init_weights)
@@ -300,7 +301,7 @@ class AllamoTransformer(nn.Module):
             
     def token_embeddings(self, input_ids):
         _, t = input_ids.size()
-        assert t <= self.max_seq_len, f"Cannot forward sequence of length {t}, block size is only {self.max_seq_len}"
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         x = self.tok_embeddings(input_ids) # token embeddings of shape (b, t, n_embd)
         if self.tok_drop is not None:
@@ -320,7 +321,7 @@ class AllamoTransformer(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
         if inputs_embeds is not None:
             b, t, n_embd = inputs_embeds.size()
-            assert t <= self.max_seq_len, f"Cannot forward embeddings of length {t}, block size is only {self.max_seq_len}"
+            assert t <= self.config.block_size, f"Cannot forward embeddings of length {t}, block size is only {self.config.block_size}"
         else:
             inputs_embeds = self.token_embeddings(input_ids)
         hidden_states = self.apply_layers(inputs_embeds)
@@ -375,10 +376,15 @@ class AllamoTransformer(nn.Module):
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        if tokens.size(1) > self.config.block_size:
+            self.logger.info(
+                f"Input of {tokens.size(1)} tokens exceeds limit {self.config.block_size}. "
+                f"Initial tokens will be dropped to fit."
+            )
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            if tokens.size(1) > self.max_seq_len:
-                tokens = tokens[:, -self.max_seq_len:]
+            if tokens.size(1) > self.config.block_size:
+                tokens = tokens[:, -self.config.block_size:]
             # forward the model to get the logits for the tokens
             logits = self(tokens)[0]
             # pluck the logits at the final step and scale by desired temperature
