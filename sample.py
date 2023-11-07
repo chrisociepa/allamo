@@ -5,6 +5,7 @@ import logging
 import os
 import pickle
 from contextlib import nullcontext
+import time
 import torch
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
@@ -88,12 +89,15 @@ class AllamoSampler:
                 
     def generate_completions(self, text: str, samples: int, new_tokens: int, temperature: float, top_k: int):
         result = []
+        timer = time.time()
         with torch.no_grad():
             with self.ctx:
                 prompt_tokens = self.encode_prompt(text)
                 for k in range(samples):
                     y = self.model.generate(prompt_tokens, new_tokens, temperature=temperature, top_k=top_k)
                     result.append(self.tokenizer.decode(y[0].tolist()).strip())
+        dt = time.time() - timer
+        self.logger.info(f"{new_tokens*samples} completion tokens generated in {dt:.2f}secs ({new_tokens*samples/dt:.2f} tokens/sec) for {prompt_tokens.shape[1]} input tokens")
         return result
 
 
