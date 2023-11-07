@@ -297,14 +297,13 @@ class AllamoTrainer:
                 train_ppl = torch.exp(train_loss)
                 val_ppl = torch.exp(val_loss)
                 self.logger.info(f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} (best loss={self.best_val_loss:.4f}), tokens {self.processed_tokens:,}")
-                if losses['train'] < self.best_train_loss:
-                    self.best_train_loss = losses['train']
-                if losses['val'] < self.best_val_loss:
-                    self.best_val_loss = losses['val']
-                    if self.iter_num > 0:
+                if self.iter_num > self.start_iter:
+                    if losses['train'] < self.best_train_loss:
+                        self.best_train_loss = losses['train']
+                    if losses['val'] < self.best_val_loss:
+                        self.best_val_loss = losses['val']
                         self.save_checkpoint('ckpt.pt')
-                if self.config.always_save_checkpoint:
-                    if self.iter_num > 0:
+                    if self.config.always_save_checkpoint:
                         self.save_checkpoint('last_eval_ckpt.pt')
                 if self.config.wandb_log:
                     wandb.log({

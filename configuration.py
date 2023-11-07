@@ -30,8 +30,9 @@ class AllamoConfiguration:
     wandb_project: str = 'allamo'
     wandb_run_name: str = 'allamo-run-' + str(time.time())
     dataset: str = 'openwebtext'
-    gradient_accumulation_steps: int = 8 
-    batch_size: int = 64 
+    gradient_checkpointing: bool = False
+    gradient_accumulation_steps: int = 8
+    batch_size: int = 64
     block_size: int = 1024
     sliding_window: int = None
     dataset_seq_train: bool = False
@@ -104,6 +105,7 @@ class AllamoConfiguration:
         parser.add_argument('--wandb_project', type=str, help='Wandb project name')
         parser.add_argument('--wandb_run_name', type=str, help='Wandb run name')
         parser.add_argument('--dataset', type=str, help='The name of dataset directory in the data_dir')
+        parser.add_argument('--gradient_checkpointing', type=bool, help='Enable gradient checkpointing')
         parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')

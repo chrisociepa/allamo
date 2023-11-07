@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 _flash_attention_version = 1 if hasattr(torch.nn.functional, 'scaled_dot_product_attention') else 0
 try:
@@ -35,6 +36,7 @@ class AllamoTransformerConfig:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
     sliding_window: int = None
+    gradient_checkpointing: bool = False
 
 class RMSNorm(torch.nn.Module):
     """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
@@ -51,12 +53,12 @@ class RMSNorm(torch.nn.Module):
         
 class RotaryEmbedding(torch.nn.Module):
     
-    def __init__(self, dim: int, max_seq_len=2048, theta: float = 10000.0):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000):
         super().__init__()
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        t = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        t = torch.arange(max_position_embeddings, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -90,12 +92,19 @@ class FeedForward(nn.Module):
         self.up_proj = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
         self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
+        self.gradient_checkpointing = config.gradient_checkpointing
 
     def forward(self, x):
-        x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if self.training and self.gradient_checkpointing:
+            x = checkpoint(self.mlp, x, use_reentrant=False, preserve_rng_state=False)
+        else:
+            x = self.mlp(x)
         if self.dropout is not None:
             x = self.dropout(x)
         return x
+        
+    def mlp(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class Attention(nn.Module):
 
@@ -105,18 +114,18 @@ class Attention(nn.Module):
         self.num_heads = config.n_head
         self.num_kv_heads = config.num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
-        self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.sliding_window = config.sliding_window if _flash_attn_2_supports_window_size else None
+        self.gradient_checkpointing = config.gradient_checkpointing
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
         # key, query, value projections for all heads
-        self.q_proj = nn.Linear(self.n_embd, self.num_heads * self.head_size, bias=config.bias)
-        self.k_proj = nn.Linear(self.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
-        self.v_proj = nn.Linear(self.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
+        self.q_proj = nn.Linear(config.n_embd, self.num_heads * self.head_size, bias=config.bias)
+        self.k_proj = nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
+        self.v_proj = nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(self.num_heads * self.head_size, self.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(self.num_heads * self.head_size, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout) if _flash_attention_version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
@@ -134,12 +143,14 @@ class Attention(nn.Module):
         # nh | number of heads
         B, T, C = q_x.size()
         
-        if kv_x is None:
-            kv_x = q_x # self attention
+        if self.training and self.gradient_checkpointing:
+            q, k, v = checkpoint(self.project_qkv, q_x, kv_x, use_reentrant=False, preserve_rng_state=False)
+        else:
+            q, k, v = self.project_qkv(q_x, kv_x)
         
-        q = self.q_proj(q_x).view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        k = self.k_proj(kv_x).view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = self.v_proj(kv_x).view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
         q, k = rotary_emb(q, k)
         
@@ -173,10 +184,21 @@ class Attention(nn.Module):
 
         # output projection
         y = y.contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
-        y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
+        if self.training and self.gradient_checkpointing:
+            y = checkpoint(self.c_proj, y, use_reentrant=False, preserve_rng_state=False)
+        else:
+            y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
         return y
+        
+    def project_qkv(self, q_x: torch.Tensor, kv_x: torch.Tensor):
+        if kv_x is None:
+            kv_x = q_x # self attention
+        q = self.q_proj(q_x)
+        k = self.k_proj(kv_x)
+        v = self.v_proj(kv_x)
+        return q, k, v
         
     def repeat_kv(self, x: torch.Tensor, num_key_value_groups: int) -> torch.Tensor:
         # (B, num_kv_heads, T, hs) -> (B, nh, T, hs)
