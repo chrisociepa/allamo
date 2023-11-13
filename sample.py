@@ -50,6 +50,7 @@ class AllamoSampler:
         if config.compile:
             model = torch.compile(model) # requires PyTorch 2.0 (optional)
         self.model = model
+        self.logger.info(f"Model loaded from checkpoint at the last iteration: {config_checkpoint['iter_num']}")
         
     def __load_tokenizer(self, config: AllamoConfiguration, config_checkpoint):
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
