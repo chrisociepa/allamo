@@ -255,15 +255,9 @@ class AllamoTransformer(nn.Module):
 
         # init all weights
         self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
-
-        model_params, model_bytes = self.estimate_size()
-        model_params /= 1e6
-        model_bytes /= 1024**2
-        self.logger.info(f"Model parameters: {model_params:.2f}M Est. Size: {model_bytes:.3f}MB")
+        self._init_scaled_residual_projections(self)
+        
+        self.log_estimated_size()
 
     def __log_flash_attention_version(self):
         if _flash_attention_version == 2:
@@ -290,6 +284,12 @@ class AllamoTransformer(nn.Module):
             # don't count buffers as params
             bytes += b.numel() * b.element_size()
         return params, bytes
+        
+    def log_estimated_size(self):
+        model_params, model_bytes = self.estimate_size()
+        model_params /= 1e6
+        model_bytes /= 1024**2
+        self.logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -298,6 +298,24 @@ class AllamoTransformer(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            
+    def _init_scaled_residual_projections(self, module):
+        for pn, p in module.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.config.n_layer))
+            
+    def add_layer(self, new_layers=1):
+        for _ in range(new_layers):
+            layer = SelfAttentionBlock(self.config)
+            layer.apply(self._init_weights)
+            self._init_scaled_residual_projections(layer)
+            self.layers.append(layer)
+            self.config.n_layer += 1
+            
+    def freeze_params(self, module):
+        for param in module.parameters():
+            if param.requires_grad:
+                param.requires_grad = False
             
     def token_embeddings(self, input_ids):
         _, t = input_ids.size()
