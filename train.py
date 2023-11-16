@@ -56,7 +56,10 @@ class AllamoTrainer:
             self.ddp_rank = int(os.environ['RANK'])
             self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
             self.ddp_world_size = int(os.environ['WORLD_SIZE'])
-            print(f"RANK: {self.ddp_rank}, LOCAL_RANK: {self.ddp_local_rank}, WORLD_SIZE: {self.ddp_world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}")
+            self.logger.info(
+                f"RANK: {self.ddp_rank}, LOCAL_RANK: {self.ddp_local_rank}, "
+                f"WORLD_SIZE: {self.ddp_world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}"
+            )
             config.device = f'cuda:{self.ddp_local_rank}'
             torch.cuda.set_device(config.device)
             self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
@@ -170,7 +173,10 @@ class AllamoTrainer:
         if config.grad_accum_schedule: 
             config.grad_accum_max = config.gradient_accumulation_steps
             config.gradient_accumulation_steps = config.grad_accum_initial
-            self.logger.info(f"Gradient accumulation scheduler enabled. Current gradient accumulation steps: {config.gradient_accumulation_steps}")
+            self.logger.info(
+                f"Gradient accumulation scheduler enabled. "
+                f"Current gradient accumulation steps: {config.gradient_accumulation_steps}"
+            )
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
         
         if config.decay_lr:
@@ -296,7 +302,12 @@ class AllamoTrainer:
                 val_loss = losses['val']
                 train_ppl = torch.exp(train_loss)
                 val_ppl = torch.exp(val_loss)
-                self.logger.info(f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} (best loss={self.best_val_loss:.4f}), tokens {self.processed_tokens:,}")
+                self.logger.info(
+                    f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
+                    f"acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), "
+                    f"val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} "
+                    f"(best loss={self.best_val_loss:.4f}), tokens {self.processed_tokens:,}"
+                )
                 if self.iter_num > self.start_iter:
                     if losses['train'] < self.best_train_loss:
                         self.best_train_loss = losses['train']
@@ -378,7 +389,11 @@ class AllamoTrainer:
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
                 lossf = loss.item() * micro_steps
                 ppl = torch.exp(torch.tensor(lossf))
-                self.logger.info(f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, ETA: {self.calculate_eta()}")
+                self.logger.info(
+                    f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
+                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
+                    f"ETA: {self.calculate_eta()}"
+                )
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
