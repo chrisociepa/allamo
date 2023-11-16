@@ -321,6 +321,8 @@ class AllamoTrainer:
                         "eval/best_train_loss": self.best_train_loss,
                         "eval/best_val_loss": self.best_val_loss
                     })
+                gc.collect()
+                torch.cuda.empty_cache()
             
             if self.config.eval_only:
                 break
