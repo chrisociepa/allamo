@@ -329,6 +329,7 @@ class AllamoTrainer:
                         "eval/val_acc": accuraces['val'],
                         "eval/diff_loss": (val_loss-train_loss),
                         "eval/diff_acc": (accuraces['train']-accuraces['val']),
+                        "eval/diff_ppl": (val_ppl-train_ppl),
                         "eval/best_train_loss": self.best_train_loss,
                         "eval/best_val_loss": self.best_val_loss
                     })
