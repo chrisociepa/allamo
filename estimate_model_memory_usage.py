@@ -12,7 +12,8 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger('AllamoModelEstimator')
 
 config = AllamoConfiguration()
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+if config.dtype == 'bfloat16-true':
+    torch.set_default_dtype(torch.bfloat16)
 
 transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
 model_args = {k: getattr(config, k) for k in transformer_config_fields if hasattr(config, k)}
@@ -27,7 +28,7 @@ if 'cuda' in config.device:
     model_input = torch.randint(0, config.vocab_size, (config.block_size,), dtype=torch.int64).unsqueeze(0).repeat(config.batch_size, 1)
     logger.info(f"Max Sequence size: {(model_input.numel() * model_input.element_size())/(1024*1024)}")
     a = torch.cuda.memory_allocated(config.device)
-    model.to(device=config.device, dtype=ptdtype)
+    model.to(device=config.device)
     b = torch.cuda.memory_allocated(config.device)
     with torch.no_grad():
         output = model(model_input.to(config.device))[0].sum() # Taking the sum here just to get a scalar output
@@ -38,15 +39,17 @@ if 'cuda' in config.device:
     logger.info(f"Inference Maximum Memory Estimate: {inference_memory/(1024*1024)}")
     
     if optimizer is not None:
-        model.to(torch.float32) # Keep the model in full precision when training
         gc.collect()
         torch.cuda.empty_cache()
         b = torch.cuda.memory_allocated(config.device)
         output = model(model_input.to(config.device))[0].sum() # Taking the sum here just to get a scalar output
         c = torch.cuda.memory_allocated(config.device)
         amp_multiplier = .5 if config.dtype == 'float16' or config.dtype == 'bfloat16' else 1
-        model_memory /= amp_multiplier
-        forward_pass_memory = (c - b)*amp_multiplier
+        # More details: https://stackoverflow.com/a/76994670
+        activations = 32 * config.n_layer * (34 * config.block_size * config.n_embd + 5 * config.n_head * config.block_size^2) / 2
+        if config.dtype == 'bfloat16-true':
+            activations /= 2
+        forward_pass_memory = activations #(c - b)*amp_multiplier
         logger.info(f"Forward pass memory: {forward_pass_memory/(1024*1024)}")
         gradient_memory = model_memory
         if optimizer == 'Adam':

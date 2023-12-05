@@ -145,7 +145,7 @@ class AllamoConfiguration:
         parser.add_argument('--min_lr', type=float, help='Minimum learning rate')
         parser.add_argument('--backend', type=str, help='"nccl", "gloo", etc.')
         parser.add_argument('--device', type=str, help='"cpu", "cuda", "cuda:0", "cuda:1" etc., or try "mps" on macbooks')
-        parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'float16'], help='Type of tensor to be used in the model')
+        parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'bfloat16-true', 'float16'], help='Type of tensor to be used in the model')
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
         parser.add_argument('--compile_mode', type=str, choices=['default', 'reduce-overhead', 'max-autotune'], help='Specifies what the PyTorch compiler should be optimizing while compiling')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
