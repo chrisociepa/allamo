@@ -11,21 +11,25 @@ from configuration import AllamoConfiguration
 
 class SimpleDataLoader:
 
-    def __init__(self, config: AllamoConfiguration):
+    def __init__(self, config: AllamoConfiguration, ddp_rank=None, ddp_world_size=None):
         self.logger = logging.getLogger('AllamoSimpleDataLoader')
         self.config = config
         self.epoch = 0
+        self.rank = ddp_rank if ddp_rank is not None else 0
+        self.world_size = ddp_world_size if ddp_world_size is not None else 1
         
         if config.batch_size_schedule: 
             self.config.batch_size_max = config.batch_size
             self.batch_size = config.batch_size_initial
         else:
             self.batch_size = config.batch_size
-            
+        
         if self.config.dataset_seq_train:
-            self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else random.randint(0, self.config.block_size)
+            self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
+            self.logger.info(f"Training dataset offset set to {self.dataset_train_x_start:,} tokens")
         else:
             self.dataset_train_x_start = 0
+        
         self.__load_datasets()
         self.logger.info(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
         if self.val_data is None:
@@ -34,7 +38,7 @@ class SimpleDataLoader:
         else:
             self.splits = ['train', 'val']
             self.logger.info(f"Val dataset loaded. Size: {self.val_data_size:,} tokens")
-            
+        
     def __load_datasets(self):
         data_dir = os.path.join(self.config.data_dir, self.config.dataset)
         train_data_path = os.path.join(data_dir, 'train.bin')
@@ -76,21 +80,20 @@ class SimpleDataLoader:
             data_size = self.val_data_size
         if random_samples == False and split == 'train' and self.config.dataset_seq_train:
             ix = torch.zeros(self.batch_size, dtype=torch.int64)
-            end_of_batch = self.dataset_train_x_start + (self.batch_size-1) * self.config.dataset_seq_step_size + self.config.block_size + 1 >= data_size
+            end_of_batch = self.dataset_train_x_start + (self.world_size * self.batch_size - 1) * self.config.dataset_seq_step_size + self.config.block_size + 1 >= data_size
             if end_of_batch:
                 # align to the right
-                self.dataset_train_x_start = data_size - ((self.batch_size-1) * self.config.dataset_seq_step_size + self.config.block_size + 1)
+                self.dataset_train_x_start = data_size - ((self.world_size * self.batch_size - 1) * self.config.dataset_seq_step_size + self.config.block_size + 1)
 
             for i in range(self.batch_size):
-                last_x_start = self.dataset_train_x_start + i * self.config.dataset_seq_step_size
-                ix[i] = last_x_start
+                ix[i] = self.dataset_train_x_start + (self.rank * self.batch_size) * self.config.dataset_seq_step_size + i * self.config.dataset_seq_step_size
                 
             if end_of_batch:
                 self.epoch += 1
                 self.logger.info(f"Staring new epoch: {self.epoch}")
-                self.dataset_train_x_start = random.randint(0, self.batch_size-1)
+                self.dataset_train_x_start = 0
             else:    
-                self.dataset_train_x_start = last_x_start + self.config.dataset_seq_step_size 
+                self.dataset_train_x_start += (self.world_size * self.batch_size) * self.config.dataset_seq_step_size
         else:
             ix = torch.randint(data_size - self.config.block_size, (self.batch_size,))
         x = torch.stack([torch.from_numpy(data[i:i+self.config.block_size].astype(np.int64)) for i in ix])

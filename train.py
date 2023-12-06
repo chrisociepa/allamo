@@ -36,12 +36,12 @@ class AllamoTrainer:
         self.processed_tokens = 0
         self.__init_training(config)
         
-        self.simple_data_loader = SimpleDataLoader(config)
+        self.simple_data_loader = SimpleDataLoader(config, self.ddp_rank, self.ddp_world_size)
         
     def __init_logger(self, config: AllamoConfiguration):
         run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
         if self.ddp:
-            log_file_name_base = f'train-{run_timestamp_str}-r{self.ddp_rank}-lr{self.ddp_local_rank}'
+            log_file_name_base = f'train-{run_timestamp_str}-rank_{self.ddp_rank}'
         else:
             log_file_name_base = f'train-{run_timestamp_str}'
         log_file_path = os.path.join(config.out_dir, f'{log_file_name_base}.log')
@@ -66,6 +66,9 @@ class AllamoTrainer:
             self.seed_offset = self.ddp_rank # each process gets a different seed
         else:
             # if not ddp, we are running on a single gpu, and one process
+            self.ddp_rank = 0
+            self.ddp_local_rank = None
+            self.ddp_world_size = 1
             self.master_process = True
             self.seed_offset = 0
     
