@@ -56,7 +56,7 @@ class AllamoTrainer:
             self.ddp_rank = int(os.environ['RANK'])
             self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
             self.ddp_world_size = int(os.environ['WORLD_SIZE'])
-            self.logger.info(
+            print(
                 f"RANK: {self.ddp_rank}, LOCAL_RANK: {self.ddp_local_rank}, "
                 f"WORLD_SIZE: {self.ddp_world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}"
             )
