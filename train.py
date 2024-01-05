@@ -279,12 +279,17 @@ class AllamoTrainer:
         minutes, seconds = divmod(remainder, 60)
         return f"{int(hours)}:{int(minutes):02}:{int(seconds):02}"
         
+    def has_next_iter_to_perform(self):
+        if self.config.num_train_epochs is not None and self.simple_data_loader.epoch >= self.config.num_train_epochs:
+            return False
+        return self.iter_num <= self.config.max_iters
+        
     def train(self):
         # training loop
         X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
-        while self.iter_num <= self.config.max_iters:
+        while self.has_next_iter_to_perform():
             log_iter = (self.iter_num % self.config.log_interval == 0 and self.master_process)
             eval_iter = (self.iter_num % self.config.eval_interval == 0 and self.master_process)
 

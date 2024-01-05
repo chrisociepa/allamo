@@ -58,6 +58,7 @@ class AllamoConfiguration:
     multiple_of: int = 256
     norm_eps: float = 1e-5
     learning_rate: float = 6e-4
+    num_train_epochs: int = None
     max_iters: int = 600000
     weight_decay: float = 1e-1
     beta1: float = 0.9
@@ -133,6 +134,7 @@ class AllamoConfiguration:
         parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
+        parser.add_argument('--num_train_epochs', type=int, help='Total number of training epochs to perform')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
         parser.add_argument('--weight_decay', type=float, help='Max learning rate')
         parser.add_argument('--beta1', type=float, help='Adamw optimizer Beta1 param')
