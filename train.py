@@ -21,6 +21,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 from simple_data_loader import SimpleDataLoader
+from simple_instructions_data_loader import SimpleInstructionsDataLoader
 
 class AllamoTrainer:
 
@@ -36,7 +37,10 @@ class AllamoTrainer:
         self.processed_tokens = 0
         self.__init_training(config)
         
-        self.simple_data_loader = SimpleDataLoader(config, self.ddp_rank, self.ddp_world_size)
+        if config.dataloader_type == 'instructions':
+            self.simple_data_loader = SimpleInstructionsDataLoader(config, self.ddp_rank, self.ddp_world_size)
+        else:
+            self.simple_data_loader = SimpleDataLoader(config, self.ddp_rank, self.ddp_world_size)
         
     def __init_logger(self, config: AllamoConfiguration):
         run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
@@ -426,7 +430,7 @@ class AllamoTrainer:
         training_time = self.format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
         
-        if self.master_process:
+        if self.master_process and not self.config.eval_only:
             self.save_checkpoint('final_ckpt.pt')
 
 if __name__ == '__main__':

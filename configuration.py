@@ -35,6 +35,7 @@ class AllamoConfiguration:
     batch_size: int = 64
     block_size: int = 1024
     sliding_window: int = None
+    dataloader_type: str = 'base'
     dataset_seq_train: bool = False
     dataset_seq_train_start: int = None
     dataset_seq_step_size: int = 512 
@@ -113,6 +114,7 @@ class AllamoConfiguration:
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')
+        parser.add_argument('--dataloader_type', type=str, choices=['base', 'instructions'], help='The type of Simple Data Loader')
         parser.add_argument('--dataset_seq_train', type=bool, help='Iterate dataset sequentially')
         parser.add_argument('--dataset_seq_train_start', type=int, help='Position in tokens to start with')
         parser.add_argument('--dataset_seq_step_size', type=int, help='Step size when iterate dataset sequentially. E.g. block_size/2')

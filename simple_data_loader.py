@@ -90,7 +90,7 @@ class SimpleDataLoader:
                 
             if end_of_batch:
                 self.epoch += 1
-                self.logger.info(f"Staring new epoch: {self.epoch}")
+                self.logger.info(f"Starting new epoch: {self.epoch}")
                 self.dataset_train_x_start = 0
             else:    
                 self.dataset_train_x_start += (self.world_size * self.batch_size) * self.config.dataset_seq_step_size
