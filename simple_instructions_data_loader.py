@@ -41,6 +41,9 @@ class SimpleInstructionsDataLoader:
         self.train_data = torch.load(train_data_path)
         self.train_data_size = len(self.train_data)
         self.__truncate_long_instructions(self.train_data)
+        if self.config.dataset_seq_train:
+            # start from the longest instructions to optimize training
+            self.train_data.sort(key=len, reverse=True)
         
         val_data_path = os.path.join(data_dir, 'val-instructions.pt')
         if os.path.exists(val_data_path):
