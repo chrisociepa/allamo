@@ -12,6 +12,8 @@ import time
 import torch
 from configuration import AllamoConfiguration
 
+IGNORE_INDEX = -100
+
 class SimpleInstructionsDataLoader:
 
     def __init__(self, config: AllamoConfiguration, ddp_rank=None, ddp_world_size=None):
@@ -40,22 +42,41 @@ class SimpleInstructionsDataLoader:
         train_data_path = os.path.join(data_dir, 'train-instructions.pt')
         self.train_data = torch.load(train_data_path)
         self.train_data_size = len(self.train_data)
-        self.__truncate_long_instructions(self.train_data)
-        if self.config.dataset_seq_train:
-            # start from the longest instructions to optimize training
-            self.train_data.sort(key=len, reverse=True)
+        if self.config.compile:
+            # dynamic shape of the input causes recompilations
+            self.__pad_instructions_to_block_size(self.train_data)
+        else:
+            self.__truncate_long_instructions(self.train_data)
         
         val_data_path = os.path.join(data_dir, 'val-instructions.pt')
         if os.path.exists(val_data_path):
             self.val_data = torch.load(val_data_path)
             self.val_data_size = len(self.val_data)
-            self.__truncate_long_instructions(self.val_data)
+            if self.config.compile:
+                # dynamic shape of the input causes recompilations
+                self.__pad_instructions_to_block_size(self.val_data)
+            else:
+                self.__truncate_long_instructions(self.val_data)
         else:
             self.val_data = None
             
     def __truncate_long_instructions(self, data):
         max_length = self.config.block_size + 1
         for idx in range(len(data)):
+            data[idx] = data[idx][:max_length].to(torch.int64)
+            
+    def __pad_instructions_to_block_size(self, data):
+        """
+        Adds padding to instructions to maintain a consistent input shape, avoiding recompilations.
+        This method ensures all instructions have a uniform length matching the block size. 
+        By doing so, it prevents the need for frequent recompilations that occur due to 
+        dynamic input shapes, enhancing computational efficiency and stability.
+        """
+        max_length = self.config.block_size + 1
+        for idx in range(len(data)):
+            if len(data[idx]) < max_length:
+                padding = max_length - len(data[idx])
+                data[idx] = torch.cat([data[idx], torch.full((padding,), IGNORE_INDEX)], dim=0)
             data[idx] = data[idx][:max_length].to(torch.int64)
             
     def reload_datasets(self):
@@ -105,6 +126,8 @@ class SimpleInstructionsDataLoader:
         
         x = torch.stack([data[idx][:min_sample_length-1] for idx in idx_batch])
         y = torch.stack([data[idx][1:min_sample_length] for idx in idx_batch])
+        if self.config.compile:
+            x[x == IGNORE_INDEX] = 0 # replace with a valid token
         if 'cuda' in self.config.device:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)
