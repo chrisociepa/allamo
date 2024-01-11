@@ -122,7 +122,7 @@ class SimpleInstructionsDataLoader:
             if self.dataset_train_x_start >= data_size:
                 self.epoch += 1
                 self.dataset_train_x_start = 0
-                self.logger.info(f"Starting new epoch: {self.epoch}")
+                self.logger.info(f"Epoch {self.epoch} finished")
         
         x = torch.stack([data[idx][:min_sample_length-1] for idx in idx_batch])
         y = torch.stack([data[idx][1:min_sample_length] for idx in idx_batch])
