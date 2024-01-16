@@ -6,7 +6,7 @@
 
 This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
 
-If you want to see how we have trained a 1B model for the Polish language on a single RTX 4090 in 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
+If you're interested in seeing how we trained a 1B model for the Polish language using a single RTX 4090, with 60B tokens over 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
 
 ## Install
 
