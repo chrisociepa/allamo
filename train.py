@@ -15,8 +15,8 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
@@ -56,7 +56,7 @@ class AllamoTrainer:
             
     def __init_torch(self, config: AllamoConfiguration):
         if self.ddp:
-            init_process_group(backend=config.backend)
+            dist.init_process_group(backend=config.backend)
             self.ddp_rank = int(os.environ['RANK'])
             self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
             self.ddp_world_size = int(os.environ['WORLD_SIZE'])
@@ -446,4 +446,4 @@ if __name__ == '__main__':
     trainer.train()  
       
     if ddp:
-        destroy_process_group()
+        dist.destroy_process_group()
