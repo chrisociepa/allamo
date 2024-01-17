@@ -91,11 +91,6 @@ class AllamoTrainer:
             torch.set_default_dtype(torch.bfloat16)
         
     def __init_training(self, config: AllamoConfiguration):
-        if self.ddp:
-            # world_size number of processes will be training simultaneously, so we can scale
-            # down the desired gradient accumulation iterations per process proportionally
-            assert config.gradient_accumulation_steps % self.ddp_world_size == 0
-            config.gradient_accumulation_steps //= self.ddp_world_size
         transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
         checkpoint_name = None
         if config.init_from == 'resume':
