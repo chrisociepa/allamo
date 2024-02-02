@@ -10,10 +10,18 @@ If you're interested in seeing how we trained a 1B model for the Polish language
 
 ## Install
 
+You can easily install and `import allamo` into your project:
+
+```
+git clone https://github.com/chrisociepa/allamo.git
+cd allamo
+pip install -e .
+```
+
 Dependencies:
 
-- Python 3
-- [pytorch](https://pytorch.org)
+- Python 3.8+
+- [pytorch](https://pytorch.org) - PyTorch 2 is highly recommended
 - [numpy](https://numpy.org/install/)
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
