@@ -57,21 +57,25 @@ class RotaryEmbedding(torch.nn.Module):
     
     def __init__(self, dim, max_position_embeddings=2048, base=10000, scale=1.0):
         super().__init__()
+        self.max_position_embeddings = max_position_embeddings
         inv_freq = 1.0 / (scale * (base ** (torch.arange(0, dim, 2).float() / dim)))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        t = torch.arange(max_position_embeddings, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        
+    def _set_cos_sin_cache(self, dtype):
+        t = torch.arange(self.max_position_embeddings, device=self.inv_freq.device, dtype=torch.int64).type_as(self.inv_freq)
+        freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        dtype = torch.get_default_dtype()
         self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
         
-    def forward(self, q, k):
+    def forward(self, q, k, seq_len=None):
         # q,k: [bs, num_attention_heads, seq_len, head_size]
-        cos = self.cos_cached[:, :, :q.shape[-2], ...].to(dtype=q.dtype)
-        sin = self.sin_cached[:, :, :q.shape[-2], ...].to(dtype=q.dtype)
+        if not hasattr(self, 'cos_cached'):
+            self._set_cos_sin_cache(q.dtype)
+            
+        cos = self.cos_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
+        sin = self.sin_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
         k_out = (k * cos) + (self.__rotate_half(k) * sin)
         return q_out, k_out
@@ -154,7 +158,7 @@ class Attention(nn.Module):
         k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        q, k = rotary_emb(q, k)
+        q, k = rotary_emb(q, k, T)
         
         if self.num_key_value_groups > 1:
             k = self.repeat_kv(k, self.num_key_value_groups)
@@ -265,7 +269,7 @@ class AllamoTransformer(nn.Module):
             if _flash_attn_2_supports_window_size and self.config.sliding_window:
                 self.logger.info("Using sliding window")
         elif _flash_attention_version == 1:
-            self.logger.info("Using Flash Attention 1")
+            self.logger.info("Using scaled_dot_product_attention")
         elif _flash_attention_version == 0:
             self.logger.info("WARNING: using slow attention")
         else:
