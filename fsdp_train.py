@@ -474,9 +474,7 @@ class AllamoFSDPTrainer:
             
         training_time = self.format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
-        
-        if self.master_process:
-            self.save_checkpoint('final_ckpt.pt')
+        self.save_checkpoint('final_ckpt.pt')
 
 if __name__ == '__main__':
     config = AllamoConfiguration()
