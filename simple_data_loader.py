@@ -17,6 +17,7 @@ class SimpleDataLoader:
         self.epoch = 0
         self.rank = ddp_rank if ddp_rank is not None else 0
         self.world_size = ddp_world_size if ddp_world_size is not None else 1
+        self.pin_memory = True
         
         if config.batch_size_schedule: 
             self.config.batch_size_max = config.batch_size
@@ -26,6 +27,9 @@ class SimpleDataLoader:
         
         if self.config.dataset_seq_train:
             self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
+            if config.dataset_seq_step_size is None:
+                config.dataset_seq_step_size = config.block_size
+                self.logger.info(f"Sequential step set to {config.block_size:,} tokens")
             self.logger.info(f"Training dataset offset set to {self.dataset_train_x_start:,} tokens")
         else:
             self.dataset_train_x_start = 0
@@ -79,26 +83,24 @@ class SimpleDataLoader:
             data = self.val_data
             data_size = self.val_data_size
         if random_samples == False and split == 'train' and self.config.dataset_seq_train:
-            ix = torch.zeros(self.batch_size, dtype=torch.int64)
-            end_of_batch = self.dataset_train_x_start + (self.world_size * self.batch_size - 1) * self.config.dataset_seq_step_size + self.config.block_size + 1 >= data_size
-            if end_of_batch:
-                # align to the right
-                self.dataset_train_x_start = data_size - ((self.world_size * self.batch_size - 1) * self.config.dataset_seq_step_size + self.config.block_size + 1)
-
+            idx_batch = torch.zeros(self.batch_size, dtype=torch.int64)
+            idx = self.dataset_train_x_start + self.rank * self.config.dataset_seq_step_size
             for i in range(self.batch_size):
-                ix[i] = self.dataset_train_x_start + (self.rank * self.batch_size) * self.config.dataset_seq_step_size + i * self.config.dataset_seq_step_size
-                
-            if end_of_batch:
+                if idx+self.config.block_size >= data_size:
+                    idx = self.rank * self.config.dataset_seq_step_size + random.randint(0, self.config.block_size)
+                idx_batch[i] = idx
+                idx += self.world_size * self.config.dataset_seq_step_size
+            self.dataset_train_x_start += self.world_size * self.batch_size * self.config.dataset_seq_step_size
+            if self.dataset_train_x_start >= data_size:
                 self.epoch += 1
-                self.logger.info(f"Epoch {self.epoch} finished")
                 self.dataset_train_x_start = 0
-            else:    
-                self.dataset_train_x_start += (self.world_size * self.batch_size) * self.config.dataset_seq_step_size
+                self.logger.info(f"Epoch {self.epoch} finished")
         else:
-            ix = torch.randint(data_size - self.config.block_size, (self.batch_size,))
-        x = torch.stack([torch.from_numpy(data[i:i+self.config.block_size].astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy(data[i+1:i+1+self.config.block_size].astype(np.int64)) for i in ix])
-        if 'cuda' in self.config.device:
+            idx_batch = torch.randint(data_size - self.config.block_size, (self.batch_size,))
+        
+        x = torch.stack([torch.from_numpy(data[i:i+self.config.block_size].astype(np.int64)) for i in idx_batch])
+        y = torch.stack([torch.from_numpy(data[i+1:i+1+self.config.block_size].astype(np.int64)) for i in idx_batch])
+        if 'cuda' in self.config.device and self.pin_memory:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)
         else:

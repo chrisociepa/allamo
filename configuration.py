@@ -38,7 +38,7 @@ class AllamoConfiguration:
     dataloader_type: str = 'base'
     dataset_seq_train: bool = False
     dataset_seq_train_start: int = None
-    dataset_seq_step_size: int = 512 
+    dataset_seq_step_size: int = None 
     batch_size_initial: int = 2
     batch_size_max_iter: int = 2000
     batch_size_schedule: bool = False
