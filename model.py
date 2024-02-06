@@ -290,9 +290,9 @@ class AllamoTransformer(nn.Module):
         return params, bytes
         
     def log_estimated_size(self):
-        model_params, model_bytes = self.estimate_size()
-        model_params /= 1e6
-        model_bytes /= 1024**2
+        self.model_num_params, self.model_num_bytes = self.estimate_size()
+        model_params = self.model_num_params / 1e6
+        model_bytes = self.model_num_bytes / 1024**2
         self.logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
 
     def _init_weights(self, module):
@@ -358,7 +358,7 @@ class AllamoTransformer(nn.Module):
             loss = None
         return logits, loss, hidden_states
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, config, device_type):
         # start with all of the candidate parameters
         param_dict = {param_name: p for param_name, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -368,7 +368,7 @@ class AllamoTransformer(nn.Module):
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': config.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
@@ -379,7 +379,7 @@ class AllamoTransformer(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        optimizer = torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=(config.beta1, config.beta2), **extra_args)
         self.logger.info(f"Using fused AdamW: {use_fused}")
 
         return optimizer

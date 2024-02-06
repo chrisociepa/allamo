@@ -22,6 +22,15 @@ from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 from simple_data_loader import SimpleDataLoader
 from simple_instructions_data_loader import SimpleInstructionsDataLoader
+from train_utils import (
+    remove_unwanted_prefix_from_model_state_dict,
+    get_lr,
+    get_grad_accum,
+    format_seconds_as_time,
+    calculate_eta,
+    has_next_iter_to_perform,
+    estimate_mfu,
+)
 
 class AllamoTrainer:
 
@@ -130,36 +139,13 @@ class AllamoTrainer:
         model_args = {k: getattr(config, k) for k in transformer_config_fields if hasattr(config, k)}
         modelConf = AllamoTransformerConfig(**model_args)
         model = AllamoTransformer(modelConf)
+        self.model_num_params = model.model_num_params
         if checkpoint_name is None:
             self.logger.info("Initialized a new model from scratch")
         else:
-            state_dict = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}'), map_location='cpu')
-            unwanted_prefix = '_orig_mod.'
-            for k,v in list(state_dict.items()):
-                if k.endswith('.rotary_emb.inv_freq'):
-                    # For backward compatibility, where we had it in the checkpoint
-                    state_dict.pop(k)
-                elif k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-            model.load_state_dict(state_dict)
-            del state_dict
-            self.logger.info("Loaded model from the checkpoint")
+            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'))
         model.to(config.device)
 
-        # initialize a GradScaler. If enabled=False scaler is a no-op
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16' or config.dtype == 'bfloat16'))
-        
-        # optimizer
-        self.optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), self.device_type)
-        if checkpoint_name is not None:
-            optimizer_checkpoint_path = os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}')
-            if os.path.exists(optimizer_checkpoint_path):
-                optimizer_checkpoint = torch.load(optimizer_checkpoint_path, map_location=config.device)
-                self.optimizer.load_state_dict(optimizer_checkpoint)
-                del optimizer_checkpoint
-            else:
-                self.logger.warn("Optimizer checkpoint file not found. Initializing optimizer from scratch")
-                
         # compile the model - requires PyTorch 2.0
         if config.compile:
             self.logger.info("compiling the model... (takes a ~minute)")
@@ -169,11 +155,19 @@ class AllamoTrainer:
             except Exception as err:
                 self.logger.warn(f"Model compile not supported: {err}")
 
+        self.raw_model = model # neeeded in DDP training
+        self.model = model
         # wrap model into DDP container
         if self.ddp:
-            model = DDP(model, device_ids=[self.ddp_local_rank])
-        self.model = model
-        self.raw_model = model.module if self.ddp else model # unwrap DDP container if needed
+            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
+            
+        # initialize a GradScaler. If enabled=False scaler is a no-op
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16' or config.dtype == 'bfloat16'))
+        
+        # optimizer
+        self.optimizer = self.model.configure_optimizers(config, self.device_type)
+        if checkpoint_name is not None:
+            self.load_optimizer_checkpoint(self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}'))
                 
         # gradient_accumulation scheduler
         if config.grad_accum_schedule: 
@@ -186,9 +180,23 @@ class AllamoTrainer:
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
         
         if config.decay_lr:
-            self.logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {self.get_lr(self.iter_num)}")
+            self.logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(self.iter_num, self.config)}")
         else:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
+            
+    def load_model_checkpoint(self, model, ckpt_path):
+        state_dict = torch.load(ckpt_path, map_location='cpu')
+        remove_unwanted_prefix_from_model_state_dict(state_dict)
+        model.load_state_dict(state_dict)
+        self.logger.info("Loaded model from the checkpoint")
+        
+    def load_optimizer_checkpoint(self, optimizer, ckpt_path):
+        if os.path.exists(ckpt_path):
+            state_dict = torch.load(ckpt_path, map_location=config.device)
+            optimizer.load_state_dict(state_dict)
+            self.logger.info("Optimizer state loaded.")
+        else:
+            self.logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
 
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -215,31 +223,6 @@ class AllamoTrainer:
             accuraces['val'] = accuraces['train']
         return losses_out, accuraces
 
-    # learning rate decay scheduler (cosine with warmup)
-    def get_lr(self, it):
-        # 1) linear warmup for warmup_iters steps
-        if it < self.config.warmup_iters:
-            return self.config.learning_rate * it / self.config.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it >= self.config.lr_decay_iters:
-            return self.config.min_lr
-        # 3) in between, use cosine decay down to min learning rate with restarts (optional)
-        if self.config.lr_decay_reset_iters is not None:
-            decay_ratio = (it % self.config.lr_decay_reset_iters) / self.config.lr_decay_reset_iters
-        else:
-            decay_ratio = (it - self.config.warmup_iters) / (self.config.lr_decay_iters - self.config.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-        return self.config.min_lr + coeff * (self.config.learning_rate - self.config.min_lr)
-
-    # grad_accum scheduler (when enabled) 
-    def get_grad_accum(self, it):
-        if self.gradient_accumulation_steps < self.config.grad_accum_max and \
-            self.config.grad_accum_schedule and it % (self.config.grad_accum_max_iter/100) == 0:
-            return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
-        else:
-            return self.gradient_accumulation_steps
-            
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name):
         checkpoint = {
@@ -263,43 +246,22 @@ class AllamoTrainer:
         torch.save(self.optimizer.state_dict(), ckpt_file_path)
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
         
-    def calculate_eta(self):
-        current_time = datetime.datetime.now()
-        elapsed_time = current_time - self.start_timestamp
-        elapsed_iters = self.iter_num - self.start_iter
-        if elapsed_iters < 1:
-            return 'N/A'
-        avg_time_per_iter = elapsed_time.total_seconds() / elapsed_iters
-        eta_seconds = math.ceil(avg_time_per_iter * (self.config.max_iters - self.iter_num))
-        return self.format_seconds_as_time(eta_seconds)
-        
-    def format_seconds_as_time(self, seconds):
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{int(hours)}:{int(minutes):02}:{int(seconds):02}"
-        
-    def has_next_iter_to_perform(self):
-        if self.config.num_train_epochs is not None and self.simple_data_loader.epoch >= self.config.num_train_epochs:
-            return False
-        return self.iter_num <= self.config.max_iters
-        
     def train(self):
         # training loop
         X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
-        while self.has_next_iter_to_perform():
+        while has_next_iter_to_perform(self.iter_num, self.config, self.simple_data_loader):
+            timer = time.time()
             log_iter = (self.iter_num % self.config.log_interval == 0 and self.master_process)
             eval_iter = (self.iter_num % self.config.eval_interval == 0 and self.master_process)
-
-            # determine and set learning rate for this iteration
-            lr = self.get_lr(self.iter_num) if self.config.decay_lr else self.config.learning_rate
+            lr = get_lr(self.iter_num, self.config)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
-            self.gradient_accumulation_steps = self.get_grad_accum(self.iter_num)
+            self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
             if self.ddp:
                 total_batch_size *= self.ddp_world_size
@@ -357,7 +319,8 @@ class AllamoTrainer:
                 torch.cuda.empty_cache()
             
             accuracy = 0
-            timer = time.time()
+            batch_mfu_excluded_time = 0
+            fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             # and using the GradScaler if data type is float16
             micro_steps = self.gradient_accumulation_steps
@@ -373,6 +336,7 @@ class AllamoTrainer:
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
                 
+                mfu_excluded_time = time.time()
                 # count processed tokens
                 self.processed_tokens += X.numel() * self.ddp_world_size if self.ddp else X.numel()
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
@@ -380,6 +344,7 @@ class AllamoTrainer:
                     accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y = self.simple_data_loader.get_batch('train')
+                batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16
                 self.scaler.scale(loss).backward()
@@ -393,18 +358,26 @@ class AllamoTrainer:
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
+            fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
 
             # timing and logging
             if log_iter:
-                iter_time = (time.time() - timer)*1000
+                iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
                 lossf = loss.item() * micro_steps
                 ppl = torch.exp(torch.tensor(lossf))
+                if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
+                    mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
+                    mfu_str = f' mfu {mfu*100:.2f}%'
+                else:
+                    mfu = -1.0
+                    mfu_str = ''
+                iter_time *= 1000
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
-                    f"ETA: {self.calculate_eta()}"
+                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f},"
+                    f"{mfu_str} ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
                 if self.config.wandb_log:
                     metrics = {
@@ -417,12 +390,14 @@ class AllamoTrainer:
                         "train/tokens": self.processed_tokens,
                         "train/total_batch_size": total_batch_size
                     }
+                    if mfu > 0:
+                        metrics['train/mfu'] = mfu
                     if self.config.dataset_seq_train:
                         metrics['train/ds_offset'] = self.simple_data_loader.dataset_train_x_start
                     wandb.log(metrics)
             self.iter_num += 1
             
-        training_time = self.format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
+        training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
         
         if self.master_process and not self.config.eval_only:

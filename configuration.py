@@ -75,6 +75,7 @@ class AllamoConfiguration:
     dtype: str = 'float16'
     compile: bool = False
     compile_mode: str = 'default'
+    mfu_flops_peak: float = -1.0
     
     # inference params
     prompt: str = "\n" 
@@ -152,6 +153,7 @@ class AllamoConfiguration:
         parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'bfloat16-true', 'float16'], help='Type of tensor to be used in the model')
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
         parser.add_argument('--compile_mode', type=str, choices=['default', 'reduce-overhead', 'max-autotune'], help='Specifies what the PyTorch compiler should be optimizing while compiling')
+        parser.add_argument('--mfu_flops_peak', type=float, help="Specifies the MFU's peak performance in FLOPs. A default value of -1 disables MFU estimation")
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')
