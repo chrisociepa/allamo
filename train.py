@@ -20,9 +20,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
-from simple_data_loader import SimpleDataLoader
-from simple_instructions_data_loader import SimpleInstructionsDataLoader
 from train_utils import (
+    create_dataloader,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
     get_grad_accum,
@@ -44,12 +43,8 @@ class AllamoTrainer:
         self.best_train_loss = 1e9
         self.best_val_loss = 1e9
         self.processed_tokens = 0
+        self.data_loader = create_dataloader(config, self.ddp_rank, self.ddp_world_size)
         self.__init_training(config)
-        
-        if config.dataloader_type == 'instructions':
-            self.simple_data_loader = SimpleInstructionsDataLoader(config, self.ddp_rank, self.ddp_world_size)
-        else:
-            self.simple_data_loader = SimpleDataLoader(config, self.ddp_rank, self.ddp_world_size)
         
     def __init_logger(self, config: AllamoConfiguration):
         run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
@@ -204,12 +199,12 @@ class AllamoTrainer:
         losses_out = {}
         accuraces = {}
         self.model.eval()
-        for split in self.simple_data_loader.splits:
+        for split in self.data_loader.splits:
             losses = torch.zeros(self.config.eval_iters)
             correct_preds = 0
             total_preds = 0
             for k in range(self.config.eval_iters):
-                X, Y = self.simple_data_loader.get_batch(split, True)
+                X, Y = self.data_loader.get_batch(split, True)
                 with self.ctx:
                     logits, loss, _ = self.model(X, Y)
                 losses[k] = loss.item()
@@ -248,10 +243,10 @@ class AllamoTrainer:
         
     def train(self):
         # training loop
-        X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
+        X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
-        while has_next_iter_to_perform(self.iter_num, self.config, self.simple_data_loader):
+        while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             timer = time.time()
             log_iter = (self.iter_num % self.config.log_interval == 0 and self.master_process)
             eval_iter = (self.iter_num % self.config.eval_interval == 0 and self.master_process)
@@ -260,7 +255,7 @@ class AllamoTrainer:
                 param_group['lr'] = lr
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
-            micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
+            micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
             if self.ddp:
@@ -293,7 +288,7 @@ class AllamoTrainer:
                     wandb.log({
                         "iter": self.iter_num,
                         "eval/time": eval_time*1000,
-                        "eval/samples_per_second": (self.config.eval_iters * len(self.simple_data_loader.splits)) / eval_time,
+                        "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
                         "eval/train_loss": train_loss,
                         "eval/val_loss": val_loss,
                         "eval/train_ppl": train_ppl,
@@ -314,7 +309,7 @@ class AllamoTrainer:
             
             # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
             if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:
-                self.simple_data_loader.reload_datasets()
+                self.data_loader.reload_datasets()
                 gc.collect()
                 torch.cuda.empty_cache()
             
@@ -343,7 +338,7 @@ class AllamoTrainer:
                     # calculate accuracy. note: this is a CPU-GPU sync point!
                     accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.simple_data_loader.get_batch('train')
+                X, Y = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16
@@ -358,10 +353,10 @@ class AllamoTrainer:
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
-            fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
 
             # timing and logging
             if log_iter:
+                fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
@@ -369,15 +364,16 @@ class AllamoTrainer:
                 ppl = torch.exp(torch.tensor(lossf))
                 if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
-                    mfu_str = f' mfu {mfu*100:.2f}%'
+                    mfu_str = f'{mfu*100:.2f}%'
                 else:
                     mfu = -1.0
-                    mfu_str = ''
+                    mfu_str = 'n/a'
+                mtu = fwdbwd_time/iter_time # model time utilization
                 iter_time *= 1000
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f},"
-                    f"{mfu_str} ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
+                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
+                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
                 if self.config.wandb_log:
                     metrics = {
@@ -388,12 +384,13 @@ class AllamoTrainer:
                         "train/acc": accuracy,
                         "train/lr": lr,
                         "train/tokens": self.processed_tokens,
-                        "train/total_batch_size": total_batch_size
+                        "train/total_batch_size": total_batch_size,
+                        "train/mtu": mtu
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
                     if self.config.dataset_seq_train:
-                        metrics['train/ds_offset'] = self.simple_data_loader.dataset_train_x_start
+                        metrics['train/ds_offset'] = self.data_loader.dataset_offset
                     wandb.log(metrics)
             self.iter_num += 1
             

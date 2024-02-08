@@ -26,7 +26,7 @@ class SimpleInstructionsDataLoader:
         self.batch_size = config.batch_size
         if self.batch_size > 1:
             self.logger.warn("Batch Size is greater than 1. Be careful, padding is not supported!")
-        self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
+        self.dataset_offset = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
         
         self.__load_datasets()
         self.logger.info(f"Training dataset loaded. Size: {self.train_data_size:,} instructions")
@@ -102,7 +102,7 @@ class SimpleInstructionsDataLoader:
         seq_samples = random_samples == False and split == 'train' and self.config.dataset_seq_train
         idx_batch = []
         min_sample_length = self.config.block_size + 1
-        idx = self.dataset_train_x_start + self.rank
+        idx = self.dataset_offset + self.rank
         for _ in range(self.batch_size):
             sample_idx = None
             if seq_samples:
@@ -118,10 +118,10 @@ class SimpleInstructionsDataLoader:
                 min_sample_length = len(data[sample_idx])
                 
         if seq_samples:
-            self.dataset_train_x_start += self.world_size * self.batch_size
-            if self.dataset_train_x_start >= data_size:
+            self.dataset_offset += self.world_size * self.batch_size
+            if self.dataset_offset >= data_size:
                 self.epoch += 1
-                self.dataset_train_x_start = 0
+                self.dataset_offset = 0
                 self.logger.info(f"Epoch {self.epoch} finished")
         
         x = torch.stack([data[idx][:min_sample_length-1] for idx in idx_batch])

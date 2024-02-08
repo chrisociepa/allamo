@@ -27,11 +27,11 @@ Dependencies:
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
 - [tiktoken](https://github.com/openai/tiktoken) - optional
 - [gradio](https://www.gradio.app/) - optional, for demo UI
-- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2
+- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
 
 ## Datasets
 
-Before you start training a new model, you need to create train and test datasets. The script `train.py` expects 2 files: `train.bin` and `val.bin`. You can create the both files using `prepare_datasets.py` or implementing a simple script like this:
+Before you start training a new model, you need to create training and testing datasets. By default, training scripts expect two files: `train.bin` and `val.bin`. You can create both files using `prepare_datasets.py` or by implementing a simple script like the one below:
 
 ```
 import numpy as np
@@ -48,6 +48,11 @@ def encode_file(input_file_path, output_file_path, tokenizer_name):
 encode_file('raw/dataset1/train.txt', 'data/dataset1/train.bin', 'cl100k_base')  
 ```
 
+There are other options and formats for handling datasets:
+
+- Instead of using a NumPy array, consider using a [PyTorch tensor](https://pytorch.org/docs/stable/tensors.html) and save the tensor in a file with the `.pt` extension.
+- You can also use a list of samples (each being a PyTorch tensor) with each sample's size being `block_size + 1`. These samples can then be saved in a file with the `.pt` extension.
+
 ## Training
 
 Use the script `train.py` to start your training. It reads a `train.bin` and `val.bin` files from the dataset directory. 
@@ -62,7 +67,7 @@ $ python train.py \
     --wandb_log=True
 ```
 
-To run on a single node with 8 GPU with DDP, example:
+To run on a single node with 8 GPUs with DDP, example:
 
 ```
 $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
@@ -70,7 +75,7 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --wandb_log=True
 ```
 
-To run on 2+ nodes with DDP, example:
+To run on 2+ nodes (with 8 GPUs each) with DDP, example:
 - Run on the first (master) node with example IP 123.456.123.456:
 
 ```
@@ -87,7 +92,21 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123
     --wandb_log=True
 ```
 
+To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
+- Run the same command on all nodes (master node IP: 123.456.123.456):
+
+```
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+    --config="./config/train_1B.json" \
+    --wandb_log=True
+```
+
 Note: in case your cluster does not have Infiniband interconnect prepend `NCCL_IB_DISABLE=1`.
+
+### MFU and MTU
+
+During training, it is possible to calculate indicators such as Model Flops Utilization ([MFU](https://arxiv.org/abs/2204.02311)) and Model Time Utilization (MTU). To calculate MFU, you must specify the maximum declared number of FLOPs for the used GPU in the parameter `mfu_flops_peak`. For example, for the A100 40GB GPU with bfloat16/float16 precision, this value is `312e12`, or `165.2e12` for the RTX 4090. 
+The MTU indicator describes the percentage of time during an iteration that the model spends on actual training versus the time spent on other tasks such as data loading, hyperparameter updates, etc. The closer to 100%, the more efficiently the training is in terms of resource utilization.
 
 ## Finetuning
 

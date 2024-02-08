@@ -38,9 +38,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from model import AllamoTransformerConfig, AllamoTransformer, SelfAttentionBlock
 from configuration import AllamoConfiguration
-from simple_data_loader import SimpleDataLoader
-from simple_instructions_data_loader import SimpleInstructionsDataLoader
 from train_utils import (
+    create_dataloader,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
     get_grad_accum,
@@ -61,12 +60,8 @@ class AllamoFSDPTrainer:
         self.best_train_loss = 1e9
         self.best_val_loss = 1e9
         self.processed_tokens = 0
+        self.data_loader = create_dataloader(config, self.rank, self.world_size)
         self.__init_training(config)
-        
-        if config.dataloader_type == 'instructions':
-            self.simple_data_loader = SimpleInstructionsDataLoader(config, self.rank, self.world_size)
-        else:
-            self.simple_data_loader = SimpleDataLoader(config, self.rank, self.world_size)
         
     def __init_logger(self, config: AllamoConfiguration):
         if self.master_process:
@@ -274,10 +269,10 @@ class AllamoFSDPTrainer:
         losses_out = {}
         accuraces = {}
         self.model.eval()
-        for split in self.simple_data_loader.splits:
+        for split in self.data_loader.splits:
             fsdp_loss_preds = torch.zeros(3).to(self.config.device)
             for k in range(self.config.eval_iters):
-                X, Y = self.simple_data_loader.get_batch(split, True)
+                X, Y = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(X, Y)
                 fsdp_loss_preds[0] += loss.item()
                 fsdp_loss_preds[1] += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
@@ -293,17 +288,17 @@ class AllamoFSDPTrainer:
         
     def train(self):
         # training loop
-        X, Y = self.simple_data_loader.get_batch('train') # fetch the very first batch
+        X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
-        while has_next_iter_to_perform(self.iter_num, self.config, self.simple_data_loader):
+        while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             timer = time.time()
             lr = get_lr(self.iter_num, self.config)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
-            micro_batch_size = self.simple_data_loader.update_batch_size(self.iter_num)
+            micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
             # evaluate the loss on train/val sets and write checkpoints
@@ -334,7 +329,7 @@ class AllamoFSDPTrainer:
                         wandb.log({
                             "iter": self.iter_num,
                             "eval/time": eval_time*1000,
-                            "eval/samples_per_second": (self.config.eval_iters * len(self.simple_data_loader.splits)) / eval_time,
+                            "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
                             "eval/train_loss": train_loss,
                             "eval/val_loss": val_loss,
                             "eval/train_ppl": train_ppl,
@@ -352,7 +347,7 @@ class AllamoFSDPTrainer:
             
             # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
             if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:
-                self.simple_data_loader.reload_datasets()
+                self.data_loader.reload_datasets()
                 gc.collect()
                 torch.cuda.empty_cache()
             
@@ -373,7 +368,7 @@ class AllamoFSDPTrainer:
                 fsdp_loss_acc[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.simple_data_loader.get_batch('train')
+                X, Y = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass
@@ -406,15 +401,16 @@ class AllamoFSDPTrainer:
                 accuracy = fsdp_loss_acc[2].item() / fsdp_loss_acc[3].item()
                 if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
-                    mfu_str = f' mfu {mfu*100:.2f}%'
+                    mfu_str = f'{mfu*100:.2f}%'
                 else:
                     mfu = -1.0
-                    mfu_str = ''
+                    mfu_str = 'n/a'
+                mtu = fwdbwd_time/iter_time # model time utilization
                 iter_time *= 1000
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f},"
-                    f"{mfu_str} ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
+                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
+                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
                 if self.config.wandb_log:
                     metrics = {
@@ -425,12 +421,13 @@ class AllamoFSDPTrainer:
                         "train/acc": accuracy,
                         "train/lr": lr,
                         "train/tokens": self.processed_tokens,
-                        "train/total_batch_size": self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
+                        "train/total_batch_size": self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size,
+                        "train/mtu": mtu
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
                     if self.config.dataset_seq_train:
-                        metrics['train/ds_offset'] = self.simple_data_loader.dataset_train_x_start
+                        metrics['train/ds_offset'] = self.data_loader.dataset_offset
                     wandb.log(metrics)
             self.iter_num += 1
             

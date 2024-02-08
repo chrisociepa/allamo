@@ -1,6 +1,19 @@
 import datetime
 import math
 
+def create_dataloader(config, rank, world_size):
+    if config.dataloader_type == 'allamo':
+        from data_loader import AllamoDataLoader
+        return AllamoDataLoader(config, rank, world_size)
+    elif config.dataloader_type == 'simple':
+        from simple_data_loader import SimpleDataLoader
+        return SimpleDataLoader(config, rank, world_size)
+    elif config.dataloader_type == 'simple-instructions':
+        from simple_instructions_data_loader import SimpleInstructionsDataLoader
+        return SimpleInstructionsDataLoader(config, rank, world_size)
+    else:
+        raise Exception(f'Unsupported data loader type: {config.dataloader_type}')
+
 def remove_unwanted_prefix_from_model_state_dict(state_dict):
     unwanted_prefix = '_orig_mod.'
     unwanted_prefix_len = len(unwanted_prefix)

@@ -26,13 +26,13 @@ class SimpleDataLoader:
             self.batch_size = config.batch_size
         
         if self.config.dataset_seq_train:
-            self.dataset_train_x_start = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
+            self.dataset_offset = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
             if config.dataset_seq_step_size is None:
                 config.dataset_seq_step_size = config.block_size
                 self.logger.info(f"Sequential step set to {config.block_size:,} tokens")
-            self.logger.info(f"Training dataset offset set to {self.dataset_train_x_start:,} tokens")
+            self.logger.info(f"Training dataset offset set to {self.dataset_offset:,} tokens")
         else:
-            self.dataset_train_x_start = 0
+            self.dataset_offset = 0
         
         self.__load_datasets()
         self.logger.info(f"Training dataset loaded. Size: {self.train_data_size:,} tokens")
@@ -84,16 +84,16 @@ class SimpleDataLoader:
             data_size = self.val_data_size
         if random_samples == False and split == 'train' and self.config.dataset_seq_train:
             idx_batch = torch.zeros(self.batch_size, dtype=torch.int64)
-            idx = self.dataset_train_x_start + self.rank * self.config.dataset_seq_step_size
+            idx = self.dataset_offset + self.rank * self.config.dataset_seq_step_size
             for i in range(self.batch_size):
                 if idx+self.config.block_size >= data_size:
                     idx = self.rank * self.config.dataset_seq_step_size + random.randint(0, self.config.block_size)
                 idx_batch[i] = idx
                 idx += self.world_size * self.config.dataset_seq_step_size
-            self.dataset_train_x_start += self.world_size * self.batch_size * self.config.dataset_seq_step_size
-            if self.dataset_train_x_start >= data_size:
+            self.dataset_offset += self.world_size * self.batch_size * self.config.dataset_seq_step_size
+            if self.dataset_offset >= data_size:
                 self.epoch += 1
-                self.dataset_train_x_start = 0
+                self.dataset_offset = 0
                 self.logger.info(f"Epoch {self.epoch} finished")
         else:
             idx_batch = torch.randint(data_size - self.config.block_size, (self.batch_size,))
