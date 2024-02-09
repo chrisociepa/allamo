@@ -233,7 +233,7 @@ class AllamoFSDPTrainer:
                 self.logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
         
     # helps saving checkpoint to a file
-    def save_checkpoint(self, ckpt_file_name):
+    def save_checkpoint(self, ckpt_file_name, model_only=False):
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
             full_msd = self.model.state_dict()
         if self.master_process:
@@ -253,15 +253,16 @@ class AllamoFSDPTrainer:
             self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
             torch.save(full_msd, ckpt_file_path)
             del full_msd
-            
-        # pull all sharded optimizer states to rank0 cpu.
-        full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
-        if self.master_process:
-            ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
-            self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
-            torch.save(full_osd, ckpt_file_path)
-            self.logger.info(f"checkpoint files saved in {config.out_dir}")
-            del full_osd
+        
+        if model_only == False:
+            # pull all sharded optimizer states to rank0 cpu.
+            full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
+            if self.master_process:
+                ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
+                self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                torch.save(full_osd, ckpt_file_path)
+                self.logger.info(f"checkpoint files saved in {config.out_dir}")
+                del full_osd
             
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -292,7 +293,12 @@ class AllamoFSDPTrainer:
         X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
+        current_epoch = self.data_loader.epoch
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
+            if current_epoch < self.data_loader.epoch:
+                self.save_checkpoint(f'epoch_{current_epoch}.pt', model_only=True)
+                current_epoch = self.data_loader.epoch
+            
             timer = time.time()
             lr = get_lr(self.iter_num, self.config)
             for param_group in self.optimizer.param_groups:

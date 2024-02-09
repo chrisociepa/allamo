@@ -246,7 +246,12 @@ class AllamoTrainer:
         X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
+        current_epoch = self.data_loader.epoch
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
+            if current_epoch < self.data_loader.epoch:
+                self.save_checkpoint(f'epoch_{current_epoch}.pt', model_only=True)
+                current_epoch = self.data_loader.epoch
+            
             timer = time.time()
             log_iter = (self.iter_num % self.config.log_interval == 0 and self.master_process)
             eval_iter = (self.iter_num % self.config.eval_interval == 0 and self.master_process)
