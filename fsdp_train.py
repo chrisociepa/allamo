@@ -276,10 +276,11 @@ class AllamoFSDPTrainer:
                 logits, loss, _ = self.model(X, Y)
                 fsdp_loss_preds[0] += loss.item()
                 fsdp_loss_preds[1] += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
+                fsdp_loss_preds[2] += Y.size(0)
             dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
             steps = self.config.eval_iters * self.world_size
-            losses_out[split] = fsdp_loss_preds[0] / steps
-            accuraces[split] = fsdp_loss_preds[1] / steps
+            losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.world_size)
+            accuraces[split] = fsdp_loss_preds[1] / (fsdp_loss_preds[2] * self.world_size)
         self.model.train()
         if 'val' not in losses_out:
             losses_out['val'] = losses_out['train']
