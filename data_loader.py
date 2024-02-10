@@ -18,9 +18,9 @@ class AllamoDataset:
         self.sample_size = config.block_size + 1 
         self.data = None
         self.dataset_files = self.get_dataset_files(config, train_split)
-        self.processed_files = set()
+        self.processed_files = []
         if config.dataset_train_processed_files_count > 0:
-            self.processed_files = set(self.dataset_files[:config.dataset_train_processed_files_count])
+            self.processed_files = self.dataset_files[:config.dataset_train_processed_files_count]
         self.load_next_dataset()
         
     def get_dataset_files(self, config, train_split):
@@ -51,7 +51,7 @@ class AllamoDataset:
         return False
                 
     def load_dataset_file(self, load_dataset_file):
-        self.processed_files.add(load_dataset_file)
+        self.processed_files.append(load_dataset_file)
         new_data = None
         if load_dataset_file.endswith('.bin'):
             step_size = self.world_size * self.sample_size
