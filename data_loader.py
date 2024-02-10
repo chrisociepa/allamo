@@ -37,7 +37,7 @@ class AllamoDataset:
                     dataset_files.append(dataset_file)
             self.logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
         if dataset_files:
-            return dataset_files
+            return sorted(dataset_files)
         elif train_split:
             raise Exception('Training dataset files not found!')
         else:
