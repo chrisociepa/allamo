@@ -16,6 +16,8 @@ class AllamoDataset:
         self.world_size = world_size
         self.data_dir = config.data_dir
         self.sample_size = config.block_size + 1 
+        self.ignore_index = config.ignore_index
+        self.pad_token_id = config.pad_token_id
         self.data = None
         self.dataset_files = self.get_dataset_files(config, train_split)
         self.processed_files = []
@@ -49,6 +51,18 @@ class AllamoDataset:
                 if self.load_dataset_file(ds_file):
                     return True
         return False
+        
+    def pad_to_block_size(self, data):
+        """
+        Adds padding to instructions to maintain a consistent input shape, avoiding recompilations.
+        This method ensures all instructions have a uniform length matching the block size.
+        By doing so, it prevents the need for frequent recompilations that occur due to
+        dynamic input shapes, enhancing computational efficiency and stability.
+        """
+        for idx in range(len(data)):
+            if len(data[idx]) < self.sample_size:
+                padding = self.sample_size - len(data[idx])
+                data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
                 
     def load_dataset_file(self, load_dataset_file):
         self.processed_files.append(load_dataset_file)
@@ -86,6 +100,8 @@ class AllamoDataset:
                     )
                     return False
                 new_data = self.align_data_to_step_size(new_data, self.world_size)
+                if self.pad_token_id >= 0:
+                    self.pad_to_block_size(new_data)
                 new_data = self.limit_samples_to_rank(new_data)
             else:
                 self.logger.info(f"Unsupported format of {load_dataset_file}!")
@@ -194,6 +210,9 @@ class AllamoDataLoader:
             idx_batch = torch.randint(len(dataset), (self.batch_size,))
             x = torch.stack([dataset[i][:self.config.block_size] for i in idx_batch]).to(torch.int64)
             y = torch.stack([dataset[i][1:1+self.config.block_size] for i in idx_batch]).to(torch.int64)
+            
+        if self.config.pad_token_id >= 0:
+            x[x == self.config.ignore_index] = self.config.pad_token_id
         
         if 'cuda' in self.config.device and self.pin_memory:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
