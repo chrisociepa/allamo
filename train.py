@@ -242,7 +242,7 @@ class AllamoTrainer:
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
         
     def train(self):
-        # training loop
+        self.logger.info(f"Starting training with configuration: {self.config}")
         X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()

@@ -312,7 +312,7 @@ class AllamoFSDPTrainer:
         return losses_out, accuraces
         
     def train(self):
-        # training loop
+        self.logger.info(f"Starting FSDP training with configuration: {self.config}")
         X, Y = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
