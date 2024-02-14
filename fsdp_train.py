@@ -436,23 +436,26 @@ class AllamoFSDPTrainer:
                     mfu = -1.0
                     mfu_str = 'n/a'
                 mtu = fwdbwd_time/iter_time # model time utilization
-                iter_time *= 1000
+                total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
+                iter_time_ms = iter_time * 1000
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
+                    f"iter time {iter_time_ms:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
                     f"ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
-                        "train/iter_time": iter_time,
+                        "train/iter_time": iter_time_ms,
                         "train/loss": lossf,
                         "train/ppl": ppl,
                         "train/acc": accuracy,
                         "train/lr": lr,
                         "train/tokens": self.processed_tokens,
-                        "train/total_batch_size": self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size,
+                        "train/tokens_per_sec": (total_batch_size/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/total_batch_size": total_batch_size,
                         "train/mtu": mtu,
                         "train/epoch": self.data_loader.epoch
                     }
