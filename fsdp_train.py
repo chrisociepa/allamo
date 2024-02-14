@@ -57,8 +57,8 @@ class AllamoFSDPTrainer:
         self.__init_logger(config)
         
         self.iter_num = 0
-        self.best_train_loss = 1e9
-        self.best_val_loss = 1e9
+        self.best_train_loss = 1e2
+        self.best_val_loss = 1e2
         self.processed_tokens = 0
         self.data_loader = create_dataloader(config, self.rank, self.world_size)
         self.__init_training(config)
@@ -440,7 +440,8 @@ class AllamoFSDPTrainer:
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
                     f"iter time {iter_time:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
-                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
+                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
+                    f"ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
                 if self.config.wandb_log:
                     metrics = {
@@ -452,7 +453,8 @@ class AllamoFSDPTrainer:
                         "train/lr": lr,
                         "train/tokens": self.processed_tokens,
                         "train/total_batch_size": self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size,
-                        "train/mtu": mtu
+                        "train/mtu": mtu,
+                        "train/epoch": self.data_loader.epoch
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
