@@ -233,6 +233,8 @@ class AllamoFSDPTrainer:
                     self.data_loader.train_dataset.load_next_dataset()
             if 'allamo_dataloader_dataset_offset' in config_checkpoint:
                 self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader_dataset_offset']
+            if 'allamo_dataloader_epoch' in config_checkpoint:
+                self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']
     
     def load_model_checkpoint(self, model, ckpt_path):
         state_dict = torch.load(ckpt_path, map_location='cpu')
@@ -267,6 +269,7 @@ class AllamoFSDPTrainer:
             if config.dataloader_type == 'allamo':
                 checkpoint['allamo_dataloader_train_processed_files'] = self.data_loader.train_dataset.processed_files
                 checkpoint['allamo_dataloader_dataset_offset'] = self.data_loader.dataset_offset
+                checkpoint['allamo_dataloader_epoch'] = self.data_loader.epoch
                 
             ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")

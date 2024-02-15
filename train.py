@@ -128,6 +128,19 @@ class AllamoTrainer:
                 self.best_val_loss = config_checkpoint['best_val_loss']
             if 'processed_tokens' in config_checkpoint:
                 self.processed_tokens = config_checkpoint['processed_tokens']
+                
+            if config.dataloader_type == 'allamo':
+                if  'allamo_dataloader_train_processed_files' in config_checkpoint:
+                    self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader_train_processed_files']
+                    if len(self.data_loader.train_dataset.processed_files) > 0:
+                        # Removing the last element from the list because it represents the file where processing was interrupted.
+                        # We will load this file and resume processing from there, indicated by the dataset_offset.
+                        self.data_loader.train_dataset.processed_files.pop()
+                        self.data_loader.train_dataset.load_next_dataset()
+                if 'allamo_dataloader_dataset_offset' in config_checkpoint:
+                    self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader_dataset_offset']
+                if 'allamo_dataloader_epoch' in config_checkpoint:
+                    self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']    
             del config_checkpoint
             del checkpoint_model_args
             
@@ -228,6 +241,11 @@ class AllamoTrainer:
             'processed_tokens': self.processed_tokens,
             'config': self.config.__dict__,
         }
+        if config.dataloader_type == 'allamo':
+            checkpoint['allamo_dataloader_train_processed_files'] = self.data_loader.train_dataset.processed_files
+            checkpoint['allamo_dataloader_dataset_offset'] = self.data_loader.dataset_offset
+            checkpoint['allamo_dataloader_epoch'] = self.data_loader.epoch
+        
         ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
         self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
         torch.save(checkpoint, ckpt_file_path)
