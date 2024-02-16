@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import math
 
 def create_dataloader(config, rank, world_size):
@@ -13,6 +14,13 @@ def create_dataloader(config, rank, world_size):
         return SimpleInstructionsDataLoader(config, rank, world_size)
     else:
         raise Exception(f'Unsupported data loader type: {config.dataloader_type}')
+        
+def calculate_md5(file_path, chunk_size=1024*1024):
+    md5 = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(chunk_size), b''):
+            md5.update(chunk)
+    return md5.hexdigest()
 
 def remove_unwanted_prefix_from_model_state_dict(state_dict):
     unwanted_prefix = '_orig_mod.'

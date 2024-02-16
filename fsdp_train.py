@@ -40,6 +40,7 @@ from model import AllamoTransformerConfig, AllamoTransformer, SelfAttentionBlock
 from configuration import AllamoConfiguration
 from train_utils import (
     create_dataloader,
+    calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
     get_grad_accum,
@@ -155,7 +156,7 @@ class AllamoFSDPTrainer:
         if checkpoint_name is None:
             self.logger.info("Initialized a new model from scratch")
         else:
-            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'))
+            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'), config)
         
         self.logger.info("Configuring model with FSDP")
         model = FSDP(model, **self.fsdp_config)
@@ -236,11 +237,15 @@ class AllamoFSDPTrainer:
             if 'allamo_dataloader_epoch' in config_checkpoint:
                 self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']
     
-    def load_model_checkpoint(self, model, ckpt_path):
+    def load_model_checkpoint(self, model, ckpt_path, config):
         state_dict = torch.load(ckpt_path, map_location='cpu')
         remove_unwanted_prefix_from_model_state_dict(state_dict)
         model.load_state_dict(state_dict)
-        self.logger.info("Loaded model from the checkpoint")
+        if config.log_checkpoint_md5_on_load and self.master_process:
+            md5sum = calculate_md5(ckpt_path)
+            self.logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
+        else:
+            self.logger.info(f"Loaded model from checkpoint {ckpt_path}")
         
     def load_optimizer_checkpoint(self, model, optimizer, ckpt_path):
         if os.path.exists(ckpt_path):

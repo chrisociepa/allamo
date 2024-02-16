@@ -22,6 +22,7 @@ from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 from train_utils import (
     create_dataloader,
+    calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
     get_grad_accum,
@@ -151,7 +152,7 @@ class AllamoTrainer:
         if checkpoint_name is None:
             self.logger.info("Initialized a new model from scratch")
         else:
-            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'))
+            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'), config)
         model.to(config.device)
 
         # compile the model - requires PyTorch 2.0
@@ -192,11 +193,16 @@ class AllamoTrainer:
         else:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
             
-    def load_model_checkpoint(self, model, ckpt_path):
+    def load_model_checkpoint(self, model, ckpt_path, config):
         state_dict = torch.load(ckpt_path, map_location='cpu')
         remove_unwanted_prefix_from_model_state_dict(state_dict)
         model.load_state_dict(state_dict)
-        self.logger.info("Loaded model from the checkpoint")
+        if config.log_checkpoint_md5_on_load and self.master_process:
+            md5sum = calculate_md5(ckpt_path)
+            self.logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
+        else:
+            self.logger.info(f"Loaded model from checkpoint {ckpt_path}")
+        
         
     def load_optimizer_checkpoint(self, optimizer, ckpt_path):
         if os.path.exists(ckpt_path):
