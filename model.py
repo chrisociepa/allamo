@@ -365,8 +365,10 @@ class AllamoTransformer(nn.Module):
         param_dict = {param_name: p for param_name, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        def is_weight_decay_forbidden(param_name):
+            return param_name.endswith('.bias') or param_name.endswith('_norm.weight') or param_name == 'norm.weight'
+        decay_params = [p for n, p in param_dict.items() if not is_weight_decay_forbidden(n)]
+        nodecay_params = [p for n, p in param_dict.items() if is_weight_decay_forbidden(n)]
         optim_groups = [
             {'params': decay_params, 'weight_decay': config.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
