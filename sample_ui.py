@@ -21,14 +21,14 @@ def get_completion(prompt, num_samples, max_new_tokens, temperature, top_k):
 iface = gr.Interface(
     fn=get_completion,
     inputs=["text", \
-        gr.inputs.Number(default=1, label="Number of samples to generate"), \
-        gr.inputs.Number(default=50, label="Number of tokens to generate in each sample"), \
+        gr.Number(value=1, label="Number of samples to generate"), \
+        gr.Number(value=50, label="Number of tokens to generate in each sample"), \
         gr.Slider(0.1, 1.9, step=0.1, value=0.8, label="Temperature value for text generation"), \
-        gr.inputs.Number(default=200, label="Top k most likely tokens to be retained during text generation") \
+        gr.Number(value=200, label="Top k most likely tokens to be retained during text generation") \
     ],
     outputs="text",
     title="Text Completion with Allamo",
     theme="light"
 )
 
-iface.launch()
+iface.launch(server_name="0.0.0.0", server_port=7809)

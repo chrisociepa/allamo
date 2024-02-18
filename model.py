@@ -33,6 +33,7 @@ class AllamoTransformerConfig:
     head_size: Union[None, int] = None
     n_head: int = 12
     n_embd: int = 768
+    intermediate_size: int = None
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears. False: a bit better and faster
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
@@ -90,12 +91,13 @@ class FeedForward(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        hidden_dim = int(2 * (4 * config.n_embd) / 3)
-        hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+        if config.intermediate_size is None:
+            config.intermediate_size = int(2 * (4 * config.n_embd) / 3)
+            config.intermediate_size = config.multiple_of * ((config.intermediate_size + config.multiple_of - 1) // config.multiple_of)
         
-        self.gate_proj = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
-        self.down_proj = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
-        self.up_proj = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.gate_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.down_proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+        self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
         self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         self.gradient_checkpointing = config.gradient_checkpointing

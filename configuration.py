@@ -24,8 +24,8 @@ class AllamoConfiguration:
     eval_iters: int = 200
     eval_only: bool = False
     always_save_checkpoint: bool = True
-    vocab_size: int = 100277
-    tiktoken_tokenizer_name: str = 'cl100k_base'
+    vocab_size: int = 31980
+    tiktoken_tokenizer_name: str = None
     hf_tokenizer_path: str = None
     wandb_log: bool = False
     wandb_project: str = 'allamo'
@@ -60,6 +60,7 @@ class AllamoConfiguration:
     head_size: int = 64
     num_kv_heads: int = None
     n_embd: int = 768
+    intermediate_size: int = None
     dropout: float = 0.0 
     bias: bool = False 
     multiple_of: int = 256
@@ -146,9 +147,10 @@ class AllamoConfiguration:
         parser.add_argument('--head_size', type=int, help='Often calculated as n_embd/n_head')
         parser.add_argument('--num_kv_heads', type=int, help='Number of key-value heads')
         parser.add_argument('--n_embd', type=int, help='Number of model dimensions')
+        parser.add_argument('--intermediate_size', type=int, help='Dimension of the MLP representations')
         parser.add_argument('--dropout', type=float, help='Enable dropouts globally. Disabled when 0')
         parser.add_argument('--bias', type=bool, help='Enable bias globally. Helpful in finetuning process')
-        parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2')
+        parser.add_argument('--multiple_of', type=int, help='Make SwiGLU hidden layer size multiple of large power of 2. Used only when intermediate_size is not specified')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
         parser.add_argument('--num_train_epochs', type=int, help='Total number of training epochs to perform')
