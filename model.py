@@ -15,12 +15,16 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 _flash_attention_version = 1 if hasattr(torch.nn.functional, 'scaled_dot_product_attention') else 0
+_flash_attn_2_supports_window_size = False
+# uncomment code below to enable installed FlashAttention. PyTorch 2.2+ supports it as part of the scaled_dot_product_attention
+"""
 try:
     from flash_attn import flash_attn_func
     _flash_attention_version = 2
     _flash_attn_2_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 except ImportError:
     _flash_attn_2_supports_window_size = False
+"""
 
 @dataclass
 class AllamoTransformerConfig:
