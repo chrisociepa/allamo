@@ -17,10 +17,14 @@ class AllamoSampler:
         self.config = config
         self.__init_torch(config)
 
+        if config.init_from == 'resume_last':
+            checkpoint_name = 'last_eval_ckpt.pt'
+        else:
+            checkpoint_name = 'ckpt.pt'
         ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
-        self.logger.info(f"Loading checkpoint from {ckpt_dir}...")
-        config_checkpoint = torch.load(os.path.join(ckpt_dir, 'config_ckpt.pt'), map_location='cpu')
-        model_checkpoint = torch.load(os.path.join(ckpt_dir, 'model_ckpt.pt'), map_location='cpu')
+        self.logger.info(f"Loading *_{checkpoint_name} checkpoint files from {ckpt_dir}...")
+        config_checkpoint = torch.load(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), map_location='cpu')
+        model_checkpoint = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}'), map_location='cpu')
         self.__load_model(config, config_checkpoint, model_checkpoint)
         self.__load_tokenizer(config, config_checkpoint)
         del config_checkpoint
@@ -33,13 +37,9 @@ class AllamoSampler:
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
         device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-        self.ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-        if config.dtype == 'bfloat16-true':
-            # torch.set_float32_matmul_precision("high")
-            torch.set_default_dtype(torch.bfloat16)
         
     def __load_model(self, config: AllamoConfiguration, config_checkpoint, model_checkpoint):
+        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
         model = AllamoTransformer(config_checkpoint['model_args'])
         unwanted_prefix = '_orig_mod.'
         for k,v in list(model_checkpoint.items()):
@@ -50,7 +50,7 @@ class AllamoSampler:
                 model_checkpoint[k[len(unwanted_prefix):]] = model_checkpoint.pop(k)
         model.load_state_dict(model_checkpoint)
         model.eval()
-        model.to(config.device)
+        model.to(device=config.device, dtype=ptdtype)
         if config.compile:
             model = torch.compile(model) # requires PyTorch 2.0 (optional)
         self.model = model
@@ -87,22 +87,20 @@ class AllamoSampler:
     def generate_embeddings(self, text: str):
         if text:
             with torch.no_grad():
-                with self.ctx:
-                    prompt_tokens = self.encode_prompt(text)
-                    embeddings = self.model.generate_embeddings(prompt_tokens)
-                    embeddings = torch.squeeze(embeddings[:, [-1], :]) # use only the last position
-                    return embeddings.tolist()
+                prompt_tokens = self.encode_prompt(text)
+                embeddings = self.model.generate_embeddings(prompt_tokens)
+                embeddings = torch.squeeze(embeddings[:, [-1], :]) # use only the last position
+                return embeddings.tolist()
         return []
                 
     def generate_completions(self, text: str, samples: int, new_tokens: int, temperature: float, top_k: int):
         result = []
         timer = time.time()
         with torch.no_grad():
-            with self.ctx:
-                prompt_tokens = self.encode_prompt(text)
-                for k in range(samples):
-                    y = self.model.generate(prompt_tokens, new_tokens, temperature=temperature, top_k=top_k)
-                    result.append(self.tokenizer.decode(y[0].tolist()).strip())
+            prompt_tokens = self.encode_prompt(text)
+            for k in range(samples):
+                y = self.model.generate(prompt_tokens, new_tokens, temperature=temperature, top_k=top_k)
+                result.append(self.tokenizer.decode(y[0].tolist()).strip())
         dt = time.time() - timer
         self.logger.info(f"{new_tokens*samples} completion tokens generated in {dt:.2f}secs ({new_tokens*samples/dt:.2f} tokens/sec) for {prompt_tokens.shape[1]} input tokens")
         return result
