@@ -261,7 +261,7 @@ class AllamoTransformer(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size*2, config.rope_freq_base, config.rope_freq_scale)
+        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size, config.rope_freq_base, config.rope_freq_scale)
 
         # init all weights
         self.apply(self._init_weights)
