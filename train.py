@@ -96,56 +96,29 @@ class AllamoTrainer:
             torch.set_default_dtype(torch.bfloat16)
         
     def __init_training(self, config: AllamoConfiguration):
-        transformer_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
+        model_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
+        ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
         checkpoint_name = None
         if config.init_from == 'resume':
             checkpoint_name = 'ckpt.pt'
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt.pt'
         else:
-            if os.path.exists(os.path.join(config.out_dir, 'config_ckpt.pt')) \
-                or os.path.exists(os.path.join(config.out_dir, 'model_ckpt.pt')) \
-                or os.path.exists(os.path.join(config.out_dir, 'optimizer_ckpt.pt')):
+            if self.model_checkpoint_files_exist(ckpt_dir, 'ckpt.pt'):
                 self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
-            
+        
         if checkpoint_name is not None:
-            self.logger.info(f"Resuming training from {config.out_dir}")
-            # resume training from a checkpoint
-            ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
-            self.logger.info(f"Loading {checkpoint_name} checkpoint files from {ckpt_dir}...")
-            config_checkpoint = torch.load(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), map_location='cpu')
-            checkpoint_model_args = config_checkpoint['model_args']
-            # force these config attributes to be equal otherwise we can't even resume training
-            # the rest of the attributes (e.g. dropout) can stay as desired from command line
-            for k in transformer_config_fields:
-                if hasattr(config, k) and hasattr(checkpoint_model_args, k):
-                    setattr(config, k, getattr(checkpoint_model_args, k))
-            if 'iter_num' in config_checkpoint:
-                self.iter_num = config_checkpoint['iter_num']
-            if 'best_train_loss' in config_checkpoint:
-                self.best_train_loss = config_checkpoint['best_train_loss']
-            if 'best_val_loss' in config_checkpoint:
-                self.best_val_loss = config_checkpoint['best_val_loss']
-            if 'processed_tokens' in config_checkpoint:
-                self.processed_tokens = config_checkpoint['processed_tokens']
-                
-            if config.dataloader_type == 'allamo':
-                if  'allamo_dataloader_train_processed_files' in config_checkpoint:
-                    self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader_train_processed_files']
-                    if len(self.data_loader.train_dataset.processed_files) > 0:
-                        # Removing the last element from the list because it represents the file where processing was interrupted.
-                        # We will load this file and resume processing from there, indicated by the dataset_offset.
-                        self.data_loader.train_dataset.processed_files.pop()
-                        self.data_loader.train_dataset.load_next_dataset()
-                if 'allamo_dataloader_dataset_offset' in config_checkpoint:
-                    self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader_dataset_offset']
-                if 'allamo_dataloader_epoch' in config_checkpoint:
-                    self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']    
-            del config_checkpoint
-            del checkpoint_model_args
-            
-        model_args = {k: getattr(config, k) for k in transformer_config_fields if hasattr(config, k)}
+            if self.model_checkpoint_files_exist(ckpt_dir, checkpoint_name):
+                self.logger.info(f"Resuming training from {ckpt_dir} and start loading *_{checkpoint_name} checkpoint files")
+                self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), config, model_config_fields)
+            elif config.init_from == 'resume_last':
+                checkpoint_name = None
+                self.logger.warning("*_{checkpoint_name} checkpoint files not found but allowing to start from scratch")
+            else:
+                raise Exception(f'*{checkpoint_name} checkpoint files not found!')
+    
+        model_args = {k: getattr(config, k) for k in model_config_fields if hasattr(config, k)}
         modelConf = AllamoTransformerConfig(**model_args)
         model = AllamoTransformer(modelConf)
         self.model_num_params = model.model_num_params
@@ -192,7 +165,48 @@ class AllamoTrainer:
             self.logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(self.iter_num, self.config)}")
         else:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
-            
+
+    def model_checkpoint_files_exist(self, ckpt_dir, ckpt_file_name):
+        return os.path.exists(os.path.join(ckpt_dir, 'config_' + ckpt_file_name)) \
+                and os.path.exists(os.path.join(ckpt_dir, 'model_' + ckpt_file_name))
+    
+    def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
+        config_checkpoint = torch.load(ckpt_path, map_location='cpu')
+        checkpoint_model_args = config_checkpoint['model_args']
+        # force these config attributes to be equal otherwise we can't even resume training
+        # the rest of the attributes (e.g. dropout) can stay as desired from command line
+        for k in model_config_fields:
+            if hasattr(config, k) and hasattr(checkpoint_model_args, k):
+                setattr(config, k, getattr(checkpoint_model_args, k))
+        if 'iter_num' in config_checkpoint:
+            if config_checkpoint['iter_num'] <= self.config.max_iters:
+                self.iter_num = config_checkpoint['iter_num']
+            else:
+                self.logger.info(
+                    f"Current iter_num ({config_checkpoint['iter_num']}) in the loaded checkpoint exceeds max_iters ({self.config.max_iters}). "
+                    f"Therefore, resetting training to the initial state"
+                )
+                return
+        if 'best_train_loss' in config_checkpoint:
+            self.best_train_loss = config_checkpoint['best_train_loss']
+        if 'best_val_loss' in config_checkpoint:
+            self.best_val_loss = config_checkpoint['best_val_loss']
+        if 'processed_tokens' in config_checkpoint:
+            self.processed_tokens = config_checkpoint['processed_tokens']
+        
+        if config.dataloader_type == 'allamo':
+            if  'allamo_dataloader_train_processed_files' in config_checkpoint:
+                self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader_train_processed_files']
+                if len(self.data_loader.train_dataset.processed_files) > 0:
+                    # Removing the last element from the list because it represents the file where processing was interrupted.
+                    # We will load this file and resume processing from there, indicated by the dataset_offset.
+                    self.data_loader.train_dataset.processed_files.pop()
+                    self.data_loader.train_dataset.load_next_dataset()
+            if 'allamo_dataloader_dataset_offset' in config_checkpoint:
+                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader_dataset_offset']
+            if 'allamo_dataloader_epoch' in config_checkpoint:
+                self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']
+        
     def load_model_checkpoint(self, model, ckpt_path, config):
         state_dict = torch.load(ckpt_path, map_location='cpu')
         remove_unwanted_prefix_from_model_state_dict(state_dict)

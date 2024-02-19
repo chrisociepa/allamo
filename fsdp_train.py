@@ -216,7 +216,14 @@ class AllamoFSDPTrainer:
             if hasattr(config, k) and hasattr(checkpoint_model_args, k):
                 setattr(config, k, getattr(checkpoint_model_args, k))
         if 'iter_num' in config_checkpoint:
-            self.iter_num = config_checkpoint['iter_num']
+            if config_checkpoint['iter_num'] <= self.config.max_iters:
+                self.iter_num = config_checkpoint['iter_num']
+            else:
+                self.logger.info(
+                    f"Current iter_num ({config_checkpoint['iter_num']}) in the loaded checkpoint exceeds max_iters ({self.config.max_iters}). "
+                    f"Therefore, resetting training to the initial state"
+                )
+                return
         if 'best_train_loss' in config_checkpoint:
             self.best_train_loss = config_checkpoint['best_train_loss']
         if 'best_val_loss' in config_checkpoint:
