@@ -27,7 +27,7 @@ def write_json(text, path):
     with open(path, "w") as f:
         json.dump(text, f)
 
-def write_model(checkpoint_path, hf_model_path):
+def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
     os.makedirs(hf_model_path, exist_ok=True)
     tmp_model_path = os.path.join(hf_model_path, "tmp")
     os.makedirs(tmp_model_path, exist_ok=True)
@@ -42,6 +42,7 @@ def write_model(checkpoint_path, hf_model_path):
     num_kv_heads = allamo_transformer_config.num_kv_heads
     dim = allamo_transformer_config.n_embd
     dims_per_head = allamo_transformer_config.head_size
+    intermediate_size = allamo_transformer_config.intermediate_size if hasattr(allamo_transformer_config, 'intermediate_size') else compute_intermediate_size(allamo_transformer_config)
 
     logger.info(f"converting all parameters from the checkpoint model")
     unwanted_prefix = '_orig_mod.'
@@ -77,8 +78,11 @@ def write_model(checkpoint_path, hf_model_path):
         "model.norm.weight": model_checkpoint["norm.weight"],
         "lm_head.weight": model_checkpoint["lm_head.weight"],
     }
-    # Resolve model params dtype, e.g. torch.float16
-    torch_dtype = model_checkpoint["lm_head.weight"].dtype
+    if hf_model_dtype:
+        torch_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[hf_model_dtype]
+    else:
+        # resolve model params dtype, e.g. torch.float16
+        torch_dtype = model_checkpoint["lm_head.weight"].dtype
 
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -93,7 +97,7 @@ def write_model(checkpoint_path, hf_model_path):
     config = LlamaConfig(
         vocab_size=allamo_transformer_config.vocab_size,
         hidden_size=dim,
-        intermediate_size=compute_intermediate_size(allamo_transformer_config),
+        intermediate_size=intermediate_size,
         num_attention_heads=n_heads,
         num_key_value_heads=num_kv_heads,
         num_hidden_layers=n_layers,
@@ -129,10 +133,15 @@ def main():
         "--output_dir",
         help="Location to write HF model",
     )
+    parser.add_argument(
+        "--output_dtype",
+        help="Override model dtype and save the model under a specific dtype",
+    )
     args = parser.parse_args()
     write_model(
         checkpoint_path=args.input_dir,
         hf_model_path=args.output_dir,
+        hf_model_dtype=args.output_dtype,
     )
 
 
