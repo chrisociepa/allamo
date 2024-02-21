@@ -21,7 +21,7 @@ def import_model(hf_model_path, output_model_path):
     assert hf_model.config.hidden_act == "silu"
     
     config = AllamoTransformerConfig()
-    config.block_size = hf_model.config.max_position_embeddings
+    config.block_size = hf_model.config.sliding_window # hf_model.config.max_position_embeddings
     config.vocab_size = hf_model.config.vocab_size
     config.n_layer = hf_model.config.num_hidden_layers
     config.n_head = hf_model.config.num_attention_heads
