@@ -9,7 +9,7 @@ import logging
 import os
 import shutil
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,7 +27,8 @@ def write_json(text, path):
     with open(path, "w") as f:
         json.dump(text, f)
 
-def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
+def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=None):
+    assert hf_model_type == "llama" or hf_model_type == "mistral", "Only llama and mistral architectures are supported"
     os.makedirs(hf_model_path, exist_ok=True)
     tmp_model_path = os.path.join(hf_model_path, "tmp")
     os.makedirs(tmp_model_path, exist_ok=True)
@@ -43,6 +44,7 @@ def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
     dim = allamo_transformer_config.n_embd
     dims_per_head = allamo_transformer_config.head_size
     intermediate_size = allamo_transformer_config.intermediate_size if hasattr(allamo_transformer_config, 'intermediate_size') else compute_intermediate_size(allamo_transformer_config)
+    max_position_embeddings = allamo_transformer_config.block_size
 
     logger.info(f"converting all parameters from the checkpoint model")
     unwanted_prefix = '_orig_mod.'
@@ -79,7 +81,7 @@ def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
         "lm_head.weight": model_checkpoint["lm_head.weight"],
     }
     if hf_model_dtype:
-        torch_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[hf_model_dtype]
+        torch_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hf_model_dtype]
     else:
         # resolve model params dtype, e.g. torch.float16
         torch_dtype = model_checkpoint["lm_head.weight"].dtype
@@ -91,18 +93,32 @@ def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
     logger.info(f"{param_count} params converted to HF LLaMA model")
 
     # Write configs
-    index_dict["metadata"] = {"total_size": param_count * 2}
+    param_size_bytes = {'float32': 4, 'bfloat16': 2, 'float16': 2}[hf_model_dtype]
+    index_dict["metadata"] = {"total_size": param_count * param_size_bytes}
     write_json(index_dict, os.path.join(tmp_model_path, "pytorch_model.bin.index.json"))
 
-    config = LlamaConfig(
-        vocab_size=allamo_transformer_config.vocab_size,
-        hidden_size=dim,
-        intermediate_size=intermediate_size,
-        num_attention_heads=n_heads,
-        num_key_value_heads=num_kv_heads,
-        num_hidden_layers=n_layers,
-        rms_norm_eps=allamo_transformer_config.norm_eps,
-    )
+    if hf_model_type == "llama":
+        config = LlamaConfig(
+            vocab_size=allamo_transformer_config.vocab_size,
+            max_position_embeddings=max_position_embeddings,
+            hidden_size=dim,
+            intermediate_size=intermediate_size,
+            num_attention_heads=n_heads,
+            num_key_value_heads=num_kv_heads,
+            num_hidden_layers=n_layers,
+            rms_norm_eps=allamo_transformer_config.norm_eps,
+        )
+    elif hf_model_type == "mistral":
+        config = MistralConfig(
+            vocab_size=allamo_transformer_config.vocab_size,
+            max_position_embeddings=max_position_embeddings,
+            hidden_size=dim,
+            intermediate_size=intermediate_size,
+            num_attention_heads=n_heads,
+            num_key_value_heads=num_kv_heads,
+            num_hidden_layers=n_layers,
+            rms_norm_eps=allamo_transformer_config.norm_eps,
+        )
     config.save_pretrained(tmp_model_path)
     logger.info(f"configuration for the HF LLaMA model saved")
 
@@ -113,7 +129,10 @@ def write_model(checkpoint_path, hf_model_path, hf_model_dtype=None):
     gc.collect()
 
     logger.info(f"loading the checkpoint in a LLaMA model with {torch_dtype} dtype")
-    model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+    if hf_model_type == "llama":
+        model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+    elif hf_model_type == "mistral":
+        model = MistralForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
     # Avoid saving this as part of the config.
     del model.config._name_or_path
 
@@ -134,13 +153,21 @@ def main():
         help="Location to write HF model",
     )
     parser.add_argument(
+        "--model_type",
+        choices=['llama', 'mistral'],
+        default='llama',
+        help="Determine model type",
+    )
+    parser.add_argument(
         "--output_dtype",
+        choices=['float32', 'bfloat16', 'float16'],
         help="Override model dtype and save the model under a specific dtype",
     )
     args = parser.parse_args()
     write_model(
         checkpoint_path=args.input_dir,
         hf_model_path=args.output_dir,
+        hf_model_type=args.model_type,
         hf_model_dtype=args.output_dtype,
     )
 
