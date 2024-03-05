@@ -54,9 +54,10 @@ class RMSNorm(torch.nn.Module):
         
     def forward(self, x):
         input_dtype = x.dtype
-        variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
-        return (self.weight * x).to(input_dtype)
+        return self.weight * x.to(input_dtype)
         
 class RotaryEmbedding(torch.nn.Module):
     
