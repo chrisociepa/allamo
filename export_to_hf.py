@@ -82,9 +82,11 @@ def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=No
     }
     if hf_model_dtype:
         torch_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hf_model_dtype]
+        param_size_bytes = {'float32': 4, 'bfloat16': 2, 'float16': 2}[hf_model_dtype]
     else:
         # resolve model params dtype, e.g. torch.float16
         torch_dtype = model_checkpoint["lm_head.weight"].dtype
+        param_size_bytes = 4 if torch_dtype == torch.float32 else 2
 
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -93,7 +95,6 @@ def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=No
     logger.info(f"{param_count} params converted to HF LLaMA model")
 
     # Write configs
-    param_size_bytes = {'float32': 4, 'bfloat16': 2, 'float16': 2}[hf_model_dtype]
     index_dict["metadata"] = {"total_size": param_count * param_size_bytes}
     write_json(index_dict, os.path.join(tmp_model_path, "pytorch_model.bin.index.json"))
 
