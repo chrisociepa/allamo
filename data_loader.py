@@ -52,7 +52,7 @@ class AllamoDataset:
                     return True
         return False
         
-    def pad_to_block_size(self, data):
+    def pad_or_truncate_to_block_size(self, data):
         """
         Adds padding to instructions to maintain a consistent input shape, avoiding recompilations.
         This method ensures all instructions have a uniform length matching the block size.
@@ -60,7 +60,9 @@ class AllamoDataset:
         dynamic input shapes, enhancing computational efficiency and stability.
         """
         for idx in range(len(data)):
-            if len(data[idx]) < self.sample_size:
+            if len(data[idx]) > self.sample_size:
+                data[idx] = data[idx][:self.sample_size]
+            elif self.pad_token_id >= 0 and len(data[idx]) < self.sample_size:
                 padding = self.sample_size - len(data[idx])
                 data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
                 
@@ -100,8 +102,7 @@ class AllamoDataset:
                     )
                     return False
                 new_data = self.align_data_to_step_size(new_data, self.world_size)
-                if self.pad_token_id >= 0:
-                    self.pad_to_block_size(new_data)
+                self.pad_or_truncate_to_block_size(new_data)
                 new_data = self.limit_samples_to_rank(new_data)
             else:
                 self.logger.info(f"Unsupported format of {load_dataset_file}!")
@@ -204,12 +205,12 @@ class AllamoDataLoader:
                         self.reload_dataset(dataset)
                     samples.append(dataset[self.dataset_offset])
                     self.dataset_offset += 1
-            x = torch.stack([sample[:self.config.block_size] for sample in samples]).to(torch.int64)
-            y = torch.stack([sample[1:1+self.config.block_size] for sample in samples]).to(torch.int64)
+            x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
+            y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
         else:
             idx_batch = torch.randint(len(dataset), (self.batch_size,))
-            x = torch.stack([dataset[i][:self.config.block_size] for i in idx_batch]).to(torch.int64)
-            y = torch.stack([dataset[i][1:1+self.config.block_size] for i in idx_batch]).to(torch.int64)
+            x = torch.stack([dataset[i][:-1] for i in idx_batch]).to(torch.int64)
+            y = torch.stack([dataset[i][1:] for i in idx_batch]).to(torch.int64)
             
         if self.config.pad_token_id >= 0:
             x[x == self.config.ignore_index] = self.config.pad_token_id
