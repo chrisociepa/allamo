@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import math
+import os
 
 def create_dataloader(config, rank, world_size):
     if config.dataloader_type == 'allamo':
@@ -14,6 +15,10 @@ def create_dataloader(config, rank, world_size):
         return SimpleInstructionsDataLoader(config, rank, world_size)
     else:
         raise Exception(f'Unsupported data loader type: {config.dataloader_type}')
+        
+def rename_file_to_prev_version(file_path):
+    if os.path.exists(file_path):
+        os.rename(file_path, file_path + '.prev')
         
 def calculate_md5(file_path, chunk_size=1024*1024):
     md5 = hashlib.md5()

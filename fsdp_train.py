@@ -40,6 +40,7 @@ from model import AllamoTransformerConfig, AllamoTransformer, SelfAttentionBlock
 from configuration import AllamoConfiguration
 from train_utils import (
     create_dataloader,
+    rename_file_to_prev_version,
     calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
@@ -285,10 +286,12 @@ class AllamoFSDPTrainer:
                 
             ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
+            rename_file_to_prev_version(ckpt_file_path)
             torch.save(checkpoint, ckpt_file_path)
             
             ckpt_file_path = os.path.join(self.config.out_dir, 'model_' + ckpt_file_name)
             self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+            rename_file_to_prev_version(ckpt_file_path)
             torch.save(full_msd, ckpt_file_path)
             del full_msd
         
@@ -298,6 +301,7 @@ class AllamoFSDPTrainer:
             if self.master_process:
                 ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
                 self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                rename_file_to_prev_version(ckpt_file_path)
                 torch.save(full_osd, ckpt_file_path)
                 self.logger.info(f"checkpoint files saved in {config.out_dir}")
                 del full_osd

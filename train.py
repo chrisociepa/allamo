@@ -22,6 +22,7 @@ from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 from train_utils import (
     create_dataloader,
+    rename_file_to_prev_version,
     calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
     get_lr,
@@ -268,15 +269,18 @@ class AllamoTrainer:
         
         ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
         self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
+        rename_file_to_prev_version(ckpt_file_path)
         torch.save(checkpoint, ckpt_file_path)
         
         ckpt_file_path = os.path.join(self.config.out_dir, 'model_' + ckpt_file_name)
         self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+        rename_file_to_prev_version(ckpt_file_path)
         torch.save(self.raw_model.state_dict(), ckpt_file_path)
         
         ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
         self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
         torch.save(self.optimizer.state_dict(), ckpt_file_path)
+        rename_file_to_prev_version(ckpt_file_path)
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
         
     def train(self):
