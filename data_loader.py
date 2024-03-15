@@ -35,9 +35,10 @@ class AllamoDataset:
             dataset_dir = os.path.join(config.data_dir, config.dataset)
             prefix = config.dataset_train_file_prefix if train_split else config.dataset_validation_file_prefix
             for dataset_file in glob.glob(os.path.join(dataset_dir, "*.*")):
-                if (dataset_file.endswith('.bin') or dataset_file.endswith('.pt')) and os.path.basename(dataset_file).startswith(prefix):
+                if self.is_file_type_supported(dataset_file) and os.path.basename(dataset_file).startswith(prefix):
                     dataset_files.append(dataset_file)
             self.logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
+        self.import_numpy_if_required(dataset_files)
         if dataset_files:
             return sorted(dataset_files)
         elif train_split:
@@ -45,26 +46,21 @@ class AllamoDataset:
         else:
             return []
     
+    def is_file_type_supported(self, dataset_file):
+        return dataset_file.endswith('.bin') or dataset_file.endswith('.pt')
+    
+    def import_numpy_if_required(self, dataset_files):
+        for df in dataset_files:
+            if df.endswith('.bin'):
+                import numpy as np
+                return
+    
     def load_next_dataset(self):
         for ds_file in self.dataset_files:
             if ds_file not in self.processed_files:
                 if self.load_dataset_file(ds_file):
                     return True
         return False
-        
-    def pad_or_truncate_to_block_size(self, data):
-        """
-        Adds padding to instructions to maintain a consistent input shape, avoiding recompilations.
-        This method ensures all instructions have a uniform length matching the block size.
-        By doing so, it prevents the need for frequent recompilations that occur due to
-        dynamic input shapes, enhancing computational efficiency and stability.
-        """
-        for idx in range(len(data)):
-            if len(data[idx]) > self.sample_size:
-                data[idx] = data[idx][:self.sample_size]
-            elif self.pad_token_id >= 0 and len(data[idx]) < self.sample_size:
-                padding = self.sample_size - len(data[idx])
-                data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
                 
     def load_dataset_file(self, load_dataset_file):
         self.processed_files.append(load_dataset_file)
@@ -122,6 +118,20 @@ class AllamoDataset:
         
     def transform_continuous_data_to_samples(self, data):
         return [data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)]
+        
+    def pad_or_truncate_to_block_size(self, data):
+        """
+        Adds padding to instructions to maintain a consistent input shape, avoiding recompilations.
+        This method ensures all instructions have a uniform length matching the block size.
+        By doing so, it prevents the need for frequent recompilations that occur due to
+        dynamic input shapes, enhancing computational efficiency and stability.
+        """
+        for idx in range(len(data)):
+            if len(data[idx]) > self.sample_size:
+                data[idx] = data[idx][:self.sample_size]
+            elif self.pad_token_id >= 0 and len(data[idx]) < self.sample_size:
+                padding = self.sample_size - len(data[idx])
+                data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
         
     def limit_samples_to_rank(self, samples):
         return samples[self.rank::self.world_size] if self.world_size > 1 else samples
