@@ -3,6 +3,7 @@ This single file is intended to perform some magic for training/finetuning using
 """
 
 import gc
+import json
 import os
 import time
 import math
@@ -129,24 +130,24 @@ class AllamoFSDPTrainer:
         ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
         checkpoint_name = None
         if config.init_from == 'resume':
-            checkpoint_name = 'ckpt.pt'
+            checkpoint_name = 'ckpt'
         elif config.init_from == 'resume_last':
-            checkpoint_name = 'last_eval_ckpt.pt'
+            checkpoint_name = 'last_eval_ckpt'
         else:
-            if self.model_checkpoint_files_exist(ckpt_dir, 'ckpt.pt'):
+            if self.model_checkpoint_files_exist(ckpt_dir, 'ckpt'):
                 self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
         
         if checkpoint_name is not None:
             if self.model_checkpoint_files_exist(ckpt_dir, checkpoint_name):
-                self.logger.info(f"Resuming training from {ckpt_dir} and start loading *_{checkpoint_name} checkpoint files")
-                self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), config, model_config_fields)
+                self.logger.info(f"Resuming training from {ckpt_dir} and start loading '{checkpoint_name}' checkpoint files")
+                self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), config, model_config_fields)
             elif config.init_from == 'resume_last':
                 checkpoint_name = None
                 if self.master_process:
-                    self.logger.warning("*_{checkpoint_name} checkpoint files not found but allowing to start from scratch")
+                    self.logger.warning("'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
             else:
-                raise Exception(f'*{checkpoint_name} checkpoint files not found!')
+                raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
                 
         model_args = {k: getattr(config, k) for k in model_config_fields if hasattr(config, k)}
         modelConf = AllamoTransformerConfig(**model_args)
@@ -157,7 +158,7 @@ class AllamoFSDPTrainer:
         if checkpoint_name is None:
             self.logger.info("Initialized a new model from scratch")
         else:
-            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}'), config)
+            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), config)
         
         self.logger.info("Configuring model with FSDP")
         model = FSDP(model, **self.fsdp_config)
@@ -187,7 +188,7 @@ class AllamoFSDPTrainer:
         if checkpoint_name is None:
             self.logger.info("Initializing optimizer from scratch")
         else:
-            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}'))
+            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}.pt'))
                 
         # gradient_accumulation scheduler
         if config.grad_accum_schedule: 
@@ -205,26 +206,19 @@ class AllamoFSDPTrainer:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
     
     def model_checkpoint_files_exist(self, ckpt_dir, ckpt_file_name):
-        return os.path.exists(os.path.join(ckpt_dir, 'config_' + ckpt_file_name)) \
-                and os.path.exists(os.path.join(ckpt_dir, 'model_' + ckpt_file_name))
+        return os.path.exists(os.path.join(ckpt_dir, f'config_{ckpt_file_name}.json')) \
+                and os.path.exists(os.path.join(ckpt_dir, f'model_{ckpt_file_name}.pt'))
     
     def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
-        config_checkpoint = torch.load(ckpt_path, map_location='cpu')
-        checkpoint_model_args = config_checkpoint['model_args']
+        with open(ckpt_path, "r", encoding="utf-8") as f:
+            config_checkpoint = json.load(f)
         # force these config attributes to be equal otherwise we can't even resume training
         # the rest of the attributes (e.g. dropout) can stay as desired from command line
         for k in model_config_fields:
-            if hasattr(config, k) and hasattr(checkpoint_model_args, k):
-                setattr(config, k, getattr(checkpoint_model_args, k))
+            if hasattr(config, k) and k in config_checkpoint['model_args']:
+                setattr(config, k, config_checkpoint['model_args'][k])
         if 'iter_num' in config_checkpoint:
-            if config_checkpoint['iter_num'] <= self.config.max_iters:
-                self.iter_num = config_checkpoint['iter_num']
-            else:
-                self.logger.info(
-                    f"Current iter_num ({config_checkpoint['iter_num']}) in the loaded checkpoint exceeds max_iters ({self.config.max_iters}). "
-                    f"Therefore, resetting training to the initial state"
-                )
-                return
+            self.iter_num = config_checkpoint['iter_num']
         if 'best_train_loss' in config_checkpoint:
             self.best_train_loss = config_checkpoint['best_train_loss']
         if 'best_val_loss' in config_checkpoint:
@@ -232,18 +226,18 @@ class AllamoFSDPTrainer:
         if 'processed_tokens' in config_checkpoint:
             self.processed_tokens = config_checkpoint['processed_tokens']
         
-        if config.dataloader_type == 'allamo':
-            if  'allamo_dataloader_train_processed_files' in config_checkpoint:
-                self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader_train_processed_files']
+        if config.dataloader_type == 'allamo' and 'allamo_dataloader' in config_checkpoint:
+            if  'train_processed_files' in config_checkpoint['allamo_dataloader']:
+                self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader']['train_processed_files']
                 if len(self.data_loader.train_dataset.processed_files) > 0:
                     # Removing the last element from the list because it represents the file where processing was interrupted.
                     # We will load this file and resume processing from there, indicated by the dataset_offset.
                     self.data_loader.train_dataset.processed_files.pop()
                     self.data_loader.train_dataset.load_next_dataset()
-            if 'allamo_dataloader_dataset_offset' in config_checkpoint:
-                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader_dataset_offset'] // self.world_size
-            if 'allamo_dataloader_epoch' in config_checkpoint:
-                self.data_loader.epoch = config_checkpoint['allamo_dataloader_epoch']
+            if 'dataset_offset' in config_checkpoint['allamo_dataloader']:
+                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.world_size
+            if 'epoch' in config_checkpoint['allamo_dataloader']:
+                self.data_loader.epoch = config_checkpoint['allamo_dataloader']['epoch']
     
     def load_model_checkpoint(self, model, ckpt_path, config):
         state_dict = torch.load(ckpt_path, map_location='cpu')
@@ -272,24 +266,26 @@ class AllamoFSDPTrainer:
             full_msd = self.model.state_dict()
         if self.master_process:
             checkpoint = {
-                'model_args': self.model.config,
+                'model_args': dataclasses.asdict(self.model.config),
                 'iter_num': self.iter_num,
                 'best_train_loss': self.best_train_loss,
                 'best_val_loss': self.best_val_loss,
                 'processed_tokens': self.processed_tokens,
-                'config': self.config.__dict__,
+                'config': dataclasses.asdict(self.config),
             }
             if config.dataloader_type == 'allamo':
-                checkpoint['allamo_dataloader_train_processed_files'] = self.data_loader.train_dataset.processed_files
-                checkpoint['allamo_dataloader_dataset_offset'] = self.data_loader.dataset_offset * self.world_size
-                checkpoint['allamo_dataloader_epoch'] = self.data_loader.epoch
+                checkpoint['allamo_dataloader'] = {}
+                checkpoint['allamo_dataloader']['train_processed_files'] = self.data_loader.train_dataset.processed_files
+                checkpoint['allamo_dataloader']['dataset_offset'] = self.data_loader.dataset_offset * self.world_size
+                checkpoint['allamo_dataloader']['epoch'] = self.data_loader.epoch
                 
-            ckpt_file_path = os.path.join(self.config.out_dir, 'config_' + ckpt_file_name)
+            ckpt_file_path = os.path.join(self.config.out_dir, f'config_{ckpt_file_name}.json')
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
             rename_file_to_prev_version(ckpt_file_path)
-            torch.save(checkpoint, ckpt_file_path)
+            with open(ckpt_file_path, "w", encoding="utf-8") as f:
+                json.dump(checkpoint, f, indent=4, ensure_ascii=False)
             
-            ckpt_file_path = os.path.join(self.config.out_dir, 'model_' + ckpt_file_name)
+            ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
             self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
             rename_file_to_prev_version(ckpt_file_path)
             torch.save(full_msd, ckpt_file_path)
@@ -299,7 +295,7 @@ class AllamoFSDPTrainer:
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.master_process:
-                ckpt_file_path = os.path.join(self.config.out_dir, 'optimizer_' + ckpt_file_name)
+                ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
                 self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
                 rename_file_to_prev_version(ckpt_file_path)
                 torch.save(full_osd, ckpt_file_path)
@@ -338,7 +334,7 @@ class AllamoFSDPTrainer:
         current_epoch = self.data_loader.epoch
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
-                self.save_checkpoint(f'epoch_{current_epoch}.pt', model_only=True)
+                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True)
                 current_epoch = self.data_loader.epoch
             
             timer = time.time()
@@ -355,19 +351,19 @@ class AllamoFSDPTrainer:
                 eval_time = time.time()
                 losses, accuraces = self.estimate_loss()
                 eval_time = time.time() - eval_time
+                train_loss = losses['train'].item()
+                val_loss = losses['val'].item()
                 if self.iter_num > self.start_iter:
-                    if losses['train'] < self.best_train_loss:
-                        self.best_train_loss = losses['train']
-                    if losses['val'] < self.best_val_loss:
-                        self.best_val_loss = losses['val']
-                        self.save_checkpoint('ckpt.pt')
+                    if train_loss < self.best_train_loss:
+                        self.best_train_loss = train_loss
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        self.save_checkpoint('ckpt')
                     if self.config.always_save_checkpoint:
-                        self.save_checkpoint('last_eval_ckpt.pt')
+                        self.save_checkpoint('last_eval_ckpt')
                 if self.master_process:                
-                    train_loss = losses['train']
-                    val_loss = losses['val']
-                    train_ppl = torch.exp(train_loss)
-                    val_ppl = torch.exp(val_loss)
+                    train_ppl = torch.exp(losses['train']).item()
+                    val_ppl = torch.exp(losses['val']).item()
                     self.logger.info(
                         f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
                         f"acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), "
@@ -383,10 +379,10 @@ class AllamoFSDPTrainer:
                             "eval/val_loss": val_loss,
                             "eval/train_ppl": train_ppl,
                             "eval/val_ppl": val_ppl,
-                            "eval/train_acc": accuraces['train'],
-                            "eval/val_acc": accuraces['val'],
+                            "eval/train_acc": accuraces['train'].item(),
+                            "eval/val_acc": accuraces['val'].item(),
                             "eval/diff_loss": (val_loss-train_loss),
-                            "eval/diff_acc": (accuraces['train']-accuraces['val']),
+                            "eval/diff_acc": (accuraces['train']-accuraces['val']).item(),
                             "eval/diff_ppl": (val_ppl-train_ppl),
                             "eval/best_train_loss": self.best_train_loss,
                             "eval/best_val_loss": self.best_val_loss
@@ -487,7 +483,7 @@ class AllamoFSDPTrainer:
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
-        self.save_checkpoint('final_ckpt.pt')
+        self.save_checkpoint('final_ckpt')
 
 if __name__ == '__main__':
     config = AllamoConfiguration()

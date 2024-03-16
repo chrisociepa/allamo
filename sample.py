@@ -1,6 +1,7 @@
 """
 Use this file to sample from a trained model.
 """
+import json
 import logging
 import os
 import pickle
@@ -18,16 +19,16 @@ class AllamoSampler:
         self.__init_torch(config)
 
         if config.init_from == 'resume_last':
-            checkpoint_name = 'last_eval_ckpt.pt'
+            checkpoint_name = 'last_eval_ckpt'
         else:
-            checkpoint_name = 'ckpt.pt'
+            checkpoint_name = 'ckpt'
         ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
-        self.logger.info(f"Loading *_{checkpoint_name} checkpoint files from {ckpt_dir}...")
-        config_checkpoint = torch.load(os.path.join(ckpt_dir, f'config_{checkpoint_name}'), map_location='cpu')
-        model_checkpoint = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}'), map_location='cpu')
+        self.logger.info(f"Loading '{checkpoint_name}' checkpoint files from {ckpt_dir}...")
+        with open(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), "r", encoding="utf-8") as f:
+            config_checkpoint = json.load(f)
+        model_checkpoint = torch.load(os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), map_location='cpu')
         self.__load_model(config, config_checkpoint, model_checkpoint)
-        self.__load_tokenizer(config, config_checkpoint)
-        del config_checkpoint
+        self.__load_tokenizer(config)
         del model_checkpoint
             
     def __init_torch(self, config: AllamoConfiguration):
@@ -40,7 +41,7 @@ class AllamoSampler:
         
     def __load_model(self, config: AllamoConfiguration, config_checkpoint, model_checkpoint):
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-        model = AllamoTransformer(config_checkpoint['model_args'])
+        model = AllamoTransformer(**config_checkpoint['model_args'])
         unwanted_prefix = '_orig_mod.'
         for k,v in list(model_checkpoint.items()):
             if k.endswith('.rotary_emb.inv_freq'):
@@ -58,7 +59,7 @@ class AllamoSampler:
         if 'iter_num' in config_checkpoint:
             self.logger.info(f"Last model iteration: {config_checkpoint['iter_num']}")
         
-    def __load_tokenizer(self, config: AllamoConfiguration, config_checkpoint):
+    def __load_tokenizer(self, config: AllamoConfiguration):
         tiktoken_tokenizer_name = config.tiktoken_tokenizer_name
         hf_tokenizer_path = config.hf_tokenizer_path
         if hf_tokenizer_path is not None:
