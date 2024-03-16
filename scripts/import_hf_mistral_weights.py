@@ -4,9 +4,12 @@ Use this file to import Huggingface MistralForCausalLM weights to ALLaMo model.
 import argparse
 import logging
 import os
+import sys
 import torch
-from model import AllamoTransformerConfig, AllamoTransformer
 from transformers import MistralForCausalLM
+
+sys.path.append(os.path.abspath('..'))
+from model import AllamoTransformerConfig, AllamoTransformer
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

@@ -1,13 +1,16 @@
 """
-Use this file to import LLaMA weights to ALLaMo model.   
+Use this file to import original LLaMA weights to ALLaMo model.   
 """
 import argparse
 import datetime
 import json
 import logging
 import os
+import sys
 import torch
 import shutil
+
+sys.path.append(os.path.abspath('..'))
 from model import AllamoTransformerConfig, AllamoTransformer
 
 logging.basicConfig(level=logging.INFO,

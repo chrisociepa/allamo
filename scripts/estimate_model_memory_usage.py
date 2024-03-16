@@ -1,8 +1,12 @@
+import dataclasses
 import gc
 import logging
-import dataclasses
 import numpy as np
+import os
+import sys
 import torch
+
+sys.path.append(os.path.abspath('..'))
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
 
