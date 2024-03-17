@@ -345,7 +345,7 @@ class AllamoTransformer(nn.Module):
     def forward(self, 
         input_ids: torch.Tensor, 
         labels: Optional[torch.Tensor] = None, 
-        ignore_index: Optional[int] = -1,
+        ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
         if inputs_embeds is not None:

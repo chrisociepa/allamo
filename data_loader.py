@@ -127,11 +127,44 @@ class AllamoDataset:
         dynamic input shapes, enhancing computational efficiency and stability.
         """
         for idx in range(len(data)):
-            if len(data[idx]) > self.sample_size:
-                data[idx] = data[idx][:self.sample_size]
-            elif self.pad_token_id >= 0 and len(data[idx]) < self.sample_size:
-                padding = self.sample_size - len(data[idx])
-                data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
+            if isinstance(data[idx], dict):
+                if 'input_ids' not in data[idx]:
+                    raise Exception(f"'input_id' field not found in sample! Available keys: {', '.join(data[idx].keys())}")
+                if 'target_ids' not in data[idx]:
+                    data[idx]['target_ids'] = data[idx]['input_ids'][1:]
+                    
+                if len(data[idx]['input_ids']) >= self.sample_size: # block_size = sample_size - 1
+                    data[idx]['input_ids'] = data[idx]['input_ids'][:self.sample_size-1]
+                elif self.pad_token_id >= 0 and len(data[idx]['input_ids']) < self.sample_size-1:
+                    padding = self.sample_size - 1 - len(data[idx]['input_ids'])
+                    data[idx]['input_ids'] = torch.cat([data[idx]['input_ids'], torch.full((padding,), self.ignore_index)], dim=0)
+                
+                if len(data[idx]['target_ids']) >= self.sample_size:
+                    data[idx]['target_ids'] = data[idx]['target_ids'][:self.sample_size-1]
+                elif self.pad_token_id >= 0 and len(data[idx]['target_ids']) < self.sample_size-1:
+                    padding = self.sample_size - 1 - len(data[idx]['target_ids'])
+                    data[idx]['target_ids'] = torch.cat([data[idx]['target_ids'], torch.full((padding,), self.ignore_index)], dim=0)
+                
+                if 'target_mask' in data[idx]:
+                    if len(data[idx]['target_mask']) >= self.sample_size:
+                        data[idx]['target_mask'] = data[idx]['target_mask'][:self.sample_size-1]
+                    elif self.pad_token_id >= 0 and len(data[idx]['target_mask']) < self.sample_size-1:
+                        padding_value = False if isinstance(data[idx]['target_mask'][0].item(), bool) else 0
+                        padding = self.sample_size - 1 - len(data[idx]['target_mask'])
+                        data[idx]['target_mask'] = torch.cat([data[idx]['target_mask'], torch.full((padding,), padding_value)], dim=0)
+                    data[idx]['target_ids'] = data[idx]['target_ids'].masked_fill(data[idx]['target_mask'] == 0, self.ignore_index)
+                    del data[idx]['target_mask']
+                assert len(data[idx]['input_ids']) == len(data[idx]['target_ids'])
+            else:
+                if len(data[idx]) > self.sample_size:
+                    data[idx] = data[idx][:self.sample_size]
+                if self.pad_token_id >= 0:
+                    if len(data[idx]) < self.sample_size:
+                        padding = self.sample_size - len(data[idx])
+                        data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
+                    input_ids = data[idx][:-1]
+                    data[idx] = {'input_ids': input_ids, 'target_ids': data[idx][1:]}
+                    data[idx]['input_ids'][input_ids == self.ignore_index] = self.pad_token_id
         
     def limit_samples_to_rank(self, samples):
         return samples[self.rank::self.world_size] if self.world_size > 1 else samples
@@ -215,15 +248,16 @@ class AllamoDataLoader:
                         self.reload_dataset(dataset)
                     samples.append(dataset[self.dataset_offset])
                     self.dataset_offset += 1
-            x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
-            y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
         else:
             idx_batch = torch.randint(len(dataset), (self.batch_size,))
-            x = torch.stack([dataset[i][:-1] for i in idx_batch]).to(torch.int64)
-            y = torch.stack([dataset[i][1:] for i in idx_batch]).to(torch.int64)
+            samples = [dataset[i] for i in idx_batch]
             
-        if self.config.pad_token_id >= 0:
-            x[x == self.config.ignore_index] = self.config.pad_token_id
+        if isinstance(samples[0], dict):
+            x = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
+            y = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
+        else:
+            x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
+            y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
         
         if 'cuda' in self.config.device and self.pin_memory:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
