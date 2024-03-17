@@ -34,10 +34,11 @@ def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=No
     os.makedirs(tmp_model_path, exist_ok=True)
     
     logger.info(f"loading checkpoint from {checkpoint_path}...")
-    config_checkpoint = torch.load(os.path.join(checkpoint_path, 'config_ckpt.pt'), map_location='cpu')
+    with open(os.path.join(ckpt_dir, f'config_ckpt.json'), "r", encoding="utf-8") as f:
+        config_checkpoint = json.load(f)
     model_checkpoint = torch.load(os.path.join(checkpoint_path, 'model_ckpt.pt'), map_location='cpu')
 
-    allamo_transformer_config = config_checkpoint['model_args']
+    allamo_transformer_config = AllamoTransformerConfig(**config_checkpoint['model_args'])
     n_layers = allamo_transformer_config.n_layer
     n_heads = allamo_transformer_config.n_head
     num_kv_heads = allamo_transformer_config.num_kv_heads
