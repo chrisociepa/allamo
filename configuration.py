@@ -85,6 +85,7 @@ class AllamoConfiguration:
     mfu_flops_peak: float = -1.0
     ignore_index: int = -100
     pad_token_id: int = -1
+    fsdp_sharding_strategy: str = 'FULL_SHARD'
     
     # inference params
     prompt: str = "\n" 
@@ -172,6 +173,7 @@ class AllamoConfiguration:
         parser.add_argument('--mfu_flops_peak', type=float, help="Specifies the MFU's peak performance in FLOPs. A default value of -1 disables MFU estimation")
         parser.add_argument('--ignore_index', type=int, help="Specifies a target value that is ignored and does not contribute to the input gradient")
         parser.add_argument('--pad_token_id', type=float, help="Enables padding and specifies the token id used for padding in sequences")
+        parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')

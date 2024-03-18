@@ -99,6 +99,13 @@ class AllamoFSDPTrainer:
             raise Exception('Full bfloat16 training is not supported with FSDP')
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
+        self.sharding_strategy = {
+            'FULL_SHARD': ShardingStrategy.FULL_SHARD,
+            'HYBRID_SHARD': ShardingStrategy.HYBRID_SHARD,
+            '_HYBRID_SHARD_ZERO2': ShardingStrategy._HYBRID_SHARD_ZERO2,
+            'SHARD_GRAD_OP': ShardingStrategy.SHARD_GRAD_OP,
+            'NO_SHARD': ShardingStrategy.NO_SHARD
+        }[config.fsdp_sharding_strategy]
         auto_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
             transformer_layer_cls={
@@ -107,7 +114,7 @@ class AllamoFSDPTrainer:
         )
         self.fsdp_config = dict(
             auto_wrap_policy=auto_wrap_policy,
-            sharding_strategy=ShardingStrategy.FULL_SHARD, #Options: FULL_SHARD, HYBRID_SHARD, _HYBRID_SHARD_ZERO2, SHARD_GRAD_OP, NO_SHARD
+            sharding_strategy=self.sharding_strategy,
             device_id=torch.cuda.current_device(),
             mixed_precision=MixedPrecision(
                 param_dtype=ptdtype,
@@ -162,7 +169,7 @@ class AllamoFSDPTrainer:
         
         self.logger.info("Configuring model with FSDP")
         model = FSDP(model, **self.fsdp_config)
-        self.logger.info("Model configured with FSDP")
+        self.logger.info(f"Model configured with FSDP and sharding strategy {self.sharding_strategy}")
         
         if self.fsdp_activation_checkpointing:
             non_reentrant_wrapper = functools.partial(
