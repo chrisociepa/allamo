@@ -9,8 +9,10 @@ import logging
 import os
 import shutil
 import torch
-from model import AllamoTransformerConfig
 from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
+
+sys.path.append(os.path.abspath('..'))
+from model import AllamoTransformerConfig
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
