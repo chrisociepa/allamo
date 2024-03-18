@@ -34,7 +34,7 @@ def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=No
     os.makedirs(tmp_model_path, exist_ok=True)
     
     logger.info(f"loading checkpoint from {checkpoint_path}...")
-    with open(os.path.join(ckpt_dir, f'config_ckpt.json'), "r", encoding="utf-8") as f:
+    with open(os.path.join(checkpoint_path, f'config_ckpt.json'), "r", encoding="utf-8") as f:
         config_checkpoint = json.load(f)
     model_checkpoint = torch.load(os.path.join(checkpoint_path, 'model_ckpt.pt'), map_location='cpu')
 
