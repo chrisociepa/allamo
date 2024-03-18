@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import torch
+from model import AllamoTransformerConfig
 from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
 
 logging.basicConfig(level=logging.INFO,
