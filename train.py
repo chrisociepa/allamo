@@ -116,7 +116,7 @@ class AllamoTrainer:
                 self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), config, model_config_fields)
             elif config.init_from == 'resume_last':
                 checkpoint_name = None
-                self.logger.warning("'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
+                self.logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
             else:
                 raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
     

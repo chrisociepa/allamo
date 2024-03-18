@@ -145,7 +145,7 @@ class AllamoFSDPTrainer:
             elif config.init_from == 'resume_last':
                 checkpoint_name = None
                 if self.master_process:
-                    self.logger.warning("'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
+                    self.logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
             else:
                 raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
                 
