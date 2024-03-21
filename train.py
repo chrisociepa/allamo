@@ -247,7 +247,14 @@ class AllamoTrainer:
         return losses_out, accuraces
 
     # helps saving checkpoint to a file
-    def save_checkpoint(self, ckpt_file_name):
+    def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
+        ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
+        self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+        rename_file_to_prev_version(ckpt_file_path)
+        torch.save(self.raw_model.state_dict(), ckpt_file_path)
+        
+        md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
+        
         checkpoint = {
             'model_args': dataclasses.asdict(self.raw_model.config),
             'iter_num': self.iter_num,
@@ -256,6 +263,9 @@ class AllamoTrainer:
             'processed_tokens': self.processed_tokens,
             'config': dataclasses.asdict(self.config),
         }
+        if md5sum is not None:
+            checkpoint['checkpoint_md5sum'] = md5sum
+            self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
         if config.dataloader_type == 'allamo':
             checkpoint['allamo_dataloader'] = {}
             checkpoint['allamo_dataloader']['train_processed_files'] = self.data_loader.train_dataset.processed_files
@@ -268,15 +278,12 @@ class AllamoTrainer:
         with open(ckpt_file_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
-        self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
-        rename_file_to_prev_version(ckpt_file_path)
-        torch.save(self.raw_model.state_dict(), ckpt_file_path)
-        
-        ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
-        self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
-        rename_file_to_prev_version(ckpt_file_path)
-        torch.save(self.optimizer.state_dict(), ckpt_file_path)
+        if model_only == False:
+            ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
+            self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+            rename_file_to_prev_version(ckpt_file_path)
+            torch.save(self.optimizer.state_dict(), ckpt_file_path)
+            
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
         
     def train(self):
@@ -287,7 +294,7 @@ class AllamoTrainer:
         current_epoch = self.data_loader.epoch
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
-                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True)
+                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True, epoch_ckpt=True)
                 current_epoch = self.data_loader.epoch
             
             timer = time.time()
@@ -445,7 +452,7 @@ class AllamoTrainer:
         self.logger.info(f"Training finished in {training_time}")
         
         if self.master_process and not self.config.eval_only:
-            self.save_checkpoint('final_ckpt')
+            self.save_checkpoint('final_ckpt', model_only=True, epoch_ckpt=True)
 
 if __name__ == '__main__':
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?

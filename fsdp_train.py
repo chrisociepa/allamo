@@ -268,10 +268,18 @@ class AllamoFSDPTrainer:
                 self.logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
         
     # helps saving checkpoint to a file
-    def save_checkpoint(self, ckpt_file_name, model_only=False):
+    def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
             full_msd = self.model.state_dict()
         if self.master_process:
+            ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
+            self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+            rename_file_to_prev_version(ckpt_file_path)
+            torch.save(full_msd, ckpt_file_path)
+            del full_msd
+            
+            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
+            
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
                 'iter_num': self.iter_num,
@@ -280,6 +288,9 @@ class AllamoFSDPTrainer:
                 'processed_tokens': self.processed_tokens,
                 'config': dataclasses.asdict(self.config),
             }
+            if md5sum is not None:
+                checkpoint['checkpoint_md5sum'] = md5sum
+                self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
             if config.dataloader_type == 'allamo':
                 checkpoint['allamo_dataloader'] = {}
                 checkpoint['allamo_dataloader']['train_processed_files'] = self.data_loader.train_dataset.processed_files
@@ -291,12 +302,6 @@ class AllamoFSDPTrainer:
             rename_file_to_prev_version(ckpt_file_path)
             with open(ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
-            
-            ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
-            self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
-            rename_file_to_prev_version(ckpt_file_path)
-            torch.save(full_msd, ckpt_file_path)
-            del full_msd
         
         if model_only == False:
             # pull all sharded optimizer states to rank0 cpu.
@@ -341,7 +346,7 @@ class AllamoFSDPTrainer:
         current_epoch = self.data_loader.epoch
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
-                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True)
+                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True, epoch_ckpt=True)
                 current_epoch = self.data_loader.epoch
             
             timer = time.time()
@@ -490,7 +495,7 @@ class AllamoFSDPTrainer:
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
-        self.save_checkpoint('final_ckpt')
+        self.save_checkpoint('final_ckpt', model_only=True, epoch_ckpt=True)
 
 if __name__ == '__main__':
     config = AllamoConfiguration()
