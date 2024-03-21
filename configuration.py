@@ -20,6 +20,7 @@ class AllamoConfiguration:
     reload_datasets_interval: int = -1
     log_checkpoint_md5_on_load: bool = False
     log_checkpoint_md5_on_epoch: bool = False
+    ignore_last_checkpoint_backup: bool = False
     log_interval: int = 1
     eval_interval: int = 1000
     eval_iters: int = 200
@@ -111,6 +112,7 @@ class AllamoConfiguration:
         parser.add_argument('--reload_datasets_interval', type=int, help='Number of iterations when datasets are reloaded')
         parser.add_argument('--log_checkpoint_md5_on_load', type=bool, help='When loading a checkpoint, log its MD5 checksum')
         parser.add_argument('--log_checkpoint_md5_on_epoch', type=bool, help='When saving a checkpoint at the end of an epoch, log its MD5 checksum')
+        parser.add_argument('--ignore_last_checkpoint_backup', type=bool, help='Ignores preserving a copy of the last checkpoint version by overwriting it')
         parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')

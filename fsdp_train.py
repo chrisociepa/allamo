@@ -274,11 +274,12 @@ class AllamoFSDPTrainer:
         if self.master_process:
             ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
             self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
-            rename_file_to_prev_version(ckpt_file_path)
+            if not self.config.ignore_last_checkpoint_backup:
+                rename_file_to_prev_version(ckpt_file_path)
             torch.save(full_msd, ckpt_file_path)
             del full_msd
             
-            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
+            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
             
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
@@ -299,7 +300,8 @@ class AllamoFSDPTrainer:
                 
             ckpt_file_path = os.path.join(self.config.out_dir, f'config_{ckpt_file_name}.json')
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
-            rename_file_to_prev_version(ckpt_file_path)
+            if not self.config.ignore_last_checkpoint_backup:
+                rename_file_to_prev_version(ckpt_file_path)
             with open(ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
@@ -309,7 +311,8 @@ class AllamoFSDPTrainer:
             if self.master_process:
                 ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
                 self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
-                rename_file_to_prev_version(ckpt_file_path)
+                if not self.config.ignore_last_checkpoint_backup:
+                    rename_file_to_prev_version(ckpt_file_path)
                 torch.save(full_osd, ckpt_file_path)
                 self.logger.info(f"checkpoint files saved in {config.out_dir}")
                 del full_osd

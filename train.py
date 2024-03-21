@@ -250,7 +250,8 @@ class AllamoTrainer:
     def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
         ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
         self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
-        rename_file_to_prev_version(ckpt_file_path)
+        if not self.config.ignore_last_checkpoint_backup:
+            rename_file_to_prev_version(ckpt_file_path)
         torch.save(self.raw_model.state_dict(), ckpt_file_path)
         
         md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
@@ -274,14 +275,16 @@ class AllamoTrainer:
         
         ckpt_file_path = os.path.join(self.config.out_dir, f'config_{ckpt_file_name}.json')
         self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
-        rename_file_to_prev_version(ckpt_file_path)
+        if not self.config.ignore_last_checkpoint_backup:
+            rename_file_to_prev_version(ckpt_file_path)
         with open(ckpt_file_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
         if model_only == False:
             ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
             self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
-            rename_file_to_prev_version(ckpt_file_path)
+            if not self.config.ignore_last_checkpoint_backup:
+                rename_file_to_prev_version(ckpt_file_path)
             torch.save(self.optimizer.state_dict(), ckpt_file_path)
             
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
