@@ -266,7 +266,7 @@ class AllamoDataLoader:
         if isinstance(samples[0], dict):
             x = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
             y = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
-            w = torch.stack([sample['target_weights'] for sample in samples]).to(torch.int64)
+            w = torch.stack([sample['target_weights'] for sample in samples]).to(torch.int64) if self.config.weighted_loss else None
         else:
             x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
             y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
