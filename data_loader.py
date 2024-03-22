@@ -132,6 +132,8 @@ class AllamoDataset:
                     raise Exception(f"'input_id' field not found in sample! Available keys: {', '.join(data[idx].keys())}")
                 if 'target_ids' not in data[idx]:
                     data[idx]['target_ids'] = data[idx]['input_ids'][1:]
+                if 'target_weights' not in data[idx]:
+                    data[idx]['target_weights'] = torch.where(data[idx]['target_ids'] == self.ignore_index, 0, 1)
                     
                 if len(data[idx]['input_ids']) >= self.sample_size: # block_size = sample_size - 1
                     data[idx]['input_ids'] = data[idx]['input_ids'][:self.sample_size-1]
@@ -144,6 +146,12 @@ class AllamoDataset:
                 elif self.pad_token_id >= 0 and len(data[idx]['target_ids']) < self.sample_size-1:
                     padding = self.sample_size - 1 - len(data[idx]['target_ids'])
                     data[idx]['target_ids'] = torch.cat([data[idx]['target_ids'], torch.full((padding,), self.ignore_index)], dim=0)
+                    
+                if len(data[idx]['target_weights']) >= self.sample_size:
+                    data[idx]['target_weights'] = data[idx]['target_weights'][:self.sample_size-1]
+                elif self.pad_token_id >= 0 and len(data[idx]['target_weights']) < self.sample_size-1:
+                    padding = self.sample_size - 1 - len(data[idx]['target_weights'])
+                    data[idx]['target_weights'] = torch.cat([data[idx]['target_weights'], torch.full((padding,), 0)], dim=0)
                 
                 if 'target_mask' in data[idx]:
                     if len(data[idx]['target_mask']) >= self.sample_size:
@@ -153,6 +161,7 @@ class AllamoDataset:
                         padding = self.sample_size - 1 - len(data[idx]['target_mask'])
                         data[idx]['target_mask'] = torch.cat([data[idx]['target_mask'], torch.full((padding,), padding_value)], dim=0)
                     data[idx]['target_ids'] = data[idx]['target_ids'].masked_fill(data[idx]['target_mask'] == 0, self.ignore_index)
+                    data[idx]['target_weights'] = data[idx]['target_weights'].masked_fill(data[idx]['target_mask'] == 0, 0)
                     del data[idx]['target_mask']
                 assert len(data[idx]['input_ids']) == len(data[idx]['target_ids'])
             else:
@@ -163,8 +172,10 @@ class AllamoDataset:
                         padding = self.sample_size - len(data[idx])
                         data[idx] = torch.cat([data[idx], torch.full((padding,), self.ignore_index)], dim=0)
                     input_ids = data[idx][:-1]
-                    data[idx] = {'input_ids': input_ids, 'target_ids': data[idx][1:]}
-                    data[idx]['input_ids'][input_ids == self.ignore_index] = self.pad_token_id
+                    target_ids = data[idx][1:]
+                    target_weights = torch.where(target_ids == self.ignore_index, 0, 1)
+                    input_ids = input_ids.masked_fill(input_ids == self.ignore_index, self.pad_token_id)
+                    data[idx] = {'input_ids': input_ids, 'target_ids': target_ids, 'target_weights': target_weights}
         
     def limit_samples_to_rank(self, samples):
         return samples[self.rank::self.world_size] if self.world_size > 1 else samples
@@ -255,16 +266,22 @@ class AllamoDataLoader:
         if isinstance(samples[0], dict):
             x = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
             y = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
+            w = torch.stack([sample['target_weights'] for sample in samples]).to(torch.int64)
         else:
             x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
             y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
+            w = None
         
         if 'cuda' in self.config.device and self.pin_memory:
             # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
             x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)
+            if w is not None:
+                w = w.pin_memory().to(self.config.device, non_blocking=True)
         else:
             x, y = x.to(self.config.device), y.to(self.config.device)
-        return x, y
+            if w is not None:
+                w = w.to(self.config.device)
+        return x, y, w
         
     def reload_dataset(self, dataset):
         if len(dataset.dataset_files) > 1:

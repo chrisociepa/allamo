@@ -232,7 +232,7 @@ class AllamoTrainer:
             correct_preds = 0
             total_preds = 0
             for k in range(self.config.eval_iters):
-                X, Y = self.data_loader.get_batch(split, True)
+                X, Y, W = self.data_loader.get_batch(split, True)
                 with self.ctx:
                     logits, loss, _ = self.model(X, Y)
                 losses[k] = loss.item()
@@ -291,7 +291,7 @@ class AllamoTrainer:
         
     def train(self):
         self.logger.info(f"Starting training with configuration: {self.config}")
-        X, Y = self.data_loader.get_batch('train') # fetch the very first batch
+        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -380,9 +380,11 @@ class AllamoTrainer:
                     # looking at the source of that context manager, it just toggles this variable
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y)
+                    logits, loss, _ = self.model(X, Y, W)
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
+                    if W is not None:
+                        loss = loss / W.view(-1).sum()
                 
                 mfu_excluded_time = time.time()
                 # count processed tokens
@@ -391,7 +393,7 @@ class AllamoTrainer:
                     # calculate accuracy. note: this is a CPU-GPU sync point!
                     accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.data_loader.get_batch('train')
+                X, Y, W = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16

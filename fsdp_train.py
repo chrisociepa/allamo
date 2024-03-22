@@ -326,7 +326,7 @@ class AllamoFSDPTrainer:
         for split in self.data_loader.splits:
             fsdp_loss_preds = torch.zeros(3).to(self.config.device)
             for k in range(self.config.eval_iters):
-                X, Y = self.data_loader.get_batch(split, True)
+                X, Y, W = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(X, Y)
                 fsdp_loss_preds[0] += loss.item()
                 fsdp_loss_preds[1] += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
@@ -343,7 +343,7 @@ class AllamoFSDPTrainer:
         
     def train(self):
         self.logger.info(f"Starting FSDP training with configuration: {self.config}")
-        X, Y = self.data_loader.get_batch('train') # fetch the very first batch
+        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -417,9 +417,15 @@ class AllamoFSDPTrainer:
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             for micro_step in range(self.gradient_accumulation_steps):
-                logits, loss, _ = self.model(X, Y)
+                logits, loss, _ = self.model(X, Y, W)
                 if self.gradient_accumulation_steps > 1:
                     loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+                    
+                if W is not None:
+                    fsdp_loss_weight_acc = W.view(-1).sum()
+                    # sum loss weights over all processes
+                    dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
+                    loss = (self.world_size / fsdp_loss_weight_acc) * loss
                 
                 mfu_excluded_time = time.time()
                 fsdp_loss_acc[0] += loss.item()
@@ -428,7 +434,7 @@ class AllamoFSDPTrainer:
                 fsdp_loss_acc[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.data_loader.get_batch('train')
+                X, Y, W = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass
