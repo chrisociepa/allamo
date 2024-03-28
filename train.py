@@ -309,10 +309,8 @@ class AllamoTrainer:
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
-            if self.ddp:
-                total_batch_size *= self.world_size
 
             # evaluate the loss on train/val sets and write checkpoints
             if eval_iter:
@@ -367,6 +365,7 @@ class AllamoTrainer:
                 torch.cuda.empty_cache()
             
             accuracy = 0
+            unmasked_labels = 0
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -389,9 +388,14 @@ class AllamoTrainer:
                 mfu_excluded_time = time.time()
                 # count processed tokens
                 self.processed_tokens += X.numel() * self.world_size if self.ddp else X.numel()
+                
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
                     # calculate accuracy. note: this is a CPU-GPU sync point!
                     accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
+                    
+                if self.config.adaptive_learning_rate:
+                    unmasked_labels += torch.sum(Y.view(-1) >= 0).item()
+                    
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y, W = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
@@ -403,6 +407,16 @@ class AllamoTrainer:
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            
+            # adjust learning rate
+            if self.config.adaptive_learning_rate:
+                if self.ddp:
+                    # we can't count it precisely, so let's estimate
+                    unmasked_labels *= self.world_size
+                lr = lr * math.sqrt(unmasked_labels / total_batch_size)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
+            
             # step the optimizer and scaler if training in fp16
             self.scaler.step(self.optimizer)
             self.scaler.update()

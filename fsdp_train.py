@@ -347,6 +347,9 @@ class AllamoFSDPTrainer:
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
+        fsdp_loss_acc = torch.zeros(4).to(self.config.device)
+        if self.config.adaptive_learning_rate:
+            fsdp_unmasked_labels = torch.zeros(1).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
                 self.save_checkpoint(f'epoch_{current_epoch}', model_only=True, epoch_ckpt=True)
@@ -359,6 +362,7 @@ class AllamoFSDPTrainer:
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
             # evaluate the loss on train/val sets and write checkpoints
@@ -412,7 +416,9 @@ class AllamoFSDPTrainer:
                 torch.cuda.empty_cache()
             
             accuracy = 0
-            fsdp_loss_acc = torch.zeros(4).to(self.config.device)
+            fsdp_loss_acc.zero_()
+            if self.config.adaptive_learning_rate:
+                fsdp_unmasked_labels.zero_()
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -433,6 +439,9 @@ class AllamoFSDPTrainer:
                 fsdp_loss_acc[2] += (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
                 fsdp_loss_acc[3] += 1
                 
+                if self.config.adaptive_learning_rate:
+                    fsdp_unmasked_labels[0] += torch.sum(Y.view(-1) >= 0).item()
+                
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y, W = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
@@ -443,6 +452,13 @@ class AllamoFSDPTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.model.clip_grad_norm_(self.config.grad_clip)
+            
+            # adjust learning rate
+            if self.config.adaptive_learning_rate:
+                dist.all_reduce(fsdp_unmasked_labels, op=dist.ReduceOp.SUM)
+                lr = lr * math.sqrt(fsdp_unmasked_labels[0].item() / total_batch_size)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
                 
             # weight update
             self.optimizer.step()
@@ -472,7 +488,6 @@ class AllamoFSDPTrainer:
                     mfu = -1.0
                     mfu_str = 'n/a'
                 mtu = fwdbwd_time/iter_time # model time utilization
-                total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
                 iter_time_ms = iter_time * 1000
                 self.logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
