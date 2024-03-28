@@ -328,13 +328,14 @@ class AllamoFSDPTrainer:
             for k in range(self.config.eval_iters):
                 X, Y, W = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(X, Y)
+                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
                 fsdp_loss_preds[0] += loss.item()
-                fsdp_loss_preds[1] += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
-                fsdp_loss_preds[2] += Y.size(0)
+                fsdp_loss_preds[1] += (logits.max(2).indices == Y).sum().item() / torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                fsdp_loss_preds[2] += 1
             dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
             steps = self.config.eval_iters * self.world_size
             losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.world_size)
-            accuraces[split] = fsdp_loss_preds[1] / (fsdp_loss_preds[2] * self.world_size)
+            accuraces[split] = fsdp_loss_preds[1] / fsdp_loss_preds[2]
         self.model.train()
         if 'val' not in losses_out:
             losses_out['val'] = losses_out['train']
@@ -348,8 +349,6 @@ class AllamoFSDPTrainer:
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
         fsdp_loss_acc = torch.zeros(4).to(self.config.device)
-        if self.config.adaptive_learning_rate:
-            fsdp_unmasked_labels = torch.zeros(1).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
                 self.save_checkpoint(f'epoch_{current_epoch}', model_only=True, epoch_ckpt=True)
@@ -417,8 +416,6 @@ class AllamoFSDPTrainer:
             
             accuracy = 0
             fsdp_loss_acc.zero_()
-            if self.config.adaptive_learning_rate:
-                fsdp_unmasked_labels.zero_()
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -434,13 +431,11 @@ class AllamoFSDPTrainer:
                     loss = (self.world_size / fsdp_loss_weight_acc) * loss
                 
                 mfu_excluded_time = time.time()
+                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
                 fsdp_loss_acc[0] += loss.item()
-                fsdp_loss_acc[1] += X.numel()
-                fsdp_loss_acc[2] += (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
+                fsdp_loss_acc[1] += unmasked_labels
+                fsdp_loss_acc[2] += (logits.max(2).indices == Y).sum().item() / unmasked_labels
                 fsdp_loss_acc[3] += 1
-                
-                if self.config.adaptive_learning_rate:
-                    fsdp_unmasked_labels[0] += torch.sum(Y.view(-1) >= 0).item()
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y, W = self.data_loader.get_batch('train')
@@ -453,26 +448,26 @@ class AllamoFSDPTrainer:
             if self.config.grad_clip != 0.0:
                 self.model.clip_grad_norm_(self.config.grad_clip)
             
+            mfu_excluded_time = time.time()
+            # sync loss and acc over all processes
+            dist.all_reduce(fsdp_loss_acc, op=dist.ReduceOp.SUM)
+            
             # adjust learning rate
             if self.config.adaptive_learning_rate:
-                dist.all_reduce(fsdp_unmasked_labels, op=dist.ReduceOp.SUM)
-                lr = lr * math.sqrt(fsdp_unmasked_labels[0].item() / total_batch_size)
+                lr = lr * math.sqrt(fsdp_loss_acc[1].item() / total_batch_size)
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = lr
-                
+            
+            if self.master_process:
+                self.processed_tokens += int(fsdp_loss_acc[1])
+            batch_mfu_excluded_time += time.time() - mfu_excluded_time
+            
             # weight update
             self.optimizer.step()
             
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
-            
             fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
-            
-            # sync loss and acc over all processes
-            dist.all_reduce(fsdp_loss_acc, op=dist.ReduceOp.SUM)
-            
-            if self.master_process:
-                self.processed_tokens += int(fsdp_loss_acc[1])
 
             # timing and logging
             if self.iter_num % self.config.log_interval == 0 and self.master_process:
