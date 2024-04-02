@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import math
 import os
+import subprocess
 
 def create_dataloader(config, rank, world_size):
     if config.dataloader_type == 'allamo':
@@ -97,4 +98,31 @@ def estimate_mfu(model_num_params, config, fwdbwd_per_iter, dt):
     # express our flops throughput as ratio of GPU bfloat16 peak flops
     flops_achieved = flops_per_iter * (1.0/dt) # per second
     return flops_achieved / config.mfu_flops_peak
+    
+def get_model_checkpoint_path(ckpt_file_name, ckpt_dir):
+    return os.path.join(ckpt_dir, f'model_{ckpt_file_name}.pt')
+    
+def get_config_checkpoint_path(ckpt_file_name, ckpt_dir):
+    return os.path.join(ckpt_dir, f'config_{ckpt_file_name}.json')
+    
+def get_optimizer_checkpoint_path(ckpt_file_name, ckpt_dir):
+    return os.path.join(ckpt_dir, f'optimizer_{ckpt_file_name}.pt')
+    
+def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
+    return os.path.exists(get_config_checkpoint_path(ckpt_file_name, ckpt_dir)) \
+            and os.path.exists(get_model_checkpoint_path(ckpt_file_name, ckpt_dir))
+
+def run_epoch_completion_hook_program(run_uuid, epoch, iter_num, ckpt_file_name, config):
+    env_variables = {
+        "ALLAMO_EPOCH_HOOK_UUID": run_uuid,
+        "ALLAMO_EPOCH_HOOK_EPOCH": str(epoch),
+        "ALLAMO_EPOCH_HOOK_ITERATION": str(iter_num),
+        "ALLAMO_EPOCH_HOOK_MODEL_CKPT_PATH": str(os.path.abspath(get_model_checkpoint_path(ckpt_file_name, config.out_dir))),
+        "ALLAMO_EPOCH_HOOK_CONFIG_CKPT_PATH": str(os.path.abspath(get_config_checkpoint_path(ckpt_file_name, config.out_dir)))
+    }
+    try:
+        process = subprocess.Popen(config.epoch_completion_hook_program, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_variables)
+        return process.pid
+    except Exception as err:
+        return f"n/a - Error: {err}"
 

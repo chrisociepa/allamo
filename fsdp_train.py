@@ -12,6 +12,7 @@ import random
 import logging
 import datetime
 import dataclasses
+import uuid
 from contextlib import nullcontext
 
 import numpy as np
@@ -50,14 +51,21 @@ from train_utils import (
     calculate_eta,
     has_next_iter_to_perform,
     estimate_mfu,
+    get_model_checkpoint_path,
+    get_config_checkpoint_path,
+    get_optimizer_checkpoint_path,
+    model_checkpoint_files_exist,
+    run_epoch_completion_hook_program,
 )
 
 class AllamoFSDPTrainer:
 
     def __init__(self, config: AllamoConfiguration):
+        self.run_uuid = str(uuid.uuid4())
         self.config = config
         self.__init_torch(config)
         self.__init_logger(config)
+        self.logger.info(f"Torch initialized for run {self.run_uuid}")
         
         self.iter_num = 0
         self.best_train_loss = 1e2
@@ -141,12 +149,12 @@ class AllamoFSDPTrainer:
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt'
         else:
-            if self.model_checkpoint_files_exist(ckpt_dir, 'ckpt'):
+            if model_checkpoint_files_exist('ckpt', ckpt_dir):
                 self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
         
         if checkpoint_name is not None:
-            if self.model_checkpoint_files_exist(ckpt_dir, checkpoint_name):
+            if model_checkpoint_files_exist(checkpoint_name, ckpt_dir):
                 self.logger.info(f"Resuming training from {ckpt_dir} and start loading '{checkpoint_name}' checkpoint files")
                 self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), config, model_config_fields)
             elif config.init_from == 'resume_last':
@@ -212,10 +220,6 @@ class AllamoFSDPTrainer:
         else:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
     
-    def model_checkpoint_files_exist(self, ckpt_dir, ckpt_file_name):
-        return os.path.exists(os.path.join(ckpt_dir, f'config_{ckpt_file_name}.json')) \
-                and os.path.exists(os.path.join(ckpt_dir, f'model_{ckpt_file_name}.pt'))
-    
     def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
         with open(ckpt_path, "r", encoding="utf-8") as f:
             config_checkpoint = json.load(f)
@@ -272,7 +276,7 @@ class AllamoFSDPTrainer:
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
             full_msd = self.model.state_dict()
         if self.master_process:
-            ckpt_file_path = os.path.join(self.config.out_dir, f'model_{ckpt_file_name}.pt')
+            ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
             self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
                 rename_file_to_prev_version(ckpt_file_path)
@@ -283,6 +287,7 @@ class AllamoFSDPTrainer:
             
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
+                'run_uuid': self.run_uuid,
                 'iter_num': self.iter_num,
                 'best_train_loss': self.best_train_loss,
                 'best_val_loss': self.best_val_loss,
@@ -298,7 +303,7 @@ class AllamoFSDPTrainer:
                 checkpoint['allamo_dataloader']['dataset_offset'] = self.data_loader.dataset_offset * self.world_size
                 checkpoint['allamo_dataloader']['epoch'] = self.data_loader.epoch
                 
-            ckpt_file_path = os.path.join(self.config.out_dir, f'config_{ckpt_file_name}.json')
+            ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
                 rename_file_to_prev_version(ckpt_file_path)
@@ -309,7 +314,7 @@ class AllamoFSDPTrainer:
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.master_process:
-                ckpt_file_path = os.path.join(self.config.out_dir, f'optimizer_{ckpt_file_name}.pt')
+                ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
                 self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
                 if not self.config.ignore_last_checkpoint_backup:
                     rename_file_to_prev_version(ckpt_file_path)
@@ -343,7 +348,7 @@ class AllamoFSDPTrainer:
         return losses_out, accuraces
         
     def train(self):
-        self.logger.info(f"Starting FSDP training with configuration: {self.config}")
+        self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
         X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
@@ -351,7 +356,11 @@ class AllamoFSDPTrainer:
         fsdp_loss_acc = torch.zeros(4).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
-                self.save_checkpoint(f'epoch_{current_epoch}', model_only=True, epoch_ckpt=True)
+                ckpt_file_name = f'epoch_{current_epoch}'
+                self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
+                if self.config.epoch_completion_hook_program:
+                    pid = run_epoch_completion_hook_program(self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                    self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
             
             timer = time.time()
@@ -514,7 +523,12 @@ class AllamoFSDPTrainer:
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         self.logger.info(f"Training finished in {training_time}")
-        self.save_checkpoint('final_ckpt', model_only=True, epoch_ckpt=True)
+        
+        ckpt_file_name = 'final_ckpt'
+        self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
+        if self.config.epoch_completion_hook_program:
+            pid = run_epoch_completion_hook_program(self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+            self.logger.info(f"Epoch completion hook program started with pid {pid}")
 
 if __name__ == '__main__':
     config = AllamoConfiguration()

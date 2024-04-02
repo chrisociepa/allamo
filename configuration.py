@@ -90,6 +90,7 @@ class AllamoConfiguration:
     weighted_loss: bool = False
     adaptive_learning_rate: bool = False
     fsdp_sharding_strategy: str = 'FULL_SHARD'
+    epoch_completion_hook_program: str = None
     
     # inference params
     prompt: str = "\n" 
@@ -182,6 +183,7 @@ class AllamoConfiguration:
         parser.add_argument('--weighted_loss', type=bool, help='Whether to use weighted loss if available')
         parser.add_argument('--adaptive_learning_rate', type=bool, help='Whether to use adaptive learning rate')
         parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
+        parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')
