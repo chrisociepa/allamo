@@ -344,7 +344,8 @@ class AllamoTransformer(nn.Module):
 
     def forward(self, 
         input_ids: torch.Tensor, 
-        labels: Optional[torch.Tensor] = None, 
+        labels: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,
         ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
@@ -358,7 +359,10 @@ class AllamoTransformer(nn.Module):
         if labels is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(final_embeddings)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=ignore_index)
+            if weights is None:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=ignore_index)
+            else:
+                loss = (weights.view(-1) * F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), reduction="none")).sum()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim

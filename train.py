@@ -232,12 +232,12 @@ class AllamoTrainer:
             correct_preds = 0
             total_preds = 0
             for k in range(self.config.eval_iters):
-                X, Y = self.data_loader.get_batch(split, True)
+                X, Y, W = self.data_loader.get_batch(split, True)
                 with self.ctx:
                     logits, loss, _ = self.model(X, Y)
                 losses[k] = loss.item()
-                total_preds += Y.size(0)
-                correct_preds += (logits[:,-1,:].max(1).indices == Y[:,-1]).sum().item()
+                total_preds += torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                correct_preds += (logits.max(2).indices == Y).sum().item()
             losses_out[split] = losses.mean()
             accuraces[split] = correct_preds / total_preds
         self.model.train()
@@ -291,7 +291,7 @@ class AllamoTrainer:
         
     def train(self):
         self.logger.info(f"Starting training with configuration: {self.config}")
-        X, Y = self.data_loader.get_batch('train') # fetch the very first batch
+        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -309,10 +309,8 @@ class AllamoTrainer:
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps
-            if self.ddp:
-                total_batch_size *= self.world_size
 
             # evaluate the loss on train/val sets and write checkpoints
             if eval_iter:
@@ -367,6 +365,7 @@ class AllamoTrainer:
                 torch.cuda.empty_cache()
             
             accuracy = 0
+            unmasked_labels = 0
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -380,18 +379,21 @@ class AllamoTrainer:
                     # looking at the source of that context manager, it just toggles this variable
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y)
+                    logits, loss, _ = self.model(X, Y, W)
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
+                    if W is not None:
+                        loss = loss / W.view(-1).sum()
                 
                 mfu_excluded_time = time.time()
-                # count processed tokens
-                self.processed_tokens += X.numel() * self.world_size if self.ddp else X.numel()
+                unmasked_labels += torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
                     # calculate accuracy. note: this is a CPU-GPU sync point!
-                    accuracy = (logits.max(2).indices == Y).sum().item() / Y.view(-1).size(0)
+                    accuracy = (logits.max(2).indices == Y).sum().item() / unmasked_labels
+                    
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.data_loader.get_batch('train')
+                X, Y, W = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16
@@ -401,12 +403,26 @@ class AllamoTrainer:
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            
+            mfu_excluded_time = time.time()
+            # we can't count it precisely in DDP, so let's estimate
+            unmasked_labels *= self.world_size
+            # adjust learning rate
+            if self.config.adaptive_learning_rate:
+                lr = lr * math.sqrt(unmasked_labels / total_batch_size)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
+                    
+            # count processed tokens
+            self.processed_tokens += unmasked_labels
+            batch_mfu_excluded_time += time.time() - mfu_excluded_time
+            
             # step the optimizer and scaler if training in fp16
             self.scaler.step(self.optimizer)
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
-
+            
             # timing and logging
             if log_iter:
                 fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
