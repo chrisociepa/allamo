@@ -21,11 +21,13 @@ class AllamoConfiguration:
     log_checkpoint_md5_on_load: bool = False
     log_checkpoint_md5_on_epoch: bool = False
     ignore_last_checkpoint_backup: bool = False
-    log_interval: int = 1
+    checkpoint_interval: int = 1000
+    save_optimizer_checkpoint: bool = True
+    save_best_checkpoint: bool = True
     eval_interval: int = 1000
     eval_iters: int = 200
     eval_only: bool = False
-    always_save_checkpoint: bool = True
+    log_interval: int = 1
     vocab_size: int = 31980
     tiktoken_tokenizer_name: str = None
     hf_tokenizer_path: str = None
@@ -116,11 +118,13 @@ class AllamoConfiguration:
         parser.add_argument('--log_checkpoint_md5_on_load', type=bool, help='When loading a checkpoint, log its MD5 checksum')
         parser.add_argument('--log_checkpoint_md5_on_epoch', type=bool, help='When saving a checkpoint at the end of an epoch, log its MD5 checksum')
         parser.add_argument('--ignore_last_checkpoint_backup', type=bool, help='Ignores preserving a copy of the last checkpoint version by overwriting it')
-        parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
+        parser.add_argument('--checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the model is saved')
+        parser.add_argument('--save_optimizer_checkpoint', type=bool, help='Enable saving optimizer checkpoint')
+        parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
         parser.add_argument('--eval_only', type=bool, help='Exit right after the first evaluation. Indicates no training.')
-        parser.add_argument('--always_save_checkpoint', type=bool, help='Enable saving the last checkpoint')
+        parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
         parser.add_argument('--vocab_size', type=int, help='Vacabulary size. Might be overwritten by checkpoint')
         parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by checkpoint')
         parser.add_argument('--hf_tokenizer_path', type=str, help='HuggingFace tokenizer path. Might be overwritten by checkpoint')

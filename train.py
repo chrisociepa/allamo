@@ -285,7 +285,7 @@ class AllamoTrainer:
         with open(ckpt_file_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        if model_only == False:
+        if self.config.save_optimizer_checkpoint and model_only == False:
             ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
             self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
@@ -310,8 +310,8 @@ class AllamoTrainer:
                 current_epoch = self.data_loader.epoch
             
             timer = time.time()
-            log_iter = (self.iter_num % self.config.log_interval == 0 and self.master_process)
-            eval_iter = (self.iter_num % self.config.eval_interval == 0 and self.master_process)
+            log_iter = (self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process)
+            eval_iter = (self.config.eval_interval > 0 and self.iter_num % self.config.eval_interval == 0 and self.master_process)
             lr = get_lr(self.iter_num, self.config)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
@@ -321,7 +321,7 @@ class AllamoTrainer:
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
-            # evaluate the loss on train/val sets and write checkpoints
+            # evaluate the loss on train/val sets and write best checkpoint
             if eval_iter:
                 eval_time = time.time()
                 losses, accuraces = self.estimate_loss()
@@ -341,9 +341,8 @@ class AllamoTrainer:
                         self.best_train_loss = train_loss
                     if val_loss < self.best_val_loss:
                         self.best_val_loss = val_loss
-                        self.save_checkpoint('ckpt')
-                    if self.config.always_save_checkpoint:
-                        self.save_checkpoint('last_eval_ckpt')
+                        if self.config.save_best_checkpoint:
+                            self.save_checkpoint('ckpt')
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
@@ -366,6 +365,9 @@ class AllamoTrainer:
             
             if self.config.eval_only:
                 break
+                
+            if self.config.checkpoint_interval > 0 and self.iter_num % self.config.checkpoint_interval == 0:
+                self.save_checkpoint('last_eval_ckpt')
             
             # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
             if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:

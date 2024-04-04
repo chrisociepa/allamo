@@ -310,7 +310,7 @@ class AllamoFSDPTrainer:
             with open(ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        if model_only == False:
+        if self.config.save_optimizer_checkpoint and model_only == False:
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.master_process:
@@ -373,8 +373,8 @@ class AllamoFSDPTrainer:
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
-            # evaluate the loss on train/val sets and write checkpoints
-            if self.iter_num % self.config.eval_interval == 0:
+            # evaluate the loss on train/val sets and write best checkpoint
+            if self.config.eval_interval > 0 and self.iter_num % self.config.eval_interval == 0:
                 eval_time = time.time()
                 losses, accuraces = self.estimate_loss()
                 eval_time = time.time() - eval_time
@@ -385,9 +385,9 @@ class AllamoFSDPTrainer:
                         self.best_train_loss = train_loss
                     if val_loss < self.best_val_loss:
                         self.best_val_loss = val_loss
-                        self.save_checkpoint('ckpt')
-                    if self.config.always_save_checkpoint:
-                        self.save_checkpoint('last_eval_ckpt')
+                        if self.config.save_best_checkpoint:
+                            self.save_checkpoint('ckpt')
+                        
                 if self.master_process:                
                     train_ppl = torch.exp(losses['train']).item()
                     val_ppl = torch.exp(losses['val']).item()
@@ -416,6 +416,9 @@ class AllamoFSDPTrainer:
                         })
                 gc.collect()
                 torch.cuda.empty_cache()
+                
+            if self.config.checkpoint_interval > 0 and self.iter_num % self.config.checkpoint_interval == 0:
+                self.save_checkpoint('last_eval_ckpt')
             
             # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
             if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:
@@ -479,7 +482,7 @@ class AllamoFSDPTrainer:
             fwdbwd_time = time.time() - fwdbwd_time - batch_mfu_excluded_time
 
             # timing and logging
-            if self.iter_num % self.config.log_interval == 0 and self.master_process:
+            if self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process:
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
                 lossf = fsdp_loss_acc[0].item() / self.world_size
