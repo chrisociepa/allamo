@@ -14,6 +14,10 @@ from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralFo
 
 sys.path.append(os.path.abspath('..'))
 from model import AllamoTransformerConfig
+from train_utils import (
+    get_model_checkpoint_path,
+    get_config_checkpoint_path,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,25 +35,21 @@ def write_json(text, path):
     with open(path, "w") as f:
         json.dump(text, f)
 
-def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=None):
+def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_model_type, hf_model_dtype=None, hf_model_max_position_embeddings=None):
     assert hf_model_type == "llama" or hf_model_type == "mistral", "Only llama and mistral architectures are supported"
     os.makedirs(hf_model_path, exist_ok=True)
     tmp_model_path = os.path.join(hf_model_path, "tmp")
     os.makedirs(tmp_model_path, exist_ok=True)
     
-    logger.info(f"loading checkpoint from {checkpoint_path}...")
-    with open(os.path.join(checkpoint_path, f'config_ckpt.json'), "r", encoding="utf-8") as f:
+    logger.info(f"loading checkpoint from {checkpoint_dir_path}...")
+    with open(get_config_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), "r", encoding="utf-8") as f:
         config_checkpoint = json.load(f)
-    model_checkpoint = torch.load(os.path.join(checkpoint_path, 'model_ckpt.pt'), map_location='cpu')
+    model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), map_location='cpu')
 
     allamo_transformer_config = AllamoTransformerConfig(**config_checkpoint['model_args'])
     n_layers = allamo_transformer_config.n_layer
-    n_heads = allamo_transformer_config.n_head
-    num_kv_heads = allamo_transformer_config.num_kv_heads
-    dim = allamo_transformer_config.n_embd
-    dims_per_head = allamo_transformer_config.head_size
     intermediate_size = allamo_transformer_config.intermediate_size if hasattr(allamo_transformer_config, 'intermediate_size') else compute_intermediate_size(allamo_transformer_config)
-    max_position_embeddings = allamo_transformer_config.block_size
+    max_position_embeddings = allamo_transformer_config.block_size if hf_model_max_position_embeddings is None else hf_model_max_position_embeddings
 
     logger.info(f"converting all parameters from the checkpoint model")
     unwanted_prefix = '_orig_mod.'
@@ -107,23 +107,26 @@ def write_model(checkpoint_path, hf_model_path, hf_model_type, hf_model_dtype=No
         config = LlamaConfig(
             vocab_size=allamo_transformer_config.vocab_size,
             max_position_embeddings=max_position_embeddings,
-            hidden_size=dim,
+            hidden_size=allamo_transformer_config.n_embd,
             intermediate_size=intermediate_size,
-            num_attention_heads=n_heads,
-            num_key_value_heads=num_kv_heads,
+            num_attention_heads=allamo_transformer_config.n_head,
+            num_key_value_heads=allamo_transformer_config.num_kv_heads,
             num_hidden_layers=n_layers,
             rms_norm_eps=allamo_transformer_config.norm_eps,
+            rope_theta=allamo_transformer_config.rope_freq_base,
         )
     elif hf_model_type == "mistral":
         config = MistralConfig(
             vocab_size=allamo_transformer_config.vocab_size,
             max_position_embeddings=max_position_embeddings,
-            hidden_size=dim,
+            hidden_size=allamo_transformer_config.n_embd,
             intermediate_size=intermediate_size,
-            num_attention_heads=n_heads,
-            num_key_value_heads=num_kv_heads,
+            num_attention_heads=allamo_transformer_config.n_head,
+            num_key_value_heads=allamo_transformer_config.num_kv_heads,
             num_hidden_layers=n_layers,
             rms_norm_eps=allamo_transformer_config.norm_eps,
+            rope_theta=allamo_transformer_config.rope_freq_base,
+            sliding_window=allamo_transformer_config.sliding_window,
         )
     config.save_pretrained(tmp_model_path)
     logger.info(f"configuration for the HF LLaMA model saved")
@@ -155,6 +158,11 @@ def main():
         help="Location of ALLaMo weights, which contains a checkpoint file",
     )
     parser.add_argument(
+        "--checkpoint_name_base",
+        default='last_eval_ckpt',
+        help="Checkpoint file name base",
+    )
+    parser.add_argument(
         "--output_dir",
         help="Location to write HF model",
     )
@@ -169,12 +177,18 @@ def main():
         choices=['float32', 'bfloat16', 'float16'],
         help="Override model dtype and save the model under a specific dtype",
     )
+    parser.add_argument(
+        "--max_position_embeddings",
+        help="Overwrite max_position_embeddings with this value",
+    )
     args = parser.parse_args()
     write_model(
-        checkpoint_path=args.input_dir,
+        checkpoint_dir_path=args.input_dir,
+        checkpoint_name_base=args.checkpoint_name_base,
         hf_model_path=args.output_dir,
         hf_model_type=args.model_type,
         hf_model_dtype=args.output_dtype,
+        hf_model_max_position_embeddings=args.max_position_embeddings,
     )
 
 
