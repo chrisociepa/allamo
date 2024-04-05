@@ -90,7 +90,8 @@ def import_model(hf_model_path, output_model_path):
     }
     ckpt_file_path = os.path.join(output_model_path, 'config_' + ckpt_file_name)
     print(f"saving config checkpoint to {ckpt_file_path}")
-    torch.save(config_checkpoint, ckpt_file_path)
+    with open(ckpt_file_path, "w", encoding="utf-8") as f:
+        json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
     ckpt_file_path = os.path.join(output_model_path, 'model_' + ckpt_file_name)
     print(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(model_sd, ckpt_file_path)
