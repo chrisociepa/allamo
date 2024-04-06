@@ -159,7 +159,7 @@ def main():
     )
     parser.add_argument(
         "--checkpoint_name_base",
-        default='last_eval_ckpt',
+        default='ckpt',
         help="Checkpoint file name base",
     )
     parser.add_argument(
