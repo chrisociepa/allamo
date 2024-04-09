@@ -304,7 +304,7 @@ class AllamoTrainer:
             if current_epoch < self.data_loader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
-                if self.config.epoch_completion_hook_program:
+                if self.config.epoch_completion_hook_program and self.master_process:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
@@ -369,7 +369,7 @@ class AllamoTrainer:
             if self.config.checkpoint_interval > 0 and self.iter_num > self.start_iter and self.iter_num % self.config.checkpoint_interval == 0:
                 ckpt_file_name = 'last_eval_ckpt'
                 self.save_checkpoint(ckpt_file_name)
-                if self.config.regular_checkpoint_hook_program:
+                if self.config.regular_checkpoint_hook_program and self.master_process:
                     pid = run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Regular checkpoint hook program started with pid {pid}")
             
@@ -482,7 +482,7 @@ class AllamoTrainer:
         if self.master_process and not self.config.eval_only:
             ckpt_file_name = 'final_ckpt'
             self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
-            if self.config.epoch_completion_hook_program:
+            if self.config.epoch_completion_hook_program and self.master_process:
                 pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                 self.logger.info(f"Epoch completion hook program started with pid {pid}")
 
