@@ -99,7 +99,7 @@ def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
     return os.path.exists(get_config_checkpoint_path(ckpt_file_name, ckpt_dir)) \
             and os.path.exists(get_model_checkpoint_path(ckpt_file_name, ckpt_dir))
 
-def run_epoch_completion_hook_program(run_uuid, epoch, iter_num, ckpt_file_name, config):
+def run_checkpoint_hook_program(hook_program, run_uuid, epoch, iter_num, ckpt_file_name, config):
     env_variables = {
         "ALLAMO_EPOCH_HOOK_UUID": run_uuid,
         "ALLAMO_EPOCH_HOOK_EPOCH": str(epoch),
@@ -108,7 +108,7 @@ def run_epoch_completion_hook_program(run_uuid, epoch, iter_num, ckpt_file_name,
         "ALLAMO_EPOCH_HOOK_CONFIG_CKPT_PATH": str(os.path.abspath(get_config_checkpoint_path(ckpt_file_name, config.out_dir)))
     }
     try:
-        process = subprocess.Popen(config.epoch_completion_hook_program, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_variables)
+        process = subprocess.Popen(hook_program, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_variables)
         return process.pid
     except Exception as err:
         return f"n/a - Error: {err}"
