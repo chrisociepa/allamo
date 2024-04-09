@@ -62,6 +62,7 @@ class AllamoFSDPTrainer:
 
     def __init__(self, config: AllamoConfiguration):
         self.run_uuid = str(uuid.uuid4())
+        self.training_uuid = self.run_uuid
         self.config = config
         self.__init_torch(config)
         self.__init_logger(config)
@@ -223,6 +224,8 @@ class AllamoFSDPTrainer:
     def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
         with open(ckpt_path, "r", encoding="utf-8") as f:
             config_checkpoint = json.load(f)
+        if 'training_uuid' in config_checkpoint:
+            self.training_uuid = config_checkpoint['training_uuid']
         # force these config attributes to be equal otherwise we can't even resume training
         # the rest of the attributes (e.g. dropout) can stay as desired from command line
         for k in model_config_fields:
@@ -288,6 +291,7 @@ class AllamoFSDPTrainer:
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
                 'run_uuid': self.run_uuid,
+                'training_uuid': self.training_uuid,
                 'iter_num': self.iter_num,
                 'best_train_loss': self.best_train_loss,
                 'best_val_loss': self.best_val_loss,
@@ -359,7 +363,7 @@ class AllamoFSDPTrainer:
                 ckpt_file_name = f'epoch_{current_epoch}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
                 if self.config.epoch_completion_hook_program and self.master_process:
-                    pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                    pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
             
@@ -421,7 +425,7 @@ class AllamoFSDPTrainer:
                 ckpt_file_name = 'last_eval_ckpt'
                 self.save_checkpoint(ckpt_file_name)
                 if self.config.regular_checkpoint_hook_program and self.master_process:
-                    pid = run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                    pid = run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Regular checkpoint hook program started with pid {pid}")
             
             accuracy = 0
@@ -528,7 +532,7 @@ class AllamoFSDPTrainer:
         ckpt_file_name = 'final_ckpt'
         self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
         if self.config.epoch_completion_hook_program and self.master_process:
-            pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+            pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
             self.logger.info(f"Epoch completion hook program started with pid {pid}")
 
 if __name__ == '__main__':

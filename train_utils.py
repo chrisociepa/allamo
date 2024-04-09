@@ -99,9 +99,10 @@ def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
     return os.path.exists(get_config_checkpoint_path(ckpt_file_name, ckpt_dir)) \
             and os.path.exists(get_model_checkpoint_path(ckpt_file_name, ckpt_dir))
 
-def run_checkpoint_hook_program(hook_program, run_uuid, epoch, iter_num, ckpt_file_name, config):
+def run_checkpoint_hook_program(hook_program, run_uuid, training_uuid, epoch, iter_num, ckpt_file_name, config):
     env_variables = {
-        "ALLAMO_EPOCH_HOOK_UUID": run_uuid,
+        "ALLAMO_EPOCH_HOOK_RUN_UUID": run_uuid,
+        "ALLAMO_EPOCH_HOOK_TRAINING_UUID": training_uuid,
         "ALLAMO_EPOCH_HOOK_EPOCH": str(epoch),
         "ALLAMO_EPOCH_HOOK_ITERATION": str(iter_num),
         "ALLAMO_EPOCH_HOOK_MODEL_CKPT_PATH": str(os.path.abspath(get_model_checkpoint_path(ckpt_file_name, config.out_dir))),
