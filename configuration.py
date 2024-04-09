@@ -39,7 +39,6 @@ class AllamoConfiguration:
     batch_size: int = 64
     block_size: int = 1024
     sliding_window: int = None
-    dataloader_type: str = 'allamo'
     dataset: str = None
     dataset_train_files: str = None
     dataset_validation_files: str = None
@@ -48,7 +47,6 @@ class AllamoConfiguration:
     dataset_train_processed_files_count: int = 0
     dataset_seq_train: bool = False
     dataset_seq_train_start: int = None
-    dataset_seq_step_size: int = None 
     batch_size_initial: int = 2
     batch_size_max_iter: int = 2000
     batch_size_schedule: bool = False
@@ -136,7 +134,6 @@ class AllamoConfiguration:
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')
-        parser.add_argument('--dataloader_type', type=str, choices=['allamo', 'simple', 'simple-instructions'], help='The type of Data Loader')
         parser.add_argument('--dataset', type=str, help='The name of the dataset directory within the data_dir')
         parser.add_argument('--dataset_train_files', type=str, help='Comma-separated list of training dataset files to use')
         parser.add_argument('--dataset_validation_files', type=str, help='Comma-separated list of validation dataset files to use')
@@ -145,7 +142,6 @@ class AllamoConfiguration:
         parser.add_argument('--dataset_train_processed_files_count', type=int, help='The number of files already processed in the training dataset')
         parser.add_argument('--dataset_seq_train', type=bool, help='Iterate dataset sequentially')
         parser.add_argument('--dataset_seq_train_start', type=int, help='Position in tokens to start with')
-        parser.add_argument('--dataset_seq_step_size', type=int, help='Step size when iterate dataset sequentially. E.g. block_size/2')
         parser.add_argument('--batch_size_initial', type=int, help='Initial batch_size value')
         parser.add_argument('--batch_size_max_iter', help='Number of iterations to reach maximum batch_size value')
         parser.add_argument('--batch_size_schedule', type=bool, help='Enable linear batch_size scheduler')

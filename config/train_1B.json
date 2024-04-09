@@ -15,7 +15,6 @@
     "block_size": 2048,
     "gradient_accumulation_steps": 264,
     "dataset_seq_train": true,
-    "dataset_seq_step_size": 1024,
     "grad_accum_schedule": false,
     "n_layer": 20,
     "n_head": 16,

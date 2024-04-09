@@ -209,8 +209,6 @@ class AllamoDataLoader:
         
         if self.config.dataset_seq_train:
             self.dataset_offset = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
-            if config.dataset_seq_step_size is not None:
-                self.logger.warning(f"Sequential step is not supported in this data loader")
         else:
             self.dataset_offset = 0
         self.logger.info(f"Training dataset offset set to {self.dataset_offset:,}")
@@ -291,10 +289,6 @@ class AllamoDataLoader:
         self.dataset_offset = 0
         self.epoch += 1
         self.logger.info(f"Epoch {self.epoch} finished")
-        
-    def reload_datasets(self):
-        # only for backward compatibility with SimpleDataLoader
-        self.load_datasets()
         
     def update_batch_size(self, iter_num):
         if self.config.batch_size_schedule and self.batch_size < self.config.batch_size_max:

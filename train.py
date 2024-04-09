@@ -22,8 +22,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import AllamoTransformerConfig, AllamoTransformer
 from configuration import AllamoConfiguration
+from data_loader import AllamoDataLoader
 from train_utils import (
-    create_dataloader,
     rename_file_to_prev_version,
     calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
@@ -54,7 +54,7 @@ class AllamoTrainer:
         self.best_train_loss = 1e2
         self.best_val_loss = 1e2
         self.processed_tokens = 0
-        self.data_loader = create_dataloader(config, self.rank, self.world_size)
+        self.data_loader = AllamoDataLoader(config, self.rank, self.world_size)
         self.__init_training(config)
         
     def __init_logger(self, config: AllamoConfiguration):
@@ -193,7 +193,7 @@ class AllamoTrainer:
         if 'processed_tokens' in config_checkpoint:
             self.processed_tokens = config_checkpoint['processed_tokens']
         
-        if config.dataloader_type == 'allamo' and 'allamo_dataloader' in config_checkpoint:
+        if 'allamo_dataloader' in config_checkpoint:
             if  'train_processed_files' in config_checkpoint['allamo_dataloader']:
                 self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader']['train_processed_files']
                 if len(self.data_loader.train_dataset.processed_files) > 0:
@@ -268,15 +268,15 @@ class AllamoTrainer:
             'best_val_loss': self.best_val_loss,
             'processed_tokens': self.processed_tokens,
             'config': dataclasses.asdict(self.config),
+            'allamo_dataloader': {
+                'train_processed_files': self.data_loader.train_dataset.processed_files,
+                'dataset_offset': self.data_loader.dataset_offset * self.world_size,
+                'epoch': self.data_loader.epoch
+            }
         }
         if md5sum is not None:
             checkpoint['checkpoint_md5sum'] = md5sum
             self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
-        if config.dataloader_type == 'allamo':
-            checkpoint['allamo_dataloader'] = {}
-            checkpoint['allamo_dataloader']['train_processed_files'] = self.data_loader.train_dataset.processed_files
-            checkpoint['allamo_dataloader']['dataset_offset'] = self.data_loader.dataset_offset * self.world_size
-            checkpoint['allamo_dataloader']['epoch'] = self.data_loader.epoch
         
         ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
         self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
@@ -368,12 +368,6 @@ class AllamoTrainer:
                 
             if self.config.checkpoint_interval > 0 and self.iter_num % self.config.checkpoint_interval == 0:
                 self.save_checkpoint('last_eval_ckpt')
-            
-            # numpy.memmap does not release RAM after reading data. To keep memory consumption low, let's reconstruct the memmap objects
-            if self.config.reload_datasets_interval > 0 and self.iter_num % self.config.reload_datasets_interval == 0:
-                self.data_loader.reload_datasets()
-                gc.collect()
-                torch.cuda.empty_cache()
             
             accuracy = 0
             unmasked_labels = 0
