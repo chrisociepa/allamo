@@ -1,3 +1,4 @@
+import gc
 import glob
 import logging
 import os
@@ -37,7 +38,6 @@ class AllamoDataset:
                 if self.is_file_type_supported(dataset_file) and os.path.basename(dataset_file).startswith(prefix):
                     dataset_files.append(dataset_file)
             self.logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
-        self.import_numpy_if_required(dataset_files)
         if dataset_files:
             return sorted(dataset_files)
         elif train_split:
@@ -48,13 +48,9 @@ class AllamoDataset:
     def is_file_type_supported(self, dataset_file):
         return dataset_file.endswith('.bin') or dataset_file.endswith('.pt')
     
-    def import_numpy_if_required(self, dataset_files):
-        for df in dataset_files:
-            if df.endswith('.bin'):
-                import numpy as np
-                return
-    
     def load_next_dataset(self):
+        self.data = None
+        gc.collect()
         for ds_file in self.dataset_files:
             if ds_file not in self.processed_files:
                 if self.load_dataset_file(ds_file):
@@ -65,6 +61,7 @@ class AllamoDataset:
         self.processed_files.append(load_dataset_file)
         new_data = None
         if load_dataset_file.endswith('.bin'):
+            import numpy as np
             step_size = self.world_size * self.sample_size
             new_data = torch.from_numpy(np.fromfile(load_dataset_file, dtype=np.uint16).astype(np.int16))
             if step_size > len(new_data):
@@ -291,9 +288,9 @@ class AllamoDataLoader:
             else:
                 dataset.processed_files.clear()
                 assert dataset.load_next_dataset(), 'Something very bad has happend and we are unable to reload dataset'
+        self.dataset_offset = 0
         self.epoch += 1
         self.logger.info(f"Epoch {self.epoch} finished")
-        self.dataset_offset = 0
         
     def reload_datasets(self):
         # only for backward compatibility with SimpleDataLoader
