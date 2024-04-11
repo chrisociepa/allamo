@@ -84,21 +84,21 @@ def import_model(hf_model_path, output_model_path):
             logger.info(f"{k} param in the ALLaMo model is not the same as {state_dicts_map[k]} param in the source model!")
     logger.info(f"params verified")
     
-    ckpt_file_name = 'import_ckpt.pt'
+    ckpt_file_name = 'import_ckpt'
     config_checkpoint = {
         'model_args': config
     }
-    ckpt_file_path = os.path.join(output_model_path, 'config_' + ckpt_file_name)
+    ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
     print(f"saving config checkpoint to {ckpt_file_path}")
     with open(ckpt_file_path, "w", encoding="utf-8") as f:
         json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
-    ckpt_file_path = os.path.join(output_model_path, 'model_' + ckpt_file_name)
+    ckpt_file_path = os.path.join(output_model_path, f'model_{ckpt_file_name}.pt')
     print(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(model_sd, ckpt_file_path)
     print(f"checkpoint files saved in {output_model_path}")
     
 def main():
-    parser = argparse.ArgumentParser(description='Import Huggingface LlamaForCausalLM weights to ALLaMo model')
+    parser = argparse.ArgumentParser(description='Import Huggingface MistralForCausalLM weights to ALLaMo model')
     parser.add_argument(
         "--huggingface_model",
         help="Huggingface model path",
