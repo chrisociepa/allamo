@@ -94,11 +94,11 @@ def depth_up_scale_model(input_dir_path, checkpoint_name_base, output_dir_path, 
     logger.info(f"New model layers: {config_checkpoint['model_args']['n_layer']}. Model parameters: {param_count:.2f}M. Est. Size: {param_bytes:.3f}MB")
             
     ckpt_file_name = 'up-scaled_ckpt'
-    ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
+    ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, output_dir_path)
     logger.info(f"saving config checkpoint to {ckpt_file_path}")
     with open(ckpt_file_path, "w", encoding="utf-8") as f:
         json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
-    ckpt_file_path = os.path.join(output_dir_path, f'model_{ckpt_file_name}.pt')
+    ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, output_dir_path)
     logger.info(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(state_dict, ckpt_file_path)
     logger.info(f"checkpoint files saved in {output_dir_path}")
