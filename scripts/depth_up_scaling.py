@@ -42,13 +42,13 @@ def prepare_layer_keys_mapping(n_layers, last_layers_to_drop, first_layers_to_dr
     
     return mapping_pairs
 
-def depth_up_scale_model(input_dir_path, checkpoint_name_base, output_dir_path, last_layers_to_drop, first_layers_to_drop, bfloat16):
+def depth_up_scale_model(input_dir_path, input_checkpoint_name_base, output_dir_path, output_checkpoint_name_base, last_layers_to_drop, first_layers_to_drop, bfloat16):
     os.makedirs(output_dir_path, exist_ok=True)
     
     logger.info(f"loading checkpoint from {input_dir_path}...")
-    with open(get_config_checkpoint_path(checkpoint_name_base, input_dir_path), "r", encoding="utf-8") as f:
+    with open(get_config_checkpoint_path(input_checkpoint_name_base, input_dir_path), "r", encoding="utf-8") as f:
         config_checkpoint = json.load(f)
-    model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, input_dir_path), map_location='cpu')
+    model_checkpoint = torch.load(get_model_checkpoint_path(input_checkpoint_name_base, input_dir_path), map_location='cpu')
     
     unwanted_prefix = '_orig_mod.'
     for k,v in list(model_checkpoint.items()):
@@ -93,12 +93,11 @@ def depth_up_scale_model(input_dir_path, checkpoint_name_base, output_dir_path, 
     param_bytes /= 1024**2
     logger.info(f"New model layers: {config_checkpoint['model_args']['n_layer']}. Model parameters: {param_count:.2f}M. Est. Size: {param_bytes:.3f}MB")
             
-    ckpt_file_name = 'up-scaled_ckpt'
-    ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, output_dir_path)
+    ckpt_file_path = get_config_checkpoint_path(output_checkpoint_name_base, output_dir_path)
     logger.info(f"saving config checkpoint to {ckpt_file_path}")
     with open(ckpt_file_path, "w", encoding="utf-8") as f:
         json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
-    ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, output_dir_path)
+    ckpt_file_path = get_model_checkpoint_path(output_checkpoint_name_base, output_dir_path)
     logger.info(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(state_dict, ckpt_file_path)
     logger.info(f"checkpoint files saved in {output_dir_path}")
@@ -111,13 +110,18 @@ def main():
         help="Location of ALLaMo weights, which contains a checkpoint file",
     )
     parser.add_argument(
-        "--checkpoint_name_base",
+        "--input_checkpoint_name_base",
         default='ckpt',
         help="Source checkpoint file name base",
     )
     parser.add_argument(
         "--output_dir",
         help="Location to write up-scaled model",
+    )
+    parser.add_argument(
+        "--output_checkpoint_name_base",
+        default='up-scaled_ckpt',
+        help="Output checkpoint file name base",
     )
     parser.add_argument(
         "--last_layers_to_drop", type=int,
@@ -134,8 +138,9 @@ def main():
     args = parser.parse_args()
     depth_up_scale_model(
         input_dir_path=args.input_dir,
-        checkpoint_name_base=args.checkpoint_name_base,
+        input_checkpoint_name_base=args.input_checkpoint_name_base,
         output_dir_path=args.output_dir,
+        output_checkpoint_name_base=args.output_checkpoint_name_base,
         last_layers_to_drop=args.last_layers_to_drop,
         first_layers_to_drop=args.first_layers_to_drop,
         bfloat16=args.bfloat16
