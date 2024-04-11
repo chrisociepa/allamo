@@ -13,6 +13,12 @@ import os
 import shutil
 import torch
 
+sys.path.append(os.path.abspath('..'))
+from train_utils import (
+    get_model_checkpoint_path,
+    get_config_checkpoint_path,
+)
+
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[logging.StreamHandler()])
@@ -35,14 +41,13 @@ def prepare_layer_keys_mapping(n_layers, last_layers_to_drop, first_layers_to_dr
     
     return mapping_pairs
 
-def depth_up_scale_model(input_dir_path, output_dir_path, last_layers_to_drop, first_layers_to_drop, bfloat16):
+def depth_up_scale_model(input_dir_path, checkpoint_name_base, output_dir_path, last_layers_to_drop, first_layers_to_drop, bfloat16):
     os.makedirs(output_dir_path, exist_ok=True)
     
     logger.info(f"loading checkpoint from {input_dir_path}...")
-    config_checkpoint = torch.load(os.path.join(input_dir_path, 'config_ckpt.pt'), map_location='cpu')
-    model_checkpoint = torch.load(os.path.join(input_dir_path, 'model_ckpt.pt'), map_location='cpu')
-
-    model_config = config_checkpoint['model_args']
+    with open(get_config_checkpoint_path(checkpoint_name_base, input_dir_path), "r", encoding="utf-8") as f:
+        config_checkpoint = json.load(f)
+    model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, input_dir_path), map_location='cpu')
     
     unwanted_prefix = '_orig_mod.'
     for k,v in list(model_checkpoint.items()):
@@ -55,7 +60,7 @@ def depth_up_scale_model(input_dir_path, output_dir_path, last_layers_to_drop, f
         "lm_head.weight": model_checkpoint["lm_head.weight"],
     }
     
-    layer_mapping_pairs = prepare_layer_keys_mapping(model_config.n_layer, last_layers_to_drop, first_layers_to_drop)
+    layer_mapping_pairs = prepare_layer_keys_mapping(config_checkpoint['model_args']['n_layer'], last_layers_to_drop, first_layers_to_drop)
     
     # you can customize the mapping here, e.g., replace some layers with others
     
@@ -82,19 +87,17 @@ def depth_up_scale_model(input_dir_path, output_dir_path, last_layers_to_drop, f
         param_count += v.numel()
         param_bytes += v.numel() * v.element_size()
     
-    model_config.n_layer = len(layer_mapping_pairs)
+    config_checkpoint['model_args']['n_layer'] = len(layer_mapping_pairs)
     param_count /= 1e6
     param_bytes /= 1024**2
-    logger.info(f"New model layers: {model_config.n_layer}. Model parameters: {param_count:.2f}M. Est. Size: {param_bytes:.3f}MB")
+    logger.info(f"New model layers: {config_checkpoint['model_args']['n_layer']}. Model parameters: {param_count:.2f}M. Est. Size: {param_bytes:.3f}MB")
             
-    ckpt_file_name = 'up-scaled_ckpt.pt'
-    config_checkpoint = {
-        'model_args': model_config
-    }
-    ckpt_file_path = os.path.join(output_dir_path, 'config_' + ckpt_file_name)
+    ckpt_file_name = 'up-scaled_ckpt'
+    ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
     logger.info(f"saving config checkpoint to {ckpt_file_path}")
-    torch.save(config_checkpoint, ckpt_file_path)
-    ckpt_file_path = os.path.join(output_dir_path, 'model_' + ckpt_file_name)
+    with open(ckpt_file_path, "w", encoding="utf-8") as f:
+        json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
+    ckpt_file_path = os.path.join(output_dir_path, f'model_{ckpt_file_name}.pt')
     logger.info(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(state_dict, ckpt_file_path)
     logger.info(f"checkpoint files saved in {output_dir_path}")
@@ -105,6 +108,11 @@ def main():
     parser.add_argument(
         "--input_dir",
         help="Location of ALLaMo weights, which contains a checkpoint file",
+    )
+    parser.add_argument(
+        "--checkpoint_name_base",
+        default='ckpt',
+        help="Source checkpoint file name base",
     )
     parser.add_argument(
         "--output_dir",
@@ -125,6 +133,7 @@ def main():
     args = parser.parse_args()
     depth_up_scale_model(
         input_dir_path=args.input_dir,
+        checkpoint_name_base=args.checkpoint_name_base,
         output_dir_path=args.output_dir,
         last_layers_to_drop=args.last_layers_to_drop,
         first_layers_to_drop=args.first_layers_to_drop,
