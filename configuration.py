@@ -44,7 +44,7 @@ class AllamoConfiguration:
     dataset_train_file_prefix: str = 'train.'
     dataset_validation_file_prefix: str = 'val.'
     dataset_train_processed_files_count: int = 0
-    dataset_seq_train: bool = False
+    dataset_seq_train: bool = True
     dataset_seq_train_start: int = None
     batch_size_initial: int = 2
     batch_size_max_iter: int = 2000
