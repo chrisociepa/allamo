@@ -115,7 +115,7 @@ class AllamoTrainer:
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt'
         else:
-            if model_checkpoint_files_exist('ckpt', ckpt_dir):
+            if model_checkpoint_files_exist('ckpt', ckpt_dir) or model_checkpoint_files_exist('last_eval_ckpt', ckpt_dir):
                 self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
         

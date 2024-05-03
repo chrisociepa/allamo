@@ -46,7 +46,7 @@ class AllamoTransformerConfig:
     gradient_checkpointing: bool = False
 
 class RMSNorm(torch.nn.Module):
-    """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -59,16 +59,24 @@ class RMSNorm(torch.nn.Module):
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x.to(input_dtype)
         
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+        
 class RotaryEmbedding(torch.nn.Module):
     
     def __init__(self, dim, max_position_embeddings=2048, base=10000, scale=1.0):
         super().__init__()
+        self.dim = dim
         self.max_position_embeddings = max_position_embeddings
-        inv_freq = 1.0 / (scale * (base ** (torch.arange(0, dim, 2).float() / dim)))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.base = base
+        self.scale = scale
         
-    def _set_cos_sin_cache(self, dtype):
-        t = torch.arange(self.max_position_embeddings, device=self.inv_freq.device, dtype=torch.int64).type_as(self.inv_freq)
+    def _set_cos_sin_cache(self, dtype, device):
+        if not hasattr(self, 'inv_freq'):
+            inv_freq = 1.0 / (self.scale * (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim)))
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        t = torch.arange(self.max_position_embeddings, device=device, dtype=torch.int64).type_as(self.inv_freq)
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -78,7 +86,7 @@ class RotaryEmbedding(torch.nn.Module):
     def forward(self, q, k, seq_len=None):
         # q,k: [bs, num_attention_heads, seq_len, head_size]
         if not hasattr(self, 'cos_cached'):
-            self._set_cos_sin_cache(q.dtype)
+            self._set_cos_sin_cache(q.dtype, q.device)
             
         cos = self.cos_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
         sin = self.sin_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
@@ -237,7 +245,7 @@ class SelfAttentionBlock(nn.Module):
 
 class AllamoTransformer(nn.Module):
 
-    def __init__(self, config: AllamoTransformerConfig):
+    def __init__(self, config: AllamoTransformerConfig, with_init_weights=True):
         super().__init__()
         self.logger = logging.getLogger('AllamoTransformer')
         assert config.vocab_size is not None
@@ -250,7 +258,7 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         self.logger.info(f"AllamoTransformerConfig: {config}")
-        self.__log_flash_attention_version()
+        self.log_flash_attention_version()
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
@@ -264,13 +272,15 @@ class AllamoTransformer(nn.Module):
         
         self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size, config.rope_freq_base, config.rope_freq_scale)
 
-        # init all weights
-        self.apply(self._init_weights)
-        self._init_scaled_residual_projections(self)
-        
         self.log_estimated_size()
+        if with_init_weights:
+            self.init_model_weights()
+        
+    def init_model_weights(self):
+        self.apply(self.init_weights)
+        self.init_scaled_residual_projections(self)
 
-    def __log_flash_attention_version(self):
+    def log_flash_attention_version(self):
         if _flash_attention_version == 2:
             self.logger.info("Using Flash Attention 2")
             if _flash_attn_2_supports_window_size and self.config.sliding_window:
@@ -302,15 +312,17 @@ class AllamoTransformer(nn.Module):
         model_bytes = self.model_num_bytes / 1024**2
         self.logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
+    def init_weights(self, module):
+        if isinstance(module, RMSNorm):
+            module.reset_parameters()
+        elif isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             
-    def _init_scaled_residual_projections(self, module):
+    def init_scaled_residual_projections(self, module):
         for pn, p in module.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.config.n_layer))
@@ -369,7 +381,7 @@ class AllamoTransformer(nn.Module):
             loss = None
         return logits, loss, hidden_states
 
-    def configure_optimizers(self, config, device_type):
+    def configure_optimizers(self, config, device_type, use_fused=True):
         # start with all of the candidate parameters
         param_dict = {param_name: p for param_name, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -390,7 +402,7 @@ class AllamoTransformer(nn.Module):
         self.logger.info(f"Non-decayed parameter tensors: {len(nodecay_params):,}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
+        use_fused = use_fused and fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=(config.beta1, config.beta2), **extra_args)
         self.logger.info(f"Using fused AdamW: {use_fused}")

@@ -1,5 +1,5 @@
 """
-This single file is intended to perform some magic for training/finetuning using FSDP.
+This file is intended to perform some magic for training/finetuning using FSDP.
 """
 
 import gc
@@ -18,29 +18,23 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 import torch.distributed as dist
-import functools
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     StateDictType,
     FullStateDictConfig, # general model non-sharded, non-flattened params
-    MixedPrecision,
-    BackwardPrefetch,
-)
-from torch.distributed.fsdp.fully_sharded_data_parallel import (
-    ShardingStrategy,
-)
-from torch.distributed.fsdp.wrap import (
-    transformer_auto_wrap_policy,
-)
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper,
-    CheckpointImpl,
-    apply_activation_checkpointing,
 )
 
 from model import AllamoTransformerConfig, AllamoTransformer, SelfAttentionBlock
 from configuration import AllamoConfiguration
 from data_loader import AllamoDataLoader
+from fsdp_utils import (
+    build_world_mesh,
+    dist_all_reduce,
+    parallelize_model,
+    model_distributed_checkpoint_files_exist,
+    load_distributed_checkpoint,
+    save_distributed_checkpoint,
+)
 from train_utils import (
     rename_file_to_prev_version,
     calculate_md5,
@@ -67,12 +61,17 @@ class AllamoFSDPTrainer:
         self.__init_torch(config)
         self.__init_logger(config)
         self.logger.info(f"Torch initialized for run {self.run_uuid}")
+        self.logger.info(
+            f"RANK: {self.rank}, LOCAL_RANK: {self.local_rank}, "
+            f"WORLD_SIZE: {self.world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}, "
+            f"DP_SIZE: {self.dp_size}, DP_RANK: {self.dp_rank}"
+        )
         
         self.iter_num = 0
         self.best_train_loss = 1e2
         self.best_val_loss = 1e2
         self.processed_tokens = 0
-        self.data_loader = AllamoDataLoader(config, self.rank, self.world_size)
+        self.data_loader = AllamoDataLoader(config, self.dp_rank, self.dp_size)
         self.__init_training(config)
         
     def __init_logger(self, config: AllamoConfiguration):
@@ -92,48 +91,20 @@ class AllamoFSDPTrainer:
         config.device = f'cuda:{self.local_rank}'
         torch.cuda.set_device(config.device)
         self.master_process = self.rank == 0 # this process will do logging, checkpointing etc.
-        self.seed_offset = self.rank # each process gets a different seed
+        self.world_mesh = build_world_mesh(self.world_size, config)
+        self.device_mesh = self.world_mesh["dp"] if self.world_mesh is not None else None
+        self.dp_size = self.device_mesh.size() if self.world_mesh is not None else self.world_size
+        self.dp_rank = self.device_mesh.get_local_rank() if self.world_mesh is not None else self.rank
         if self.master_process:
-            print(
-                f"RANK: {self.rank}, LOCAL_RANK: {self.local_rank}, "
-                f"WORLD_SIZE: {self.world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}"
-            )
             os.makedirs(config.out_dir, exist_ok=True)
-        torch.manual_seed(config.seed + self.seed_offset)
-        torch.cuda.manual_seed(config.seed + self.seed_offset)
+        torch.manual_seed(config.seed + self.dp_rank)
+        torch.cuda.manual_seed(config.seed + self.dp_rank)
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
         if config.dtype == 'bfloat16-true':
             raise Exception('Full bfloat16 training is not supported with FSDP')
-        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-        self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
-        self.sharding_strategy = {
-            'FULL_SHARD': ShardingStrategy.FULL_SHARD,
-            'HYBRID_SHARD': ShardingStrategy.HYBRID_SHARD,
-            '_HYBRID_SHARD_ZERO2': ShardingStrategy._HYBRID_SHARD_ZERO2,
-            'SHARD_GRAD_OP': ShardingStrategy.SHARD_GRAD_OP,
-            'NO_SHARD': ShardingStrategy.NO_SHARD
-        }[config.fsdp_sharding_strategy]
-        auto_wrap_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                SelfAttentionBlock,
-            },
-        )
-        self.fsdp_config = dict(
-            auto_wrap_policy=auto_wrap_policy,
-            sharding_strategy=self.sharding_strategy,
-            device_id=torch.cuda.current_device(),
-            mixed_precision=MixedPrecision(
-                param_dtype=ptdtype,
-                reduce_dtype=ptdtype,
-                buffer_dtype=ptdtype,
-            ),
-            limit_all_gathers=True,
-            backward_prefetch=BackwardPrefetch.BACKWARD_PRE,  # will use slightly more memory vs. no prefetch
-            use_orig_params=True # required to use torch.compile()
-        )
+        
         self.fullstate_save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         if config.gradient_checkpointing:
             self.fsdp_activation_checkpointing = True
@@ -150,18 +121,18 @@ class AllamoFSDPTrainer:
         elif config.init_from == 'resume_last':
             checkpoint_name = 'last_eval_ckpt'
         else:
-            if model_checkpoint_files_exist('ckpt', ckpt_dir):
+            if self.check_model_checkpoint_files('ckpt', ckpt_dir) or self.check_model_checkpoint_files('last_eval_ckpt', ckpt_dir):
                 self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
         
         if checkpoint_name is not None:
-            if model_checkpoint_files_exist(checkpoint_name, ckpt_dir):
+            if self.check_model_checkpoint_files(checkpoint_name, ckpt_dir):
                 self.logger.info(f"Resuming training from {ckpt_dir} and start loading '{checkpoint_name}' checkpoint files")
                 self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), config, model_config_fields)
             elif config.init_from == 'resume_last':
-                checkpoint_name = None
                 if self.master_process:
                     self.logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
+                checkpoint_name = None
             else:
                 raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
                 
@@ -169,43 +140,46 @@ class AllamoFSDPTrainer:
         modelConf = AllamoTransformerConfig(**model_args)
         if self.fsdp_activation_checkpointing:
             modelConf.gradient_checkpointing = False
-        model = AllamoTransformer(modelConf)
-        self.model_num_params = model.model_num_params
-        if checkpoint_name is None:
-            self.logger.info("Initialized a new model from scratch")
+            
+        if self.world_mesh is None:
+            model = AllamoTransformer(modelConf)
+            self.model_num_params = model.model_num_params
+            if checkpoint_name is None:
+                self.logger.info("Initialized a new model from scratch")
+            else:
+                self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), config)
+            
+            self.logger.info("Configuring model with FSDP")
+            model = parallelize_model(model, self.world_mesh, config, self.fsdp_activation_checkpointing)
+            
+            # optimizer
+            self.optimizer = model.configure_optimizers(config, "cuda", use_fused=(self.world_mesh is None))
+            if checkpoint_name is None:
+                self.logger.info("Initializing optimizer from scratch")
+            else:
+                self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}.pt'))
         else:
-            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), config)
-        
-        self.logger.info("Configuring model with FSDP")
-        model = FSDP(model, **self.fsdp_config)
-        self.logger.info(f"Model configured with FSDP and sharding strategy {self.sharding_strategy}")
-        
-        if self.fsdp_activation_checkpointing:
-            non_reentrant_wrapper = functools.partial(
-                checkpoint_wrapper,
-                offload_to_cpu=False,
-                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            )
-            check_fn = lambda submodule: isinstance(submodule, SelfAttentionBlock)
-            apply_activation_checkpointing(model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn)
-        
-        # compile the model - requires PyTorch 2.0
-        if config.compile:
-            self.logger.info("compiling the model... (takes a ~minute)")
-            try:
-                model = torch.compile(model, mode=config.compile_mode)
-                self.logger.info("Model compiled and ready to use")
-            except Exception as err:
-                self.logger.warning(f"Model compile not supported: {err}")
+            
+            with torch.device("meta"):
+                model = AllamoTransformer(modelConf, with_init_weights=False)
+            self.model_num_params = model.model_num_params
+            
+            self.logger.info("Configuring model with FSDP2")
+            model = parallelize_model(model, self.world_mesh, config, self.fsdp_activation_checkpointing)
+            
+            # allocate sharded model on GPU and initialize weights via DTensor
+            model.to_empty(device="cuda")
+            model.init_model_weights()
+            
+            self.optimizer = model.configure_optimizers(config, "cuda", use_fused=(self.world_mesh is None))
+            
+            if checkpoint_name is None:
+                self.logger.info("Initializing from scratch")
+            else:
+                load_distributed_checkpoint(model, self.optimizer, ckpt_dir, checkpoint_name, config)
+            
         self.model = model
         
-        # optimizer
-        self.optimizer = model.configure_optimizers(config, self.device_type)
-        if checkpoint_name is None:
-            self.logger.info("Initializing optimizer from scratch")
-        else:
-            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}.pt'))
-                
         # gradient_accumulation scheduler
         if config.grad_accum_schedule: 
             config.grad_accum_max = config.gradient_accumulation_steps
@@ -220,6 +194,12 @@ class AllamoFSDPTrainer:
             self.logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(self.iter_num, self.config)}")
         else:
             self.logger.info(f"Using constant learning rate: {config.learning_rate}")
+            
+    def check_model_checkpoint_files(self, ckpt_name, ckpt_dir):
+        if self.world_mesh is not None:
+            return model_distributed_checkpoint_files_exist(ckpt_name, ckpt_dir)
+        else:
+            return model_checkpoint_files_exist(ckpt_name, ckpt_dir)
     
     def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
         with open(ckpt_path, "r", encoding="utf-8") as f:
@@ -249,7 +229,7 @@ class AllamoFSDPTrainer:
                     self.data_loader.train_dataset.processed_files.pop()
                     self.data_loader.train_dataset.load_next_dataset()
             if 'dataset_offset' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.world_size
+                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.dp_size
             if 'epoch' in config_checkpoint['allamo_dataloader']:
                 self.data_loader.epoch = config_checkpoint['allamo_dataloader']['epoch']
     
@@ -274,20 +254,8 @@ class AllamoFSDPTrainer:
             if self.master_process:
                 self.logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
         
-    # helps saving checkpoint to a file
-    def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
-        with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
-            full_msd = self.model.state_dict()
+    def save_config_checkpoint(self, ckpt_file_name, ckpt_md5):
         if self.master_process:
-            ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
-            if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            torch.save(full_msd, ckpt_file_path)
-            del full_msd
-            
-            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
-            
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
                 'run_uuid': self.run_uuid,
@@ -299,13 +267,13 @@ class AllamoFSDPTrainer:
                 'config': dataclasses.asdict(self.config),
                 'allamo_dataloader': {
                     'train_processed_files': self.data_loader.train_dataset.processed_files,
-                    'dataset_offset': self.data_loader.dataset_offset * self.world_size,
+                    'dataset_offset': self.data_loader.dataset_offset * self.dp_size,
                     'epoch': self.data_loader.epoch
                 }
             }
-            if md5sum is not None:
-                checkpoint['checkpoint_md5sum'] = md5sum
-                self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
+            if ckpt_md5 is not None:
+                checkpoint['checkpoint_md5sum'] = ckpt_md5
+                self.logger.info(f"model checkpoint saved - MD5: {ckpt_md5}")
                 
             ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
             self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
@@ -313,18 +281,40 @@ class AllamoFSDPTrainer:
                 rename_file_to_prev_version(ckpt_file_path)
             with open(ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
-        
-        if self.config.save_optimizer_checkpoint and model_only == False:
-            # pull all sharded optimizer states to rank0 cpu.
-            full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
+            
+    def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
+        if self.world_mesh is not None:
+            self.save_config_checkpoint(ckpt_file_name, None)
+                
+            if self.master_process and not self.config.ignore_last_checkpoint_backup:
+                self.logger.warning("Backing up a previous checkpoint is not supported in distributed checkpoints")
+            save_distributed_checkpoint(self.model, self.optimizer, self.config.out_dir, ckpt_file_name, config, model_only)
+        else:
+            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
+                full_msd = self.model.state_dict()
             if self.master_process:
-                ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-                self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
                 if not self.config.ignore_last_checkpoint_backup:
                     rename_file_to_prev_version(ckpt_file_path)
-                torch.save(full_osd, ckpt_file_path)
-                self.logger.info(f"checkpoint files saved in {config.out_dir}")
-                del full_osd
+                torch.save(full_msd, ckpt_file_path)
+                del full_msd
+                
+                md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
+                
+                self.save_config_checkpoint(ckpt_file_name, ckpt_md5)
+            
+            if self.config.save_optimizer_checkpoint and model_only == False:
+                # pull all sharded optimizer states to rank0 cpu.
+                full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
+                if self.master_process:
+                    ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                    self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                    if not self.config.ignore_last_checkpoint_backup:
+                        rename_file_to_prev_version(ckpt_file_path)
+                    torch.save(full_osd, ckpt_file_path)
+                    self.logger.info(f"checkpoint files saved in {config.out_dir}")
+                    del full_osd
             
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -341,9 +331,9 @@ class AllamoFSDPTrainer:
                 fsdp_loss_preds[0] += loss.item()
                 fsdp_loss_preds[1] += (logits.max(2).indices == Y).sum().item() / torch.sum(Y.view(-1) != self.config.ignore_index).item()
                 fsdp_loss_preds[2] += 1
-            dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
-            steps = self.config.eval_iters * self.world_size
-            losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.world_size)
+            fsdp_loss_preds = dist_all_reduce(fsdp_loss_preds, dist.ReduceOp.SUM, self.device_mesh)
+            steps = self.config.eval_iters * self.dp_size
+            losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.dp_size)
             accuraces[split] = fsdp_loss_preds[1] / fsdp_loss_preds[2]
         self.model.train()
         if 'val' not in losses_out:
@@ -352,7 +342,7 @@ class AllamoFSDPTrainer:
         return losses_out, accuraces
         
     def train(self):
-        self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
+        self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}, world size: {self.world_size}, DP size: {self.dp_size}) with configuration: {self.config}")
         X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
@@ -374,7 +364,7 @@ class AllamoFSDPTrainer:
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.dp_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
             # evaluate the loss on train/val sets and write best checkpoint
@@ -441,8 +431,8 @@ class AllamoFSDPTrainer:
                 if W is not None:
                     fsdp_loss_weight_acc = W.view(-1).sum()
                     # sum loss weights over all processes
-                    dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
-                    loss = (self.world_size / fsdp_loss_weight_acc) * loss
+                    fsdp_loss_weight_acc = dist_all_reduce(fsdp_loss_weight_acc, dist.ReduceOp.SUM, self.device_mesh)
+                    loss = (self.dp_size / fsdp_loss_weight_acc) * loss
                 
                 mfu_excluded_time = time.time()
                 unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
@@ -460,11 +450,11 @@ class AllamoFSDPTrainer:
                 
             # clip the gradient
             if self.config.grad_clip != 0.0:
-                self.model.clip_grad_norm_(self.config.grad_clip)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip, foreach=True)
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
-            dist.all_reduce(fsdp_loss_acc, op=dist.ReduceOp.SUM)
+            fsdp_loss_acc = dist_all_reduce(fsdp_loss_acc, dist.ReduceOp.SUM, self.device_mesh)
             
             # adjust learning rate
             if self.config.adaptive_learning_rate:
@@ -487,7 +477,7 @@ class AllamoFSDPTrainer:
             if self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process:
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
-                lossf = fsdp_loss_acc[0].item() / self.world_size
+                lossf = fsdp_loss_acc[0].item() / self.dp_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = fsdp_loss_acc[2].item() / fsdp_loss_acc[3].item()
                 if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
@@ -523,6 +513,8 @@ class AllamoFSDPTrainer:
                         metrics['train/mfu'] = mfu
                     if self.config.dataset_seq_train:
                         metrics['train/ds_offset'] = self.data_loader.dataset_offset
+                    if self.dp_size < self.world_size:
+                        metrics['train/tokens_per_group_per_sec'] = total_batch_size/self.dp_size/iter_time
                     wandb.log(metrics)
             self.iter_num += 1
             
