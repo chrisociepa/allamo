@@ -10,6 +10,13 @@ from torch.distributed.checkpoint.metadata import STATE_DICT_TYPE
 from torch.distributed.checkpoint.state_dict_loader import _load_state_dict
 from torch.distributed.checkpoint.state_dict_saver import _save_state_dict
 
+def remove_unwanted_prefix_from_model_state_dict(state_dict):
+    unwanted_prefix = '_orig_mod.'
+    unwanted_prefix_len = len(unwanted_prefix)
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[unwanted_prefix_len:]] = state_dict.pop(k)
+
 def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_path: Union[str, os.PathLike], state_key: str):
     sd: STATE_DICT_TYPE = {}
 
@@ -31,6 +38,7 @@ def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_pa
 
 def torch_save_to_dcp(torch_save_path: Union[str, os.PathLike], dcp_checkpoint_dir: Union[str, os.PathLike], state_key: str):
     state_dict = torch.load(torch_save_path)
+    remove_unwanted_prefix_from_model_state_dict(state_dict)
     
     if state_key:
         state_dict = {state_key: state_dict}
@@ -65,6 +73,7 @@ if __name__ == "__main__":
     )
     if args.mode == FormatMode.TORCH_TO_DCP.value:
         if os.path.isfile(args.src):
+            os.makedirs(args.dst, exist_ok=True)
             torch_save_to_dcp(args.src, args.dst, args.state_key)
         else:
             print(checkpoint_missing_warning)
