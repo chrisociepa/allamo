@@ -64,35 +64,32 @@ class RMSNorm(torch.nn.Module):
         
 class RotaryEmbedding(torch.nn.Module):
     
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, scale=1.0):
+    def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        self.dim = dim
-        self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        self.scale = scale
+        self.dim = config.head_size
+        self.max_position_embeddings = config.block_size
+        self.base = config.rope_freq_base
+        self.scale = config.rope_freq_scale
+        cos, sin = self.compute_cos_sin_cache()
+        self.register_buffer("cos_cached", cos, persistent=False)
+        self.register_buffer("sin_cached", sin, persistent=False)
         
-    def _set_cos_sin_cache(self, dtype, device):
-        if not hasattr(self, 'inv_freq'):
-            inv_freq = 1.0 / (self.scale * (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim)))
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
-        
-        t = torch.arange(self.max_position_embeddings, device=device, dtype=torch.int64).type_as(self.inv_freq)
-        freqs = torch.outer(t, self.inv_freq)
+    def compute_cos_sin_cache(self):
+        inv_freq = 1.0 / (self.scale * (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim)))
+        t = torch.arange(self.max_position_embeddings, device=inv_freq.device, dtype=torch.int64).type_as(inv_freq)
+        freqs = torch.outer(t, inv_freq).float()
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
+        return emb.cos()[None, None, :, :], emb.sin()[None, None, :, :]
         
-    def forward(self, q, k, seq_len=None):
+    def forward(self, xq, xk, seq_len=None):
         # q,k: [bs, num_attention_heads, seq_len, head_size]
-        if not hasattr(self, 'cos_cached'):
-            self._set_cos_sin_cache(q.dtype, q.device)
-            
-        cos = self.cos_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
-        sin = self.sin_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
+        q, k = xq.float(), xk.float()
+        cos = self.cos_cached[:, :, :seq_len, ...]
+        sin = self.sin_cached[:, :, :seq_len, ...]
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
         k_out = (k * cos) + (self.__rotate_half(k) * sin)
-        return q_out, k_out
+        return q_out.type_as(xq), k_out.type_as(xk)
     
     def __rotate_half(self, x):
         # Rotates half the hidden dims of the input
@@ -270,13 +267,17 @@ class AllamoTransformer(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size, config.rope_freq_base, config.rope_freq_scale)
+        self.rotary_emb = RotaryEmbedding(config)
 
         self.log_estimated_size()
         if with_init_weights:
             self.init_model_weights()
         
     def init_model_weights(self):
+        with torch.device(self.rotary_emb.cos_cached.device):
+            cos, sin = self.rotary_emb.compute_cos_sin_cache()
+            self.rotary_emb.cos_cached = cos
+            self.rotary_emb.sin_cached = sin
         self.apply(self.init_weights)
         self.init_scaled_residual_projections(self)
 

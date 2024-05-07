@@ -22,6 +22,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from train_utils import (
     rename_file_to_prev_version,
     get_config_checkpoint_path,
+    get_model_checkpoint_path,
+    get_optimizer_checkpoint_path,
 )
 from model import SelfAttentionBlock
 
@@ -50,6 +52,7 @@ try:
         set_model_state_dict,
         set_optimizer_state_dict,
     )
+    from torch.distributed.checkpoint.format_utils import DynamicMetaLoadPlanner
     
     class ModelWrapper(Stateful):
         def __init__(self, model: nn.Module) -> None:
@@ -139,6 +142,11 @@ def parallelize_with_fsdp(model, config, with_activation_checkpointing):
         use_orig_params=True, # required to use torch.compile()
     )
     
+    if config.compile:
+        # convert to desire dtype, to make it work with FSDP and torch.compile
+        model.rotary_emb.cos_cached = model.rotary_emb.cos_cached.to(ptdtype)
+        model.rotary_emb.sin_cached = model.rotary_emb.sin_cached.to(ptdtype)
+    
     model = FSDP(model, **fsdp_config)
     logger.info(f"Model configured with FSDP and {sharding_strategy=}")
     
@@ -172,9 +180,8 @@ def parallelize_with_fsdp2(model, config, device_mesh, with_activation_checkpoin
     if config.compile:
         # torch.compile does not work properly with FSDP, therefore we compile per-layer before FSDP. 
         # Additionally, dynamic shapes have some issues, so we disable them now.
-        model.rotary_emb = torch.compile(model.rotary_emb, dynamic=False)
         for layer_id, layer in enumerate(model.layers):
-            model.layers[layer_id] = torch.compile(layer, dynamic=False)
+            model.layers[layer_id] = torch.compile(layer, dynamic=False, fullgraph=True)
         logger.info("Compiled each layer with torch.compile")
         
     fsdp_config = {"mesh": device_mesh}
@@ -262,16 +269,24 @@ def model_distributed_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
 
 def load_distributed_checkpoint(model, optimizer, ckpt_dir, ckpt_name, config):
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+    model_ckpt_path = os.path.join(ckpt_path, "model")
     
     model_state = {"model": ModelWrapper(model)}
-    dcp.load(model_state, checkpoint_id=os.path.join(ckpt_path, "model"))
-    logger.info(f"Finished loading model checkpoint from {ckpt_path}")
+    if os.path.exists(model_ckpt_path):
+        dcp.load(model_state, planner=DynamicMetaLoadPlanner(), checkpoint_id=model_ckpt_path)
+    else:
+        model_ckpt_path = get_model_checkpoint_path(ckpt_name, ckpt_dir)
+        if os.path.exists(model_ckpt_path):
+            dcp.load(model_state, storage_reader=BroadcastingTorchSaveReader(), planner=DynamicMetaLoadPlanner(), checkpoint_id=model_ckpt_path)
+        else:
+            raise Exception("Model checkpoint not found")
+    logger.info(f"Finished loading model checkpoint from {model_ckpt_path}")
     if config.log_checkpoint_md5_on_load:
         logger.warning(f"Logging checkpoint MD5 is not supported with distributed checkpoint")
     
     if optimizer is not None and os.path.exists(os.path.join(ckpt_path, "optimizer")):
         optimizer_state = {"optimizer": OptimizerWrapper(model, optimizer)}
-        dcp.load(optimizer_state, checkpoint_id=os.path.join(ckpt_path, "optimizer"))
+        dcp.load(optimizer_state, checkpoint_id=os.path.join(ckpt_path, "optimizer"), planner=DynamicMetaLoadPlanner())
         logger.info(f"Finished loading optimizer checkpoint from {ckpt_path}")
     else:
         logger.warning("Optimizer checkpoint not found")
