@@ -52,7 +52,7 @@ try:
         set_model_state_dict,
         set_optimizer_state_dict,
     )
-    from torch.distributed.checkpoint.format_utils import DynamicMetaLoadPlanner
+    from torch.distributed.checkpoint.format_utils import DynamicMetaLoadPlanner, BroadcastingTorchSaveReader
     
     class ModelWrapper(Stateful):
         def __init__(self, model: nn.Module) -> None:
@@ -271,13 +271,16 @@ def load_distributed_checkpoint(model, optimizer, ckpt_dir, ckpt_name, config):
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     model_ckpt_path = os.path.join(ckpt_path, "model")
     
-    model_state = {"model": ModelWrapper(model)}
+    model_state = get_model_state_dict(model)
     if os.path.exists(model_ckpt_path):
-        dcp.load(model_state, planner=DynamicMetaLoadPlanner(), checkpoint_id=model_ckpt_path)
+        #model_state = {"model": ModelWrapper(model)}
+        dcp.load(model_state, checkpoint_id=model_ckpt_path)
+        model.load_state_dict(model_state)
     else:
         model_ckpt_path = get_model_checkpoint_path(ckpt_name, ckpt_dir)
         if os.path.exists(model_ckpt_path):
             dcp.load(model_state, storage_reader=BroadcastingTorchSaveReader(), planner=DynamicMetaLoadPlanner(), checkpoint_id=model_ckpt_path)
+            model.load_state_dict(model_state)
         else:
             raise Exception("Model checkpoint not found")
     logger.info(f"Finished loading model checkpoint from {model_ckpt_path}")
@@ -296,7 +299,8 @@ def save_distributed_checkpoint(model, optimizer, ckpt_dir, ckpt_name, config, m
     
     model_ckpt_path = os.path.join(ckpt_path, "model")
     logger.info(f"saving model checkpoint to {model_ckpt_path}")
-    model_state = {"model": ModelWrapper(model)}
+    #model_state = {"model": ModelWrapper(model)}
+    model_state = get_model_state_dict(model)
     dcp.save(model_state, checkpoint_id=model_ckpt_path)
     logger.info(f"model checkpoint saved in {model_ckpt_path}")
     

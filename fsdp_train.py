@@ -208,7 +208,7 @@ class AllamoFSDPTrainer:
             
     def check_model_checkpoint_files(self, ckpt_name, ckpt_dir):
         if self.world_mesh is not None:
-            return model_distributed_checkpoint_files_exist(ckpt_name, ckpt_dir)
+            return model_distributed_checkpoint_files_exist(ckpt_name, ckpt_dir) or model_checkpoint_files_exist(ckpt_name, ckpt_dir)
         else:
             return model_checkpoint_files_exist(ckpt_name, ckpt_dir)
     
