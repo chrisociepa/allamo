@@ -143,8 +143,8 @@ class AllamoFSDPTrainer:
         modelConf = AllamoTransformerConfig(**model_args)
         if self.fsdp_activation_checkpointing:
             modelConf.gradient_checkpointing = False
-            
-        if self.world_mesh is None or not DISTRIBUTED_CHECKPOINT_AVAILABLE:
+        
+        if self.world_mesh is None or not DISTRIBUTED_CHECKPOINT_AVAILABLE or not model_distributed_checkpoint_files_exist(checkpoint_name, ckpt_dir):
             model = AllamoTransformer(modelConf)
             self.model_num_params = model.model_num_params
             if checkpoint_name is None:

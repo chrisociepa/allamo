@@ -51,29 +51,30 @@ try:
         get_optimizer_state_dict,
         set_model_state_dict,
         set_optimizer_state_dict,
+        StateDictOptions,
     )
     from torch.distributed.checkpoint.format_utils import DynamicMetaLoadPlanner, BroadcastingTorchSaveReader
     
     class ModelWrapper(Stateful):
-        def __init__(self, model: nn.Module) -> None:
+        def __init__(self, model: nn.Module):
             self.model = model
 
-        def state_dict(self) -> None:
+        def state_dict(self):
             return get_model_state_dict(self.model)
 
-        def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        def load_state_dict(self, state_dict: Dict[str, Any]):
             set_model_state_dict(self.model, state_dict)
 
 
     class OptimizerWrapper(Stateful):
-        def __init__(self, model: nn.Module, optim: torch.optim.Optimizer) -> None:
+        def __init__(self, model: nn.Module, optim: torch.optim.Optimizer):
             self.model = model
             self.optim = optim
 
-        def state_dict(self) -> None:
+        def state_dict(self):
             return get_optimizer_state_dict(self.model, self.optim)
 
-        def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        def load_state_dict(self, state_dict: Dict[str, Any]):
             set_optimizer_state_dict(self.model, self.optim, optim_state_dict=state_dict)
             
 except ImportError:
@@ -271,36 +272,44 @@ def load_distributed_checkpoint(model, optimizer, ckpt_dir, ckpt_name, config):
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     model_ckpt_path = os.path.join(ckpt_path, "model")
     
-    model_state = get_model_state_dict(model)
     if os.path.exists(model_ckpt_path):
-        #model_state = {"model": ModelWrapper(model)}
+        model_state = {"model": ModelWrapper(model)}
         dcp.load(model_state, checkpoint_id=model_ckpt_path)
-        model.load_state_dict(model_state)
     else:
+        #FIXME not working
         model_ckpt_path = get_model_checkpoint_path(ckpt_name, ckpt_dir)
         if os.path.exists(model_ckpt_path):
+            model_state = get_model_state_dict(model)
             dcp.load(model_state, storage_reader=BroadcastingTorchSaveReader(), planner=DynamicMetaLoadPlanner(), checkpoint_id=model_ckpt_path)
-            model.load_state_dict(model_state)
+            set_model_state_dict(model, model_state)
         else:
             raise Exception("Model checkpoint not found")
     logger.info(f"Finished loading model checkpoint from {model_ckpt_path}")
     if config.log_checkpoint_md5_on_load:
         logger.warning(f"Logging checkpoint MD5 is not supported with distributed checkpoint")
     
-    if optimizer is not None and os.path.exists(os.path.join(ckpt_path, "optimizer")):
+    optimizer_ckpt_path = os.path.join(ckpt_path, "optimizer")
+    if optimizer is not None and os.path.exists(optimizer_ckpt_path):
         optimizer_state = {"optimizer": OptimizerWrapper(model, optimizer)}
-        dcp.load(optimizer_state, checkpoint_id=os.path.join(ckpt_path, "optimizer"), planner=DynamicMetaLoadPlanner())
-        logger.info(f"Finished loading optimizer checkpoint from {ckpt_path}")
+        dcp.load(optimizer_state, checkpoint_id=optimizer_ckpt_path)
+        logger.info(f"Finished loading optimizer checkpoint from {optimizer_ckpt_path}")
     else:
-        logger.warning("Optimizer checkpoint not found")
+        #FIXME not working
+        optimizer_ckpt_path = get_optimizer_checkpoint_path(ckpt_name, ckpt_dir)
+        if os.path.exists(optimizer_ckpt_path):
+            optimizer_state = get_optimizer_state_dict(model, optimizer)
+            dcp.load(optimizer_state, storage_reader=BroadcastingTorchSaveReader(), planner=DynamicMetaLoadPlanner(), checkpoint_id=optimizer_ckpt_path)
+            set_optimizer_state_dict(model, optimizer, optimizer_state)
+            logger.info(f"Finished loading optimizer checkpoint from {optimizer_ckpt_path}")
+        else:
+            logger.warning("Optimizer checkpoint not found")
         
 def save_distributed_checkpoint(model, optimizer, ckpt_dir, ckpt_name, config, model_only):
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
     
     model_ckpt_path = os.path.join(ckpt_path, "model")
     logger.info(f"saving model checkpoint to {model_ckpt_path}")
-    #model_state = {"model": ModelWrapper(model)}
-    model_state = get_model_state_dict(model)
+    model_state = {"model": ModelWrapper(model)}
     dcp.save(model_state, checkpoint_id=model_ckpt_path)
     logger.info(f"model checkpoint saved in {model_ckpt_path}")
     
