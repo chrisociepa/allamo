@@ -217,6 +217,7 @@ def parallelize_model(model, world_mesh, config, with_activation_checkpointing):
         {
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
+                output_layouts=Shard(1),
             ),
             "lm_head": ColwiseParallel(
                 input_layouts=Shard(1),
@@ -224,11 +225,6 @@ def parallelize_model(model, world_mesh, config, with_activation_checkpointing):
                 use_local_output=True,
             ),
             "norm": SequenceParallel(),
-            "layers.0": PrepareModuleInput(
-                input_layouts=(Replicate(), None),
-                desired_input_layouts=(Shard(1), None),
-                use_local_output=True,
-            ),
         },
     )
 
