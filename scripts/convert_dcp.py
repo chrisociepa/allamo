@@ -31,7 +31,7 @@ def add_prefix_to_model_state_dict(state_dict, prefix):
     for k,v in list(state_dict.items()):
         state_dict[prefix + k] = state_dict.pop(k)
 
-sddef require_conversion(key):
+def require_conversion(key):
     for key_part in ["tok_embeddings", "lm_head", "attention.q_proj", "attention.k_proj", "attention.v_proj", "feed_forward.gate_proj", "feed_forward.up_proj"]:
         if key_part in key:
             return True
