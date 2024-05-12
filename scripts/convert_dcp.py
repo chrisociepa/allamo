@@ -9,17 +9,6 @@ from torch.distributed.checkpoint.format_utils import _EmptyStateDictLoadPlanner
 from torch.distributed.checkpoint.metadata import STATE_DICT_TYPE
 from torch.distributed.checkpoint.state_dict_loader import _load_state_dict
 from torch.distributed.checkpoint.state_dict_saver import _save_state_dict
-from torch.distributed.checkpoint.stateful import Stateful
-
-class StatefulWrapper(Stateful):
-    def __init__(self, state_dict: Dict[str, Any]):
-        self.state_dict = state_dict
-
-    def state_dict(self):
-        return state_dict
-
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        raise Exception("This method shouldn't be called!")
 
 def remove_unwanted_prefix_from_model_state_dict(state_dict, unwanted_prefix = '_orig_mod.'):
     unwanted_prefix_len = len(unwanted_prefix)
@@ -68,7 +57,7 @@ def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_pa
     
     if state_key:
         if state_key in state_dict:
-            state_dict = state_dict[state_key].state_dict
+            state_dict = state_dict[state_key]
         else:
             print(f"Key '{state_key}' not found. Using full state dict with the following keys: {', '.join(state_dict.keys())}")
             
@@ -84,9 +73,8 @@ def torch_save_to_dcp(torch_save_path: Union[str, os.PathLike], dcp_checkpoint_d
     convert_state_dict(state_dict, tp_size, world_size, to_dcp=True)
     
     if state_key:
-        # add_prefix_to_model_state_dict(state_dict, state_key + ".")
-        # print(f"Prefixed model state dict with '{state_key}.'")
-        state_dict = {state_key: StatefulWrapper(state_dict)}
+        add_prefix_to_model_state_dict(state_dict, state_key + ".")
+        print(f"Prefixed model state dict with '{state_key}.'")
     
     # we don't need stateful behavior here because the expectation is anything loaded by
     # torch.load would not contain stateful objects.
