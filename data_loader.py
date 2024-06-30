@@ -275,7 +275,11 @@ class AllamoDataLoader:
             x, y = x.to(self.config.device), y.to(self.config.device)
             if w is not None:
                 w = w.to(self.config.device)
-        return x, y, w
+        return {
+            "input_ids": x,
+            "target_ids": y,
+            "target_weights": w
+        }
         
     def reload_dataset(self, dataset):
         if len(dataset.dataset_files) > 1:

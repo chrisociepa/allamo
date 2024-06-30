@@ -7,15 +7,12 @@ import json
 import os
 import time
 import math
-import pickle
-import random
 import logging
 import datetime
 import dataclasses
 import uuid
 from contextlib import nullcontext
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -241,12 +238,13 @@ class AllamoTrainer:
             correct_preds = 0
             total_preds = 0
             for k in range(self.config.eval_iters):
-                X, Y, W = self.data_loader.get_batch(split, True)
+                batch = self.data_loader.get_batch(split, True)
+                batch["target_weights"] = None # no need to weight loss
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y)
+                    logits, loss, _ = self.model(**batch)
                 losses[k] = loss.item()
-                total_preds += torch.sum(Y.view(-1) != self.config.ignore_index).item()
-                correct_preds += (logits.max(2).indices == Y).sum().item()
+                total_preds += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                correct_preds += (logits.max(2).indices == batch["target_ids"]).sum().item()
             losses_out[split] = losses.mean()
             accuraces[split] = correct_preds / total_preds
         self.model.train()
@@ -302,7 +300,7 @@ class AllamoTrainer:
         
     def train(self):
         self.logger.info(f"Starting training (run id: {self.run_uuid}) with configuration: {self.config}")
-        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
+        batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -394,21 +392,21 @@ class AllamoTrainer:
                     # looking at the source of that context manager, it just toggles this variable
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y, W)
+                    logits, loss, _ = self.model(**batch)
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
-                    if W is not None:
-                        loss = loss / W.view(-1).sum()
+                    if batch["target_weights"] is not None:
+                        loss = loss / batch["target_weights"].view(-1).sum()
                 
                 mfu_excluded_time = time.time()
-                unmasked_labels += torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                unmasked_labels += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
                     # calculate accuracy. note: this is a CPU-GPU sync point!
-                    accuracy = (logits.max(2).indices == Y).sum().item() / unmasked_labels
+                    accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
                     
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y, W = self.data_loader.get_batch('train')
+                batch = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16
@@ -420,7 +418,7 @@ class AllamoTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
             
             mfu_excluded_time = time.time()
-            # we can't count it precisely in DDP, so let's estimate
+            # we can't count it precisely in DDP, so let's approximate
             unmasked_labels *= self.world_size
             # adjust learning rate
             if self.config.adaptive_learning_rate:

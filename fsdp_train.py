@@ -338,14 +338,13 @@ class AllamoFSDPTrainer:
         for split in self.data_loader.splits:
             fsdp_loss_preds = torch.zeros(3).to(self.config.device)
             for k in range(self.config.eval_iters):
-                X, Y, W = self.data_loader.get_batch(split, True)
-                logits, loss, _ = self.model(X, Y)
-                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                batch = self.data_loader.get_batch(split, True)
+                batch["target_weights"] = None # no need to weight loss
+                logits, loss, _ = self.model(**batch)
                 fsdp_loss_preds[0] += loss.item()
-                fsdp_loss_preds[1] += (logits.max(2).indices == Y).sum().item() / torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                fsdp_loss_preds[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_preds[2] += 1
             dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
-            steps = self.config.eval_iters * self.world_size
             losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.world_size)
             accuraces[split] = fsdp_loss_preds[1] / fsdp_loss_preds[2]
         self.model.train()
@@ -356,7 +355,7 @@ class AllamoFSDPTrainer:
         
     def train(self):
         self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
-        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
+        batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -436,26 +435,26 @@ class AllamoFSDPTrainer:
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
-            for micro_step in range(self.gradient_accumulation_steps):
-                logits, loss, _ = self.model(X, Y, W)
+            for _ in range(self.gradient_accumulation_steps):
+                logits, loss, _ = self.model(**batch)
                 if self.gradient_accumulation_steps > 1:
                     loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
                     
-                if W is not None:
-                    fsdp_loss_weight_acc = W.view(-1).sum()
+                if batch["target_weights"] is not None:
+                    fsdp_loss_weight_acc = batch["target_weights"].view(-1).sum()
                     # sum loss weights over all processes
                     dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
                     loss = (self.world_size / fsdp_loss_weight_acc) * loss
                 
                 mfu_excluded_time = time.time()
-                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_acc[0] += loss.item()
                 fsdp_loss_acc[1] += unmasked_labels
-                fsdp_loss_acc[2] += (logits.max(2).indices == Y).sum().item() / unmasked_labels
+                fsdp_loss_acc[2] += (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
                 fsdp_loss_acc[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y, W = self.data_loader.get_batch('train')
+                batch = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass
