@@ -6,7 +6,6 @@ import math
 import inspect
 import logging
 from typing import Optional, Tuple, Union
-from functools import reduce
 from dataclasses import dataclass
 
 import torch
@@ -61,30 +60,51 @@ class RMSNorm(torch.nn.Module):
         
 class RotaryEmbedding(torch.nn.Module):
     
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, scale=1.0):
+    def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        self.max_position_embeddings = max_position_embeddings
-        inv_freq = 1.0 / (scale * (base ** (torch.arange(0, dim, 2).float() / dim)))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.dim = config.head_size
+        self.max_seq_len = config.block_size
+        self.base = config.rope_freq_base if config.rope_freq_base is not None else 10000
+        self.scale = config.rope_freq_scale if config.rope_freq_scale is not None else 1.0
+        self._rope_init()
         
-    def _set_cos_sin_cache(self, dtype):
-        t = torch.arange(self.max_position_embeddings, device=self.inv_freq.device, dtype=torch.int64).type_as(self.inv_freq)
-        freqs = torch.outer(t, self.inv_freq)
+    # Define reset_parameters for FSDP initialization
+    def reset_parameters(self):
+        self._rope_init()
+
+    def _rope_init(self):
+        inv_freq = 1.0 / (self.scale * (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim)))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.build_rope_cache(self.max_seq_len)
+        
+    def build_rope_cache(self, max_seq_len: int = 4096) -> None:
+        t = torch.arange(max_seq_len, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
+        freqs = torch.outer(t, self.inv_freq).float()
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
-        
-    def forward(self, q, k, seq_len=None):
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+    
+    @torch.no_grad()
+    def forward(self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        input_pos: Optional[torch.Tensor] = None,
+    ):
         # q,k: [bs, num_attention_heads, seq_len, head_size]
-        if not hasattr(self, 'cos_cached'):
-            self._set_cos_sin_cache(q.dtype)
-            
-        cos = self.cos_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
-        sin = self.sin_cached[:, :, :seq_len, ...].to(dtype=q.dtype)
+        dtype = q.dtype
+        q = q.float()
+        k = k.float()
+        if input_pos is None:
+            cos = self.cos_cached[None, None, :q.size(2), ...]
+            sin = self.sin_cached[None, None, :k.size(2), ...]
+        else:
+            cos = self.cos_cached[None, None, input_pos, ...]
+            sin = self.sin_cached[None, None, input_pos, ...]
+        
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
         k_out = (k * cos) + (self.__rotate_half(k) * sin)
-        return q_out, k_out
+        return q_out.to(dtype=dtype), k_out.to(dtype=dtype)
     
     def __rotate_half(self, x):
         # Rotates half the hidden dims of the input
@@ -147,7 +167,13 @@ class Attention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
 
-    def forward(self, q_x: torch.Tensor, kv_x: torch.Tensor, rotary_emb: RotaryEmbedding):
+    def forward(self,
+                q_x: torch.Tensor,
+                kv_x: torch.Tensor,
+                rotary_emb: RotaryEmbedding,
+                attn_mask: Optional[torch.Tensor] = None,
+                input_pos: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # notation:
         # B  | batch
         # T  | time-step (sequence length)
@@ -165,7 +191,7 @@ class Attention(nn.Module):
         k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         
-        q, k = rotary_emb(q, k, T)
+        q, k = rotary_emb(q, k, input_pos=input_pos)
         
         if self.num_key_value_groups > 1:
             k = self.repeat_kv(k, self.num_key_value_groups)
@@ -173,6 +199,8 @@ class Attention(nn.Module):
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if _flash_attention_version == 2:
+            if attn_mask is not None:
+                raise ValueError(f"Custom attention mask is not supported for FlashAttention2")
             # Flash Attention 2 requires (B, T, nh, hs)
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
@@ -183,12 +211,22 @@ class Attention(nn.Module):
                 y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
         elif _flash_attention_version == 1:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=attn_mask is None,
+            )
             y = y.transpose(1, 2)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if attn_mask is None:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            else:
+                att = att.masked_fill(attn_mask.logical_not(), float('-inf'))
             att = F.softmax(att, dim=-1)
             if self.attn_dropout is not None:
                 att = self.attn_dropout(att)
@@ -230,8 +268,13 @@ class SelfAttentionBlock(nn.Module):
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
 
-    def forward(self, x: torch.Tensor, rotary_emb: RotaryEmbedding):
-        x = x + self.attention(self.attention_norm(x), None, rotary_emb)
+    def forward(self,
+        x: torch.Tensor,
+        rotary_emb: RotaryEmbedding,
+        attn_mask: Optional[torch.Tensor] = None,
+        input_pos: Optional[torch.Tensor] = None,
+    ):
+        x = x + self.attention(self.attention_norm(x), None, rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -262,7 +305,7 @@ class AllamoTransformer(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size, config.rope_freq_base, config.rope_freq_scale)
+        self.rotary_emb = RotaryEmbedding(config)
 
         # init all weights
         self.apply(self._init_weights)
@@ -337,15 +380,21 @@ class AllamoTransformer(nn.Module):
             x = self.tok_drop(x)
         return x
 
-    def apply_layers(self, x):
+    def apply_layers(self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        input_pos: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, self.rotary_emb)
+            x = layer(x, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
         return x
 
-    def forward(self, 
-        input_ids: torch.Tensor, 
+    def forward(self,
+        input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
         weights: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        input_pos: Optional[torch.Tensor] = None,
         ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
@@ -354,7 +403,14 @@ class AllamoTransformer(nn.Module):
             assert t <= self.config.block_size, f"Cannot forward embeddings of length {t}, block size is only {self.config.block_size}"
         else:
             inputs_embeds = self.token_embeddings(input_ids)
-        hidden_states = self.apply_layers(inputs_embeds)
+        
+        if attn_mask is not None:
+            if attn_mask.ndim == 3:
+                attn_mask = attn_mask.unsqueeze(1) # (B, T, T) -> (B, 1, T, T)
+            elif attn_mask.ndim != 4:
+                raise ValueError(f"Unsupport attn_mask shape {attn_mask.shape}")
+        
+        hidden_states = self.apply_layers(inputs_embeds, attn_mask=attn_mask, input_pos=input_pos)
         final_embeddings = self.norm(hidden_states)
         if labels is not None:
             # if we are given some desired targets also calculate the loss
