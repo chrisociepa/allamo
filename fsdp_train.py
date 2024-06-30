@@ -56,6 +56,7 @@ from train_utils import (
     get_optimizer_checkpoint_path,
     model_checkpoint_files_exist,
     run_checkpoint_hook_program,
+    override_numa_affinity,
 )
 
 class AllamoFSDPTrainer:
@@ -104,6 +105,7 @@ class AllamoFSDPTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+        override_numa_affinity(self.local_rank)
         if config.dtype == 'bfloat16-true':
             raise Exception('Full bfloat16 training is not supported with FSDP')
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]

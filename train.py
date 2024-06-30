@@ -38,6 +38,7 @@ from train_utils import (
     get_optimizer_checkpoint_path,
     model_checkpoint_files_exist,
     run_checkpoint_hook_program,
+    override_numa_affinity,
 )
 
 class AllamoTrainer:
@@ -87,7 +88,7 @@ class AllamoTrainer:
         else:
             # if not ddp, we are running on a single gpu, and one process
             self.rank = 0
-            self.local_rank = None
+            self.local_rank = 0
             self.world_size = 1
             self.master_process = True
             self.seed_offset = 0
@@ -99,6 +100,7 @@ class AllamoTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+        override_numa_affinity(self.local_rank)
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
         self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)

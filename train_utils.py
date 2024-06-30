@@ -3,6 +3,8 @@ import hashlib
 import math
 import os
 import subprocess
+import torch
+from typing import Optional
 
 def rename_file_to_prev_version(file_path):
     if os.path.exists(file_path):
@@ -114,3 +116,31 @@ def run_checkpoint_hook_program(hook_program, run_uuid, training_uuid, epoch, it
     except Exception as err:
         return f"n/a - Error: {err}"
 
+def override_numa_affinity(local_rank: int, verbose: Optional[bool] = None) -> None:
+    if torch.cuda.is_available():
+        try:
+            import pynvml as nvml
+        except ImportError:
+            print("To set CPU affinity on CUDA GPUs the `pynvml` package must be available. (`pip install pynvml`)")
+            return
+
+        # The below code is based on https://github.com/NVIDIA/DeepLearningExamples/blob/master/TensorFlow2/LanguageModeling/BERT/gpu_affinity.py
+        nvml.nvmlInit()
+        num_elements = math.ceil(os.cpu_count() / 64)
+        handle = nvml.nvmlDeviceGetHandleByIndex(local_rank)
+        affinity_string = ""
+        for j in nvml.nvmlDeviceGetCpuAffinity(handle, num_elements):
+            # assume nvml returns list of 64 bit ints
+            affinity_string = f"{j:064b}{affinity_string}"
+        affinity_list = [int(x) for x in affinity_string]
+        affinity_list.reverse()  # so core 0 is the 0th element
+        affinity_to_set = set([i for i, e in enumerate(affinity_list) if e != 0])
+        current_affinity = set(os.sched_getaffinity(0))
+        affinity_to_set = affinity_to_set.intersection(current_affinity)
+        if affinity_to_set:
+            os.sched_setaffinity(0, affinity_to_set)
+            if verbose:
+                cpu_cores = os.sched_getaffinity(0)
+                print(f"Assigning {len(cpu_cores)} cpu cores to process {local_rank}: {cpu_cores}")
+        else:
+            print("No affinity available to set!")
