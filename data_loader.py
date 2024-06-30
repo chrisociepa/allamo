@@ -2,7 +2,6 @@ import gc
 import glob
 import logging
 import os
-import random
 import time
 import torch
 from configuration import AllamoConfiguration
@@ -94,8 +93,8 @@ class AllamoDataset:
                     )
                     return False
                 new_data = self.align_data_to_step_size(new_data, self.world_size)
-                self.pad_or_truncate_to_block_size(new_data)
                 new_data = self.limit_samples_to_rank(new_data)
+                self.pad_or_truncate_to_block_size(new_data)
             else:
                 self.logger.info(f"Unsupported format of {load_dataset_file}!")
                 new_data = None
@@ -110,7 +109,7 @@ class AllamoDataset:
     def align_data_to_step_size(self, data, step_size):
         target_length = ((len(data) + step_size - 1) // step_size) * step_size
         padding_length = target_length - len(data)
-        return data + data[:padding_length] if isinstance(data, list) else torch.concat((data, data[:padding_length]))
+        return data.extend(data[:padding_length]) if isinstance(data, list) else torch.concat((data, data[:padding_length]))
         
     def transform_continuous_data_to_samples(self, data):
         return [data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)]
