@@ -272,6 +272,7 @@ class SelfAttentionBlock(nn.Module):
         rotary_emb: RotaryEmbedding,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        **kwargs,
     ):
         x = x + self.attention(self.attention_norm(x), None, rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
         x = x + self.feed_forward(self.ffn_norm(x))

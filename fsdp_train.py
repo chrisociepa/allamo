@@ -140,7 +140,10 @@ class AllamoFSDPTrainer:
         if config.gradient_checkpointing:
             self.fsdp_activation_checkpointing = True
             config.gradient_checkpointing = False # control gradient checkpointing with FSDP 
-            self.logger.info("Deactivated gradient checkpointing at model configuration level. Activated gradient checkpointing at FSDP level.")
+            self.logger.info(
+                "Deactivated gradient checkpointing at the model configuration level. "
+                "Activated gradient checkpointing at the FSDP level."
+            )
         else:
             self.fsdp_activation_checkpointing = False
             
