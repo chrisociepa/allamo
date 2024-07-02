@@ -396,7 +396,7 @@ class AllamoTrainer:
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
                     if batch["target_weights"] is not None:
-                        loss = loss / batch["target_weights"].view(-1).sum()
+                        loss = loss / batch["target_weights"].sum()
                 
                 mfu_excluded_time = time.time()
                 unmasked_labels += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
