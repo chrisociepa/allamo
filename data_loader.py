@@ -94,6 +94,7 @@ class AllamoDataset:
                     self.pad_or_truncate_to_block_size(new_data)
         elif load_dataset_file.endswith('.alm'):
             new_data = joblib.load(load_dataset_file)
+            new_data = self.align_and_limit_to_rank(new_data, load_dataset_file)
         
         if new_data:
             self.data = new_data
@@ -121,7 +122,10 @@ class AllamoDataset:
     def align_data_to_step_size(self, data, step_size):
         target_length = ((len(data) + step_size - 1) // step_size) * step_size
         padding_length = target_length - len(data)
-        return data.extend(data[:padding_length]) if isinstance(data, list) else torch.concat((data, data[:padding_length]))
+        if padding_length > 0:
+            return data.extend(data[:padding_length]) if isinstance(data, list) else torch.concat((data, data[:padding_length]))
+        else:
+            return data
         
     def transform_continuous_data_to_samples(self, data):
         return [data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)]
@@ -327,8 +331,8 @@ class AllamoDataLoader:
         if isinstance(samples[0], dict):
             input_ids = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
             target_ids = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
-            target_weights = torch.stack([sample['target_weights'] for sample in samples]) if self.config.weighted_loss else None
-            attn_mask = torch.stack([sample['attn_mask'] for sample in samples]).to(torch.float32) if 'attn_mask' in samples[0] else None
+            target_weights = torch.stack([sample['target_weights'] for sample in samples]).to(torch.float32) if self.config.weighted_loss else None
+            attn_mask = torch.stack([sample['attn_mask'] for sample in samples]) if 'attn_mask' in samples[0] else None
             input_pos = torch.stack([sample['input_pos'] for sample in samples]) if 'input_pos' in samples[0] else None
         else:
             input_ids = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
