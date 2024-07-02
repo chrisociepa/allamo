@@ -1,6 +1,8 @@
 import gc
 import glob
+import joblib
 import logging
+import numpy as np
 import os
 import time
 import torch
@@ -17,7 +19,9 @@ class AllamoDataset:
         self.sample_size = config.block_size + 1 
         self.ignore_index = config.ignore_index
         self.pad_token_id = config.pad_token_id
+        self.weighted_loss = config.weighted_loss
         self.data = None
+        self.data_in_alm_format = False
         self.dataset_files = self.get_dataset_files(config, train_split)
         self.processed_files = []
         if config.dataset_train_processed_files_count > 0:
@@ -45,7 +49,7 @@ class AllamoDataset:
             return []
     
     def is_file_type_supported(self, dataset_file):
-        return dataset_file.endswith('.bin') or dataset_file.endswith('.pt')
+        return dataset_file.endswith('.bin') or dataset_file.endswith('.pt') or dataset_file.endswith('.alm')
     
     def load_next_dataset(self):
         self.data = None
@@ -60,7 +64,6 @@ class AllamoDataset:
         self.processed_files.append(load_dataset_file)
         new_data = None
         if load_dataset_file.endswith('.bin'):
-            import numpy as np
             step_size = self.world_size * self.sample_size
             new_data = torch.from_numpy(np.fromfile(load_dataset_file, dtype=np.uint16).astype(np.int16))
             if step_size > len(new_data):
@@ -85,26 +88,35 @@ class AllamoDataset:
                 new_data = self.align_data_to_step_size(new_data, step_size)
                 new_data = self.transform_continuous_data_to_samples(new_data)
                 new_data = self.limit_samples_to_rank(new_data)
-            elif isinstance(new_data, list):
-                if self.world_size > len(new_data):
-                    self.logger.warning(
-                        f"Dataset file {load_dataset_file} does not have enough data and will be ignored. "
-                        f"Expected at least {self.world_size} samples but found only {len(new_data)}"
-                    )
-                    return False
-                new_data = self.align_data_to_step_size(new_data, self.world_size)
-                new_data = self.limit_samples_to_rank(new_data)
-                self.pad_or_truncate_to_block_size(new_data)
             else:
-                self.logger.info(f"Unsupported format of {load_dataset_file}!")
-                new_data = None
-                
+                new_data = self.align_and_limit_to_rank(new_data, load_dataset_file)
+                if new_data:
+                    self.pad_or_truncate_to_block_size(new_data)
+        elif load_dataset_file.endswith('.alm'):
+            new_data = joblib.load(load_dataset_file)
+        
         if new_data:
             self.data = new_data
+            self.data_in_alm_format = load_dataset_file.endswith('.alm')
             self.logger.info(f"New dataset file {load_dataset_file} loaded. Processed files: {len(self.processed_files)}")
             return True
         else:
             return False
+        
+    def align_and_limit_to_rank(self, new_data, load_dataset_file):
+        if isinstance(new_data, list):
+            if self.world_size > len(new_data):
+                self.logger.warning(
+                    f"Dataset file {load_dataset_file} does not have enough data and will be ignored. "
+                    f"Expected at least {self.world_size} samples but found only {len(new_data)}"
+                )
+                return None
+            new_data = self.align_data_to_step_size(new_data, self.world_size)
+            new_data = self.limit_samples_to_rank(new_data)
+        else:
+            self.logger.info(f"Unsupported format of {load_dataset_file}!")
+            new_data = None
+        return new_data
     
     def align_data_to_step_size(self, data, step_size):
         target_length = ((len(data) + step_size - 1) // step_size) * step_size
@@ -124,11 +136,21 @@ class AllamoDataset:
         for idx in range(len(data)):
             if isinstance(data[idx], dict):
                 if 'input_ids' not in data[idx]:
-                    raise Exception(f"'input_id' field not found in sample! Available keys: {', '.join(data[idx].keys())}")
+                    raise Exception(f"'input_ids' field not found in sample! Available keys: {', '.join(data[idx].keys())}")
+                elif isinstance(data[idx]['input_ids'], np.ndarray):
+                    data[idx]['input_ids'] = torch.from_numpy(data[idx]['input_ids'])
                 if 'target_ids' not in data[idx]:
                     data[idx]['target_ids'] = data[idx]['input_ids'][1:]
-                if 'target_weights' not in data[idx]:
-                    data[idx]['target_weights'] = torch.where(data[idx]['target_ids'] == self.ignore_index, 0, 1)
+                elif isinstance(data[idx]['target_ids'], np.ndarray):
+                    data[idx]['target_ids'] = torch.from_numpy(data[idx]['target_ids'])
+                
+                if self.weighted_loss:
+                    if 'target_weights' not in data[idx]:
+                        data[idx]['target_weights'] = torch.where(data[idx]['target_ids'] == self.ignore_index, 0, 1)
+                    elif isinstance(data[idx]['target_weights'], np.ndarray):
+                        data[idx]['target_weights'] = torch.from_numpy(data[idx]['target_weights'])
+                elif 'target_weights' in data[idx]:
+                    del data[idx]['target_weights']
                     
                 if len(data[idx]['input_ids']) >= self.sample_size: # block_size = sample_size - 1
                     data[idx]['input_ids'] = data[idx]['input_ids'][:self.sample_size-1]
@@ -141,24 +163,17 @@ class AllamoDataset:
                 elif self.pad_token_id >= 0 and len(data[idx]['target_ids']) < self.sample_size-1:
                     padding = self.sample_size - 1 - len(data[idx]['target_ids'])
                     data[idx]['target_ids'] = torch.cat([data[idx]['target_ids'], torch.full((padding,), self.ignore_index)], dim=0)
-                    
-                if len(data[idx]['target_weights']) >= self.sample_size:
-                    data[idx]['target_weights'] = data[idx]['target_weights'][:self.sample_size-1]
-                elif self.pad_token_id >= 0 and len(data[idx]['target_weights']) < self.sample_size-1:
-                    padding = self.sample_size - 1 - len(data[idx]['target_weights'])
-                    data[idx]['target_weights'] = torch.cat([data[idx]['target_weights'], torch.full((padding,), 0)], dim=0)
                 
-                if 'target_mask' in data[idx]:
-                    if len(data[idx]['target_mask']) >= self.sample_size:
-                        data[idx]['target_mask'] = data[idx]['target_mask'][:self.sample_size-1]
-                    elif self.pad_token_id >= 0 and len(data[idx]['target_mask']) < self.sample_size-1:
-                        padding_value = False if isinstance(data[idx]['target_mask'][0].item(), bool) else 0
-                        padding = self.sample_size - 1 - len(data[idx]['target_mask'])
-                        data[idx]['target_mask'] = torch.cat([data[idx]['target_mask'], torch.full((padding,), padding_value)], dim=0)
-                    data[idx]['target_ids'] = data[idx]['target_ids'].masked_fill(data[idx]['target_mask'] == 0, self.ignore_index)
-                    data[idx]['target_weights'] = data[idx]['target_weights'].masked_fill(data[idx]['target_mask'] == 0, 0)
-                    del data[idx]['target_mask']
+                if self.weighted_loss:
+                    if len(data[idx]['target_weights']) >= self.sample_size:
+                        data[idx]['target_weights'] = data[idx]['target_weights'][:self.sample_size-1]
+                    elif self.pad_token_id >= 0 and len(data[idx]['target_weights']) < self.sample_size-1:
+                        padding = self.sample_size - 1 - len(data[idx]['target_weights'])
+                        data[idx]['target_weights'] = torch.cat([data[idx]['target_weights'], torch.full((padding,), 0)], dim=0)
+                
                 assert len(data[idx]['input_ids']) == len(data[idx]['target_ids'])
+                if self.weighted_loss:
+                    assert len(data[idx]['input_ids']) == len(data[idx]['target_weights'])
             else:
                 if len(data[idx]) > self.sample_size:
                     data[idx] = data[idx][:self.sample_size]
@@ -178,16 +193,69 @@ class AllamoDataset:
     def has_data(self):
         return self.data and len(self.data) > 0
     
+    def prepare_alm_sample(self, sample):
+        input_ids = torch.from_numpy(sample['input_ids'])
+        padding = 0
+        if self.pad_token_id >= 0 and len(input_ids) < self.sample_size:
+            padding = self.sample_size - len(input_ids)
+            input_ids = torch.cat([input_ids, torch.full((padding,), self.ignore_index)], dim=0)
+        result = {'input_ids': input_ids[:-1], 'target_ids': input_ids[1:]}
+        
+        if self.weighted_loss:
+            assert 'target_weights' in sample
+            target_weights = torch.from_numpy(sample['target_weights'])
+            if padding > 0:
+                target_weights = torch.cat([target_weights, torch.full((padding,), 0.0)], dim=0)
+            result['target_weights'] = target_weights[1:]
+        
+        if "seq_lens" in sample:
+            last_seq_len_in_sample_idx = len(sample["seq_lens"]) - 1
+            total_seq_len = 0
+            block_attn_masks = []
+            sample_input_pos = []
+            max_seq_len = self.sample_size - 1
+            for i, seq_len in enumerate(sample["seq_lens"]):
+                if i == last_seq_len_in_sample_idx:
+                    seq_len -= 1 # b/c sample_size=block_size+1
+                
+                sample_input_pos.extend(list(range(seq_len)))
+                total_seq_len += seq_len
+                
+                # append lower triangular matrix for causal mask
+                block_attn_masks.append(
+                    torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+                )
+    
+                if i == last_seq_len_in_sample_idx and total_seq_len < max_seq_len:
+                    new_pos = sample_input_pos[-1] + 1
+                    num_pad = max_seq_len - total_seq_len
+                    sample_input_pos.extend(
+                        list(
+                            range(new_pos, new_pos + num_pad)
+                        )
+                    )
+                    block_attn_masks.append(
+                        torch.eye(num_pad, num_pad, dtype=torch.bool)
+                    )
+            result['input_pos'] = torch.tensor(sample_input_pos)
+            result['attn_mask'] = torch.block_diag(*block_attn_masks)
+        return result
+    
     def __len__(self):
         """ Size of currently loaded dataset file """
         return len(self.data) if self.data else 0
         
     def __getitem__(self, idx):
+        result = None
         if isinstance(idx, slice):
-            return self.data[idx]
-        if idx < self.__len__():
-            return self.data[idx]
-        return None
+            result = self.data[idx]
+            if self.data_in_alm_format:
+                result = list(self.prepare_alm_sample(s) for s in result)
+        elif idx < self.__len__():
+            result = self.data[idx]
+            if self.data_in_alm_format:
+                result = self.prepare_alm_sample(result)
+        return result
         
 
 class AllamoDataLoader:
@@ -257,29 +325,42 @@ class AllamoDataLoader:
             samples = [dataset[i] for i in idx_batch]
             
         if isinstance(samples[0], dict):
-            x = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
-            y = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
-            w = torch.stack([sample['target_weights'] for sample in samples]).to(torch.int64) if self.config.weighted_loss else None
+            input_ids = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
+            target_ids = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
+            target_weights = torch.stack([sample['target_weights'] for sample in samples]) if self.config.weighted_loss else None
+            attn_mask = torch.stack([sample['attn_mask'] for sample in samples]) if 'attn_mask' in samples[0] else None
+            input_pos = torch.stack([sample['input_pos'] for sample in samples]) if 'input_pos' in samples[0] else None
         else:
-            x = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
-            y = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
-            w = None
+            input_ids = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
+            target_ids = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
+            target_weights = None
+            attn_mask = None
+            input_pos = None
         
         if 'cuda' in self.config.device and self.pin_memory:
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(self.config.device, non_blocking=True), y.pin_memory().to(self.config.device, non_blocking=True)
-            if w is not None:
-                w = w.pin_memory().to(self.config.device, non_blocking=True)
+            input_ids = input_ids.pin_memory().to(self.config.device, non_blocking=True)
+            target_ids = target_ids.pin_memory().to(self.config.device, non_blocking=True)
+            if target_weights is not None:
+                target_weights = target_weights.pin_memory().to(self.config.device, non_blocking=True)
+            if attn_mask is not None and input_pos is not None:
+                attn_mask = attn_mask.pin_memory().to(self.config.device, non_blocking=True)
+                input_pos = input_pos.pin_memory().to(self.config.device, non_blocking=True)
         else:
-            x, y = x.to(self.config.device), y.to(self.config.device)
-            if w is not None:
-                w = w.to(self.config.device)
+            input_ids = input_ids.to(self.config.device)
+            target_ids = target_ids.to(self.config.device)
+            if target_weights is not None:
+                target_weights = target_weights.to(self.config.device)
+            if attn_mask is not None and input_pos is not None:
+                attn_mask = attn_mask.to(self.config.device)
+                input_pos = input_pos.to(self.config.device)
         return {
-            "input_ids": x,
-            "target_ids": y,
-            "target_weights": w
+            "input_ids": input_ids,
+            "target_ids": target_ids,
+            "target_weights": target_weights,
+            "attn_mask": attn_mask,
+            "input_pos": input_pos
         }
-        
+    
     def reload_dataset(self, dataset):
         if len(dataset.dataset_files) > 1:
             if dataset.load_next_dataset():

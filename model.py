@@ -78,9 +78,8 @@ class RotaryEmbedding(torch.nn.Module):
         self.build_rope_cache(self.max_seq_len)
         
     def build_rope_cache(self, max_seq_len: int = 4096) -> None:
-        t = torch.arange(max_seq_len, dtype=self.inv_freq.dtype, device=self.inv_freq.device)
+        t = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=torch.int64).type_as(self.inv_freq)
         freqs = torch.outer(t, self.inv_freq).float()
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
@@ -97,10 +96,10 @@ class RotaryEmbedding(torch.nn.Module):
         k = k.float()
         if input_pos is None:
             cos = self.cos_cached[None, None, :q.size(2), ...]
-            sin = self.sin_cached[None, None, :k.size(2), ...]
+            sin = self.sin_cached[None, None, :q.size(2), ...]
         else:
-            cos = self.cos_cached[None, None, input_pos, ...]
-            sin = self.sin_cached[None, None, input_pos, ...]
+            cos = self.cos_cached[input_pos].unsqueeze(1)
+            sin = self.sin_cached[input_pos].unsqueeze(1)
         
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
         k_out = (k * cos) + (self.__rotate_half(k) * sin)

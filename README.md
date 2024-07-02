@@ -22,6 +22,7 @@ Dependencies:
 
 - Python 3.8+
 - [pytorch](https://pytorch.org) - PyTorch 2 is highly recommended
+- [joblib](https://joblib.readthedocs.io)
 - [numpy](https://numpy.org/install/)
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation)
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
