@@ -100,6 +100,7 @@ class AllamoDataset:
             self.data = new_data
             self.data_in_alm_format = load_dataset_file.endswith('.alm')
             self.logger.info(f"New dataset file {load_dataset_file} loaded. Processed files: {len(self.processed_files)}")
+            gc.collect()
             return True
         else:
             return False
@@ -123,11 +124,14 @@ class AllamoDataset:
         target_length = ((len(data) + step_size - 1) // step_size) * step_size
         padding_length = target_length - len(data)
         if padding_length > 0:
-            self.logger.info(f"Padding data length: {padding_length}")
+            pre_size = len(data)
             if isinstance(data, list):
                 data.extend(data[:padding_length])
             else:
                 data = torch.concat((data, data[:padding_length]))
+            self.logger.info(f"Data aligned. Pre-alignment size: {pre_size}, "
+                             f"post-alignment size: {len(data)}, "
+                             f"padding added: {padding_length}")
         return data
         
     def transform_continuous_data_to_samples(self, data):
