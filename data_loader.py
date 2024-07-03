@@ -205,19 +205,37 @@ class AllamoDataset:
         return self.data and len(self.data) > 0
     
     def prepare_alm_sample(self, sample):
-        input_ids = torch.from_numpy(sample['input_ids'])
+        """
+        Assumes input sample contains at least 'input_ids' field. 'target_ids' are obtained
+        by shifting 'input_ids' one token to the right. If 'target_weights' field is present, 
+        it's used to mask tokens in 'target_ids' (for weights of 0).
+        When the weighted loss is active, 'target_weights' field is required.
+        """
+        sample_ids = torch.from_numpy(sample['input_ids'])
+        result = {}
         padding = 0
-        if self.pad_token_id >= 0 and len(input_ids) < self.sample_size:
-            padding = self.sample_size - len(input_ids)
-            input_ids = torch.cat([input_ids, torch.full((padding,), self.ignore_index)], dim=0)
-        result = {'input_ids': input_ids[:-1], 'target_ids': input_ids[1:]}
+        if self.pad_token_id >= 0 and len(sample_ids) < self.sample_size:
+            padding = self.sample_size - len(sample_ids)
+            if padding > 1:
+                result['input_ids'] = torch.cat([sample_ids, torch.full((padding-1,), self.pad_token_id)], dim=0)
+            else:
+                result['input_ids'] = sample_ids
+            result['target_ids'] = torch.cat([sample_ids[1:], torch.full((padding,), self.ignore_index)], dim=0)
+        else:
+            result['input_ids'] = sample_ids[:-1]
+            result['target_ids'] = sample_ids[1:]
         
-        if self.weighted_loss:
-            assert 'target_weights' in sample
+        if 'target_weights' in sample:
             target_weights = torch.from_numpy(sample['target_weights'])
             if padding > 0:
-                target_weights = torch.cat([target_weights, torch.full((padding,), 0.0)], dim=0)
-            result['target_weights'] = target_weights[1:]
+                target_weights = torch.cat([target_weights[1:], torch.full((padding,), 0.0)], dim=0)
+            else:
+                target_weights = target_weights[1:] # aligned to input_ids
+            result['target_ids'] = result['target_ids'].masked_fill(target_weights == 0, self.ignore_index)
+            if self.weighted_loss:
+                result['target_weights'] = target_weights
+        else:
+            assert not self.weighted_loss, "target_weights not provided"
         
         if "seq_lens" in sample:
             last_seq_len_in_sample_idx = len(sample["seq_lens"]) - 1
