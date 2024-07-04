@@ -443,10 +443,13 @@ class AllamoFSDPTrainer:
                 if self.gradient_accumulation_steps > 1:
                     loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
                 if batch["target_weights"] is not None:
-                    fsdp_loss_weight_acc = batch["target_weights"].sum()
-                    # sum loss weights over all processes
-                    dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
-                    loss = (self.world_size / fsdp_loss_weight_acc) * loss
+                    if self.config.weighted_loss_method == 'openchat':
+                        fsdp_loss_weight_acc = batch["target_weights"].sum()
+                        # sum loss weights over all processes
+                        dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
+                        loss = (self.world_size / fsdp_loss_weight_acc) * loss
+                    else:
+                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
 
                 mfu_excluded_time = time.time()
                 unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
