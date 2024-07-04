@@ -22,6 +22,7 @@ class AllamoConfiguration:
     ignore_last_checkpoint_backup: bool = False
     checkpoint_interval: int = 1000
     save_optimizer_checkpoint: bool = True
+    optimizer_checkpoint_interval: int = None
     save_best_checkpoint: bool = True
     eval_interval: int = 1000
     eval_iters: int = 200
@@ -118,6 +119,7 @@ class AllamoConfiguration:
         parser.add_argument('--ignore_last_checkpoint_backup', type=bool, help='Ignores preserving a copy of the last checkpoint version by overwriting it')
         parser.add_argument('--checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the model is saved')
         parser.add_argument('--save_optimizer_checkpoint', type=bool, help='Enable saving optimizer checkpoint')
+        parser.add_argument('--optimizer_checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the optimizer is saved. The same as checkpoint_interval, if not specified')
         parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')

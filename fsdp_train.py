@@ -7,15 +7,12 @@ import json
 import os
 import time
 import math
-import pickle
-import random
 import logging
 import datetime
 import dataclasses
+import shutil
 import uuid
-from contextlib import nullcontext
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import functools
@@ -285,14 +282,14 @@ class AllamoFSDPTrainer:
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
             full_msd = self.model.state_dict()
         if self.master_process:
-            ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+            model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
+            self.logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            torch.save(full_msd, ckpt_file_path)
+                rename_file_to_prev_version(model_ckpt_file_path)
+            torch.save(full_msd, model_ckpt_file_path)
             del full_msd
             
-            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
+            md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
             
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
@@ -313,24 +310,30 @@ class AllamoFSDPTrainer:
                 checkpoint['checkpoint_md5sum'] = md5sum
                 self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
                 
-            ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
+            config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
+            self.logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            with open(ckpt_file_path, "w", encoding="utf-8") as f:
+                rename_file_to_prev_version(config_ckpt_file_path)
+            with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        if self.config.save_optimizer_checkpoint and model_only == False:
+        if self.config.save_optimizer_checkpoint and model_only == False and \
+            (self.config.optimizer_checkpoint_interval is None or \
+             self.iter_num % self.config.optimizer_checkpoint_interval == 0):
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.master_process:
-                ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-                self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                self.logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
                 if not self.config.ignore_last_checkpoint_backup:
-                    rename_file_to_prev_version(ckpt_file_path)
-                torch.save(full_osd, ckpt_file_path)
+                    rename_file_to_prev_version(optim_ckpt_file_path)
+                torch.save(full_osd, optim_ckpt_file_path)
                 self.logger.info(f"checkpoint files saved in {config.out_dir}")
                 del full_osd
+                
+                if self.config.optimizer_checkpoint_interval is not None:
+                    shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
+                    shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
             
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
