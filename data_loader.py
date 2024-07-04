@@ -244,7 +244,7 @@ class AllamoDataset:
             sample_input_pos = []
             max_seq_len = self.sample_size - 1
             for i, seq_len in enumerate(sample["seq_lens"]):
-                if i == last_seq_len_in_sample_idx:
+                if i == last_seq_len_in_sample_idx and padding == 0:
                     seq_len -= 1 # b/c sample_size=block_size+1
                 
                 sample_input_pos.extend(list(range(seq_len)))
