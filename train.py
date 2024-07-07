@@ -385,6 +385,7 @@ class AllamoTrainer:
             
             accuracy = 0
             unmasked_labels = 0
+            grad_norm = 0
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -424,7 +425,7 @@ class AllamoTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
             
             mfu_excluded_time = time.time()
             # we can't count it precisely in DDP, so let's approximate
@@ -470,17 +471,18 @@ class AllamoTrainer:
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
-                        "train/iter_time": iter_time_ms,
                         "train/loss": lossf,
-                        "train/ppl": ppl,
                         "train/acc": accuracy,
+                        "train/ppl": ppl,
+                        "train/grad_norm": grad_norm,
                         "train/lr": lr,
-                        "train/tokens": self.processed_tokens,
+                        "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
                         "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/tokens": self.processed_tokens,
+                        "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
-                        "train/mtu": mtu,
-                        "train/epoch": self.data_loader.epoch
+                        "train/iter_time": iter_time_ms,
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu

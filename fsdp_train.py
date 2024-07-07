@@ -365,7 +365,7 @@ class AllamoFSDPTrainer:
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
-        fsdp_loss_acc = torch.zeros(4).to(self.config.device)
+        fsdp_loss_acc = torch.zeros(5).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
@@ -470,7 +470,7 @@ class AllamoFSDPTrainer:
                 
             # clip the gradient
             if self.config.grad_clip != 0.0:
-                self.model.clip_grad_norm_(self.config.grad_clip)
+                fsdp_loss_acc[4] += self.model.clip_grad_norm_(self.config.grad_clip).item()
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
@@ -500,6 +500,7 @@ class AllamoFSDPTrainer:
                 lossf = fsdp_loss_acc[0].item() / self.world_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = fsdp_loss_acc[2].item() / fsdp_loss_acc[3].item()
+                grad_norm = fsdp_loss_acc[4].item() / self.world_size
                 if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
@@ -517,17 +518,18 @@ class AllamoFSDPTrainer:
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
-                        "train/iter_time": iter_time_ms,
                         "train/loss": lossf,
-                        "train/ppl": ppl,
                         "train/acc": accuracy,
+                        "train/ppl": ppl,
+                        "train/grad_norm": grad_norm,
                         "train/lr": lr,
-                        "train/tokens": self.processed_tokens,
+                        "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
                         "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/tokens": self.processed_tokens,
+                        "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
-                        "train/mtu": mtu,
-                        "train/epoch": self.data_loader.epoch
+                        "train/iter_time": iter_time_ms,
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
