@@ -199,7 +199,7 @@ class AllamoDataset:
                     data[idx] = {'input_ids': input_ids, 'target_ids': target_ids, 'target_weights': target_weights}
         
     def limit_samples_to_rank(self, samples):
-        return samples[self.rank::self.world_size] if self.world_size > 1 else samples
+        return list(s for s in samples[self.rank::self.world_size]) if self.world_size > 1 else samples
         
     def has_data(self):
         return self.data and len(self.data) > 0
