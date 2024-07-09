@@ -358,7 +358,7 @@ class AllamoFSDPTrainer:
             losses_out['val'] = losses_out['train']
             accuraces['val'] = accuraces['train']
         return losses_out, accuraces
-        
+    
     def train(self):
         self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
         batch = self.data_loader.get_batch('train') # fetch the very first batch
@@ -374,6 +374,8 @@ class AllamoFSDPTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+            elif self.config.should_override_config(self.iter_num):
+                self.config.override_config_properties()
             
             timer = time.time()
             lr = get_lr(self.iter_num, self.config)

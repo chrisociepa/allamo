@@ -2,10 +2,14 @@
 This file contains the full configuration and helps with its management.
 """
 
-import time
-import json
 import argparse
+import json
+import logging
+import os
+import time
 from dataclasses import dataclass
+
+logger = logging.getLogger("AllamoConfiguration")
 
 @dataclass
 class AllamoConfiguration:
@@ -24,6 +28,8 @@ class AllamoConfiguration:
     save_optimizer_checkpoint: bool = True
     optimizer_checkpoint_interval: int = None
     save_best_checkpoint: bool = True
+    config_override_check_interval: int = None
+    config_override_path: str = None
     eval_interval: int = 1000
     eval_iters: int = 200
     eval_only: bool = False
@@ -121,6 +127,8 @@ class AllamoConfiguration:
         parser.add_argument('--save_optimizer_checkpoint', type=bool, help='Enable saving optimizer checkpoint')
         parser.add_argument('--optimizer_checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the optimizer is saved. The same as checkpoint_interval, if not specified')
         parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
+        parser.add_argument('--config_override_check_interval', type=int, help='Number of iterations for checking override configuration. Feature disabled if not specified.')
+        parser.add_argument('--config_override_path', type=str, help='Specifies the location of the configuration override file')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
         parser.add_argument('--eval_only', type=bool, help='Exit right after the first evaluation. Indicates no training.')
@@ -199,11 +207,34 @@ class AllamoConfiguration:
         if args.config:
             with open(args.config) as f:
                 config = json.load(f)
-            for k, v in config.items():
-                if hasattr(self, k):
-                    setattr(self, k, v)
+            self.override_values(config)
 
         for arg_name, arg_value in vars(args).items():
             if arg_value is not None and hasattr(self, arg_name):
                 setattr(self, arg_name, arg_value)
 
+    def override_values(self, config_dict):
+        modified = {}
+        for k, v in config_dict.items():
+            if hasattr(self, k) and getattr(self, k) != v:
+                modified[k] = {"prev": getattr(self, k), "curr": v}
+                setattr(self, k, v)
+        return modified
+    
+    def should_override_config(self, iter_num):
+        return self.config_override_check_interval is not None and \
+            self.config_override_path is not None and \
+            self.config_override_check_interval > 0 and \
+            iter_num % self.config_override_check_interval == 0
+            
+    def override_config_properties(self):
+        if os.path.exists(self.config_override_path):
+            try:
+                with open(self.config_override_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                modified = self.override_values(config)
+                if modified:
+                    logger.info(f"The following config properties were overridden: {modified}")
+            except Exception as err:
+                logger.warning(f"Unable to load override config. Error: {err}")
+        

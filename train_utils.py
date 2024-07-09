@@ -1,10 +1,13 @@
 import datetime
 import hashlib
+import logging
 import math
 import os
 import subprocess
 import torch
 from typing import Optional
+
+logger = logging.getLogger("AllamoTrainUtils")
 
 def rename_file_to_prev_version(file_path):
     if os.path.exists(file_path):

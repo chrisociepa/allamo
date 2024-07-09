@@ -318,6 +318,8 @@ class AllamoTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+            elif self.config.should_override_config(self.iter_num):
+                self.config.override_config_properties()
             
             timer = time.time()
             log_iter = (self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process)
