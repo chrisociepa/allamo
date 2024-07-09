@@ -272,7 +272,7 @@ if __name__ == "__main__":
                 
                 f.write(json.dumps(new_sample, ensure_ascii=False))
                 f.write('\n')
-        logger.info(f"Samples saved in {samples_file:,}")
+        logger.info(f"Samples saved in {samples_file}")
 
     if args.num_output_files > 1:
         for i in tqdm(range(args.num_output_files), desc="Saving", disable=(not args.verbose)):
