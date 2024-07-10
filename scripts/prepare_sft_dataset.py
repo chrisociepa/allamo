@@ -128,7 +128,7 @@ def tokenize_conversation(data, tokenizer, chat_format):
         raise Exception(f"Unsupported chat format: {chat_format}")
 
 def process_chunk(args):
-    chunk_file, pack, tokenizer_path, chat_format, max_sample_size = args
+    chunk_file, pack, tokenizer_path, chat_format, max_sample_size, min_positive_weights = args
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     data_dtype = np.int16 if len(tokenizer) < 32767 else np.int32
     truncated = 0
@@ -179,7 +179,10 @@ def process_chunk(args):
                 if "target_weights" in instructions_buffer:
                     instructions_buffer["target_weights"] = np.concatenate((instructions_buffer["target_weights"], instruction["target_weights"]))
                 instructions_buffer["seq_lens"].append(len(instruction["input_ids"]))
-            packed_data.append(instructions_buffer)
+            if 'target_weights' not in instructions_buffer or sum(1 for w in instructions_buffer['target_weights'] if w > MIN_WEIGHT) > min_positive_weights:
+                packed_data.append(instructions_buffer)
+            else:
+                rejected += 1
         data = packed_data
         packed = len(packed_data)
     
@@ -220,6 +223,7 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--max_workers", type=int, default=20, help="The max number of processes")
     parser.add_argument("-b", "--block_size", type=int, default=4096, help="Block/context size")
     parser.add_argument('--chat_format', type=str, choices=['OpenChatML', 'llama2'], default='OpenChatML', help='Chat format')
+    parser.add_argument("--min_positive_weights", type=int, default=1, help="Minimum number of positive target weights required for a sample to be included in training")
     parser.add_argument("--chunk_size", type=int, default=100000, help="Chunk size")
     parser.add_argument('--save_samples', action='store_true', help='Save some samples')
     parser.add_argument('--pack', action='store_true', help='Pack')
@@ -281,7 +285,7 @@ if __name__ == "__main__":
     logger.info(f"Tokenizing {len(chunk_files)} files")
     processed_chunk_stats = []
     max_workers = min(len(chunk_files), args.max_workers)
-    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, args.chat_format, max_sample_size) for chunk_file in chunk_files)
+    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, args.chat_format, max_sample_size, args.min_positive_weights) for chunk_file in chunk_files)
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         for result in tqdm(executor.map(process_chunk, chunk_batches), total=len(chunk_batches), desc="Tokenizing", disable=(not args.verbose)):
             processed_chunk_stats.append(result)
