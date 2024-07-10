@@ -3,7 +3,7 @@ Use this file to create a dataset for Supervised Fine-Tuning (SFT) training
 
 The script performs the following steps:
 1. Reads the input JSONL file with dialogues (single or multi-turn)
-2. Applies the OpenChatML chat template to each dialogue
+2. Applies the OpenChatML or Llama2 chat template to each dialogue
 3. Tokenizes the formatted dialogues
 4. Generates token weights
 5. Optionally packs dialogues to maximize GPU utilization
@@ -44,7 +44,7 @@ logger = logging.getLogger()
 
 MIN_WEIGHT = 0.001
 
-def tokenize_conversation(data, tokenizer):
+def tokenize_openchatml_conversation(data, tokenizer):
     conversation = data["messages"]
     weight = data["weight"]
     result = {'input_ids': []}
@@ -84,8 +84,51 @@ def tokenize_conversation(data, tokenizer):
         assert len(result['input_ids']) == len(result['target_weights'])
     return result
 
+def tokenize_llama2_conversation(data, tokenizer):
+    conversation = data["messages"]
+    weight = data["weight"]
+    result = {'input_ids': []}
+    if weight > MIN_WEIGHT:
+        result['target_weights'] = []
+        
+    if conversation[0]['role'] == 'system':
+        sys_message = f"<<SYS>>\n{conversation[0]['content']}\n<</SYS>>\n\n"
+        conversation = conversation[1:]
+    else:
+        sys_message = ''
+        
+    for idx, entry in enumerate(conversation):
+        if entry['role'] == 'user':
+            content = '<s>[INST] '+sys_message if idx <= 1 else '[INST] '
+            content += entry['content'] + ' [/INST]'
+            input_ids = tokenizer.encode(content, add_special_tokens=False)
+            result['input_ids'].extend(input_ids)
+            if weight > 0:
+                result['target_weights'].extend(
+                    list(0.0 for _ in range(len(input_ids)))
+                )
+        elif entry['role'] == 'assistant':
+            content = ' ' + entry['content'] + '</s>'
+            input_ids = tokenizer.encode(content, add_special_tokens=False)
+            result['input_ids'].extend(input_ids)
+            if weight > 0:
+                result['target_weights'].extend(
+                    list(weight for _ in range(len(input_ids)))
+                )
+    if weight > 0:
+        assert len(result['input_ids']) == len(result['target_weights'])
+    return result
+
+def tokenize_conversation(data, tokenizer, chat_format):
+    if chat_format == 'OpenChatML':
+        return tokenize_openchatml_conversation(data, tokenizer)
+    elif chat_format == 'llama2':
+        return tokenize_llama2_conversation(data, tokenizer)
+    else:
+        raise Exception(f"Unsupported chat format: {chat_format}")
+
 def process_chunk(args):
-    chunk_file, pack, tokenizer_path, max_sample_size = args
+    chunk_file, pack, tokenizer_path, chat_format, max_sample_size = args
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     data_dtype = np.int16 if len(tokenizer) < 32767 else np.int32
     truncated = 0
@@ -103,7 +146,7 @@ def process_chunk(args):
             sample = tokenize_conversation({
                 "messages": messages['messages'], 
                 "weight": float(cols[0])
-            }, tokenizer)
+            }, tokenizer, chat_format)
             
             is_truncated = False
             input_ids_len = len(sample['input_ids'])
@@ -176,6 +219,7 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--default_weight", type=float, default=-1, help="Default weight for input files")
     parser.add_argument("-p", "--max_workers", type=int, default=20, help="The max number of processes")
     parser.add_argument("-b", "--block_size", type=int, default=4096, help="Block/context size")
+    parser.add_argument('--chat_format', type=str, choices=['OpenChatML', 'llama2'], default='OpenChatML', help='Chat format')
     parser.add_argument("--chunk_size", type=int, default=100000, help="Chunk size")
     parser.add_argument('--save_samples', action='store_true', help='Save some samples')
     parser.add_argument('--pack', action='store_true', help='Pack')
@@ -185,6 +229,8 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    logger.info(f"Loaded tokenizer with vocab size {len(tokenizer)}")
+    logger.info(f"Active chat template type: {args.chat_format}")
 
     timer = time.time()
     max_sample_size = args.block_size + 1
@@ -235,7 +281,7 @@ if __name__ == "__main__":
     logger.info(f"Tokenizing {len(chunk_files)} files")
     processed_chunk_stats = []
     max_workers = min(len(chunk_files), args.max_workers)
-    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, max_sample_size) for chunk_file in chunk_files)
+    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, args.chat_format, max_sample_size) for chunk_file in chunk_files)
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         for result in tqdm(executor.map(process_chunk, chunk_batches), total=len(chunk_batches), desc="Tokenizing", disable=(not args.verbose)):
             processed_chunk_stats.append(result)
