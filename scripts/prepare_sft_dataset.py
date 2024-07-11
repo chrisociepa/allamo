@@ -210,8 +210,10 @@ def process_chunk(args):
             else:
                 assert len(sample["input_ids"]) == max_sample_size
                 assert len(sample["target_ids"]) == max_sample_size
-                assert len(sample["target_weights"]) == max_sample_size
-                assert sum(sample["seq_lens"]) == max_sample_size
+                if "target_weights" in sample:
+                    assert len(sample["target_weights"]) == max_sample_size
+                if "seq_lens" in sample:
+                    assert sum(sample["seq_lens"]) == max_sample_size
                 sample["input_ids"] = np.array(sample["input_ids"][:-1], dtype=data_dtype)
                 sample["target_ids"] = np.array(sample["target_ids"][1:], dtype=data_dtype)
                 if "target_weights" in sample:
