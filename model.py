@@ -84,7 +84,6 @@ class RotaryEmbedding(torch.nn.Module):
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
     
-    @torch.no_grad()
     def forward(self,
         q: torch.Tensor,
         k: torch.Tensor,
