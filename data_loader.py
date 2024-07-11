@@ -6,6 +6,7 @@ import numpy as np
 import os
 import time
 import torch
+import torch.nn.functional as F
 from configuration import AllamoConfiguration
 
 class AllamoDataset:
@@ -16,6 +17,7 @@ class AllamoDataset:
         self.rank = rank
         self.world_size = world_size
         self.data_dir = config.data_dir
+        self.block_size = config.block_size
         self.sample_size = config.block_size + 1 
         self.ignore_index = config.ignore_index
         self.pad_token_id = config.pad_token_id
@@ -206,66 +208,44 @@ class AllamoDataset:
     
     def prepare_alm_sample(self, sample):
         """
-        Assumes input sample contains at least 'input_ids' field. 'target_ids' are obtained
-        by shifting 'input_ids' one token to the right. If 'target_weights' field is present, 
-        it's used to mask tokens in 'target_ids' (for weights of 0).
+        Assumes input sample contains at least 'input_ids' and 'target_ids' fields. 
         When the weighted loss is active, 'target_weights' field is required.
+        When samples are packed, it is assumed that a list of sequence lengths will be available
+        in the "seq_lens" field. This information will be used to create the attention mask.
+        If pad_token_id is set in the configuration, it is assumed that the sample list
+        did not have padding and samples are of length up to block_size.
         """
-        sample_ids = torch.from_numpy(sample['input_ids'])
-        result = {}
-        padding = 0
-        if self.pad_token_id >= 0 and len(sample_ids) < self.sample_size:
-            padding = self.sample_size - len(sample_ids)
-            if padding > 1:
-                result['input_ids'] = torch.cat([sample_ids, torch.full((padding-1,), self.pad_token_id)], dim=0)
-            else:
-                result['input_ids'] = sample_ids
-            result['target_ids'] = torch.cat([sample_ids[1:], torch.full((padding,), self.ignore_index)], dim=0)
-        else:
-            result['input_ids'] = sample_ids[:-1]
-            result['target_ids'] = sample_ids[1:]
+        result = {
+            'input_ids': torch.from_numpy(sample['input_ids']),
+            'target_ids': torch.from_numpy(sample['target_ids'])
+        }
+        if self.weighted_loss:
+            result['target_weights'] = torch.from_numpy(sample['target_weights'])
         
-        if 'target_weights' in sample:
-            target_weights = torch.from_numpy(sample['target_weights'])
-            if padding > 0:
-                target_weights = torch.cat([target_weights[1:], torch.full((padding,), 0.0)], dim=0)
-            else:
-                target_weights = target_weights[1:] # aligned to input_ids
-            result['target_ids'] = result['target_ids'].masked_fill(target_weights == 0, self.ignore_index)
-            if self.weighted_loss:
-                result['target_weights'] = target_weights
-        else:
-            assert not self.weighted_loss, "target_weights not provided"
+        if self.pad_token_id >= 0:
+            if len(result['input_ids']) < self.block_size:
+                result['input_ids'] = F.pad(result['input_ids'], (0, self.block_size - len(result['input_ids'])), value=self.pad_token_id)
+            if len(result['target_ids']) < self.block_size:
+                result['target_ids'] = F.pad(result['target_ids'], (0, self.block_size - len(result['target_ids'])), value=self.ignore_index)
+            if len(result['target_weights']) < self.block_size:
+                result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
-            last_seq_len_in_sample_idx = len(sample["seq_lens"]) - 1
             total_seq_len = 0
             block_attn_masks = []
             sample_input_pos = []
-            max_seq_len = self.sample_size - 1
-            for i, seq_len in enumerate(sample["seq_lens"]):
-                if i == last_seq_len_in_sample_idx and padding == 0:
-                    seq_len -= 1 # b/c sample_size=block_size+1
-                
+            for seq_len in sample["seq_lens"]:
                 sample_input_pos.extend(list(range(seq_len)))
                 total_seq_len += seq_len
                 
                 # append lower triangular matrix for causal mask
-                block_attn_masks.append(
-                    torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
-                )
-    
-                if i == last_seq_len_in_sample_idx and total_seq_len < max_seq_len:
-                    new_pos = sample_input_pos[-1] + 1
-                    num_pad = max_seq_len - total_seq_len
-                    sample_input_pos.extend(
-                        list(
-                            range(new_pos, new_pos + num_pad)
-                        )
-                    )
-                    block_attn_masks.append(
-                        torch.eye(num_pad, num_pad, dtype=torch.bool)
-                    )
+                block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
+                
+            if total_seq_len < self.block_size:
+                new_pos = sample_input_pos[-1] + 1
+                num_pad = self.block_size - total_seq_len
+                sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
+                block_attn_masks.append(torch.eye(num_pad, num_pad, dtype=torch.bool))
             result['input_pos'] = torch.tensor(sample_input_pos)
             result['attn_mask'] = torch.block_diag(*block_attn_masks)
         return result

@@ -44,50 +44,61 @@ logger = logging.getLogger()
 
 MIN_WEIGHT = 0.001
 
-def tokenize_openchatml_conversation(data, tokenizer):
+def tokenize_openchatml_conversation(data, tokenizer, ignore_index):
     conversation = data["messages"]
     weight = data["weight"]
-    result = {'input_ids': []}
+    result = {'input_ids': [], 'target_ids': []}
     if weight > MIN_WEIGHT:
         result['target_weights'] = []
 
     last_idx = len(conversation) - 1
     for idx, entry in enumerate(conversation):
         if entry["role"] == 'assistant':
-            content = '<|im_start|>assistant\n'
-            input_ids = tokenizer.encode(content, add_special_tokens=False)
-            result['input_ids'].extend(input_ids)
-            if weight > 0:
-                result['target_weights'].extend(
-                    list(0.0 for _ in range(len(input_ids)))
-                )
-
+            pre_content = '<|im_start|>assistant\n'
+            pre_input_ids = tokenizer.encode(pre_content, add_special_tokens=False)
+            pre_input_ids_len = len(pre_input_ids)
+            
             content = entry['content'] + '<|im_end|>\n'
             if idx == last_idx:
                 content += "</s>"
-            input_ids = tokenizer.encode(content, add_special_tokens=False)
-            result['input_ids'].extend(input_ids)
-            if weight > 0:
-                result['target_weights'].extend(
-                    list(weight for _ in range(len(input_ids)))
-                )
+            full_input_ids = tokenizer.encode(pre_content + content, add_special_tokens=False)
+            
+            if full_input_ids[:pre_input_ids_len] == pre_input_ids:
+                result['input_ids'].extend(full_input_ids)
+                result['target_ids'].extend(list(
+                    ignore_index if i < pre_input_ids_len else full_input_ids[i] for i in range(len(full_input_ids))
+                ))
+                if weight > 0:
+                    result['target_weights'].extend(list(
+                        0.0 if i < pre_input_ids_len else weight for i in range(len(full_input_ids))
+                    ))
+            else:
+                logger.warning("Tokenization inconsistency detected. Performing separate tokenization")
+                content_input_ids = tokenizer.encode(content, add_special_tokens=False)
+                result['input_ids'].extend(pre_input_ids)
+                result['input_ids'].extend(content_input_ids)
+                result['target_ids'].extend(list(ignore_index for _ in range(pre_input_ids_len)))
+                result['target_ids'].extend(content_input_ids)
+                if weight > 0:
+                    result['target_weights'].extend(list(0.0 for _ in range(pre_input_ids_len)))
+                    result['target_weights'].extend(list(weight for _ in range(len(content_input_ids))))
         else:
             content = "<s><|im_start|>" if idx == 0 else "<|im_start|>"
             content += entry["role"] + '\n' + entry["content"] + '<|im_end|>\n'
             input_ids = tokenizer.encode(content, add_special_tokens=False)
             result['input_ids'].extend(input_ids)
+            result['target_ids'].extend(list(ignore_index for _ in range(len(input_ids))))
             if weight > 0:
-                result['target_weights'].extend(
-                    list(0.0 for _ in range(len(input_ids)))
-                )
+                result['target_weights'].extend(list(0.0 for _ in range(len(input_ids))))
+    assert len(result['input_ids']) == len(result['target_ids'])
     if weight > 0:
         assert len(result['input_ids']) == len(result['target_weights'])
     return result
 
-def tokenize_llama2_conversation(data, tokenizer):
+def tokenize_llama2_conversation(data, tokenizer, ignore_index):
     conversation = data["messages"]
     weight = data["weight"]
-    result = {'input_ids': []}
+    result = {'input_ids': [], 'target_ids': []}
     if weight > MIN_WEIGHT:
         result['target_weights'] = []
         
@@ -103,38 +114,43 @@ def tokenize_llama2_conversation(data, tokenizer):
             content += entry['content'] + ' [/INST]'
             input_ids = tokenizer.encode(content, add_special_tokens=False)
             result['input_ids'].extend(input_ids)
+            result['target_ids'].extend(list(ignore_index for _ in range(len(input_ids))))
             if weight > 0:
-                result['target_weights'].extend(
-                    list(0.0 for _ in range(len(input_ids)))
-                )
+                result['target_weights'].extend(list(0.0 for _ in range(len(input_ids))))
         elif entry['role'] == 'assistant':
             content = ' ' + entry['content'] + '</s>'
             input_ids = tokenizer.encode(content, add_special_tokens=False)
             result['input_ids'].extend(input_ids)
+            result['target_ids'].extend(input_ids)
             if weight > 0:
                 result['target_weights'].extend(
                     list(weight for _ in range(len(input_ids)))
                 )
+    assert len(result['input_ids']) == len(result['target_ids'])
     if weight > 0:
         assert len(result['input_ids']) == len(result['target_weights'])
     return result
 
-def tokenize_conversation(data, tokenizer, chat_format):
+def tokenize_conversation(data, tokenizer, ignore_index, chat_format):
     if chat_format == 'OpenChatML':
-        return tokenize_openchatml_conversation(data, tokenizer)
+        return tokenize_openchatml_conversation(data, tokenizer, ignore_index)
     elif chat_format == 'llama2':
-        return tokenize_llama2_conversation(data, tokenizer)
+        return tokenize_llama2_conversation(data, tokenizer, ignore_index)
     else:
         raise Exception(f"Unsupported chat format: {chat_format}")
+    
+def convert_to_numpy_array(pylist, target_length, pad_token, data_type):
+    padded = np.full(target_length, pad_token, dtype=data_type)
+    padded[:len(pylist)] = pylist
+    return padded
 
 def process_chunk(args):
-    chunk_file, pack, tokenizer_path, chat_format, max_sample_size, min_positive_weights = args
+    chunk_file, pack, tokenizer_path, chat_format, block_size, ignore_index, pad_token_id, min_unmasked_tokens = args
+    max_sample_size = block_size + 1
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     data_dtype = np.int16 if len(tokenizer) < 32767 else np.int32
     truncated = 0
     rejected = 0
-    created = 0
-    packed = 0
     data = []
     pa_table = pq.read_table(chunk_file)
     for i in range(len(pa_table['rows'])):
@@ -146,27 +162,20 @@ def process_chunk(args):
             sample = tokenize_conversation({
                 "messages": messages['messages'], 
                 "weight": float(cols[0])
-            }, tokenizer, chat_format)
+            }, tokenizer, ignore_index, chat_format)
             
-            is_truncated = False
             input_ids_len = len(sample['input_ids'])
             if input_ids_len > max_sample_size:
                 sample['input_ids'] = sample['input_ids'][:max_sample_size]
+                sample['target_ids'] = sample['target_ids'][:max_sample_size]
                 if 'target_weights' in sample:
                     sample['target_weights'] = sample['target_weights'][:max_sample_size]
-                is_truncated = True
-            
-            if 'target_weights' not in sample or sum(1 for w in sample['target_weights'] if w > MIN_WEIGHT) > 1:
-                sample['input_ids'] = np.array(sample['input_ids'], dtype=data_dtype)
-                if 'target_weights' in sample:
-                    sample['target_weights'] = np.array(sample['target_weights'], dtype=np.float16)
-                data.append(sample)
-                created += 1
-                if is_truncated:
-                    truncated += 1
-            else:
-                rejected += 1
+                truncated += 1
+            data.append(sample)
     del pa_table
+    
+    created = len(data)
+    packed = 0
     
     if pack:
         packed_data = []
@@ -175,19 +184,55 @@ def process_chunk(args):
             instructions_buffer["seq_lens"] = [len(instructions_buffer["input_ids"])]
             while len(data) > 0 and len(instructions_buffer["input_ids"]) + len(data[-1]["input_ids"]) <= max_sample_size:
                 instruction = data.pop()
-                instructions_buffer["input_ids"] = np.concatenate((instructions_buffer["input_ids"], instruction["input_ids"]))
+                instructions_buffer["input_ids"].extend(instruction["input_ids"])
+                instructions_buffer["target_ids"].extend(instruction["target_ids"])
                 if "target_weights" in instructions_buffer:
-                    instructions_buffer["target_weights"] = np.concatenate((instructions_buffer["target_weights"], instruction["target_weights"]))
+                    instructions_buffer["target_weights"].extend(instruction["target_weights"])
                 instructions_buffer["seq_lens"].append(len(instruction["input_ids"]))
-            if 'target_weights' not in instructions_buffer or sum(1 for w in instructions_buffer['target_weights'] if w > MIN_WEIGHT) > min_positive_weights:
-                packed_data.append(instructions_buffer)
-            else:
-                rejected += 1
-        data = packed_data
+            packed_data.append(instructions_buffer)
         packed = len(packed_data)
+        data = packed_data
+        del packed_data
+        
+    result = []
+    for sample in data:
+        if pad_token_id >= 0:
+            padding = max_sample_size - len(sample['input_ids'])
+            assert padding >= 0
+            if padding > 0:
+                if padding > 1:
+                    sample["input_ids"] = convert_to_numpy_array(sample["input_ids"], block_size, pad_token_id, data_dtype)
+                else:
+                    sample["input_ids"] = np.array(sample["input_ids"], dtype=data_dtype)
+                sample["target_ids"] = convert_to_numpy_array(sample["target_ids"][1:], block_size, ignore_index, data_dtype)
+                if "target_weights" in sample:
+                    sample["target_weights"] = convert_to_numpy_array(sample["target_weights"][1:], block_size, 0, np.float16)
+            else:
+                assert len(sample["input_ids"]) == max_sample_size
+                assert len(sample["target_ids"]) == max_sample_size
+                assert len(sample["target_weights"]) == max_sample_size
+                assert sum(sample["seq_lens"]) == max_sample_size
+                sample["input_ids"] = np.array(sample["input_ids"][:-1], dtype=data_dtype)
+                sample["target_ids"] = np.array(sample["target_ids"][1:], dtype=data_dtype)
+                if "target_weights" in sample:
+                    sample["target_weights"] = np.array(sample["target_weights"][1:], dtype=np.float16)
+                if "seq_lens" in sample:
+                    sample["seq_lens"][-1] -= 1
+        else:
+            sample["input_ids"] = np.array(sample["input_ids"][:block_size], dtype=data_dtype)
+            sample["target_ids"] = np.array(sample["target_ids"][1:max_sample_size], dtype=data_dtype)
+            if "target_weights" in sample:
+                sample["target_weights"] = np.array(sample["target_weights"][1:max_sample_size], dtype=np.float16)
+        
+        assert isinstance(sample["input_ids"], np.ndarray)
+        assert isinstance(sample["target_ids"], np.ndarray)
+        if np.sum(sample['target_ids'] != ignore_index) >= min_unmasked_tokens:
+            result.append(sample)
+        else:
+            rejected += 1
     
     with open(chunk_file, 'wb') as f:
-        joblib.dump(data, f)
+        joblib.dump(result, f)
     
     return {'created': created, 'truncated': truncated, 'rejected': rejected, 'packed': packed}
 
@@ -223,7 +268,9 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--max_workers", type=int, default=20, help="The max number of processes")
     parser.add_argument("-b", "--block_size", type=int, default=4096, help="Block/context size")
     parser.add_argument('--chat_format', type=str, choices=['OpenChatML', 'llama2'], default='OpenChatML', help='Chat format')
-    parser.add_argument("--min_positive_weights", type=int, default=1, help="Minimum number of positive target weights required for a sample to be included in training")
+    parser.add_argument("--min_unmasked_tokens", type=int, default=1, help="Minimum number of unmasked target tokens required for a sample to be included in training")
+    parser.add_argument("--ignore_index", type=int, default=-100, help="Specifies a target value that is ignored in loss computation. Default is -100")
+    parser.add_argument("--pad_token_id", type=int, default=0, help="Specifies the padding token id. Default is 0")
     parser.add_argument("--chunk_size", type=int, default=100000, help="Chunk size")
     parser.add_argument('--save_samples', action='store_true', help='Save some samples')
     parser.add_argument('--pack', action='store_true', help='Pack')
@@ -235,6 +282,8 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     logger.info(f"Loaded tokenizer with vocab size {len(tokenizer)}")
     logger.info(f"Active chat template type: {args.chat_format}")
+    if not args.pack:
+        logger.warning("Padding not applied as packing is disabled")
 
     timer = time.time()
     max_sample_size = args.block_size + 1
@@ -285,7 +334,7 @@ if __name__ == "__main__":
     logger.info(f"Tokenizing {len(chunk_files)} files")
     processed_chunk_stats = []
     max_workers = min(len(chunk_files), args.max_workers)
-    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, args.chat_format, max_sample_size, args.min_positive_weights) for chunk_file in chunk_files)
+    chunk_batches = list((chunk_file, args.pack, args.tokenizer_path, args.chat_format, args.block_size, args.ignore_index, args.pad_token_id, args.min_unmasked_tokens) for chunk_file in chunk_files)
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         for result in tqdm(executor.map(process_chunk, chunk_batches), total=len(chunk_batches), desc="Tokenizing", disable=(not args.verbose)):
             processed_chunk_stats.append(result)
@@ -303,6 +352,9 @@ if __name__ == "__main__":
     all_samples = list(chain.from_iterable(chunks))
     sample_count = len(all_samples)
     logger.info(f"{sample_count:,} samples loaded")
+    
+    assert isinstance(all_samples[0]["input_ids"], np.ndarray)
+    assert isinstance(all_samples[0]["target_ids"], np.ndarray)
 
     assert sample_count > 0
     if args.save_samples:
@@ -314,6 +366,7 @@ if __name__ == "__main__":
                 new_sample = {
                     "input": tokenizer.decode(input_ids),
                     "input_ids": input_ids,
+                    "target_ids": sample["target_ids"].tolist(),
                 }
                 if 'target_weights' in sample:
                     new_sample["target_weights"] = sample["target_weights"].tolist()
@@ -342,8 +395,10 @@ if __name__ == "__main__":
         os.remove(chunk_file)
     
     logger.info(f"Calculating stats")
-    sample_lenghts = [len(sample['input_ids']) for sample in all_samples]
-    total_tokens = sum(sample_lenghts)
+    if args.pack:
+        sample_lenghts = [sum(sample['seq_lens']) for sample in all_samples]
+    else:
+        sample_lenghts = [np.sum(sample['input_ids'] != args.pad_token_id) for sample in all_samples]
     shortest_sample_tokens = min(sample_lenghts)
     longest_sample_tokens = max(sample_lenghts)
     total_tokens_count = sum(sample_lenghts)
@@ -356,7 +411,7 @@ if __name__ == "__main__":
         'avg_instruction_size': (total_tokens_count // instruction_count),
         'avg_sample_size': (total_tokens_count // sample_count),
         'packing_ratio': (instruction_count / sample_count),
-        'packing_level': (total_tokens_count / (sample_count * max_sample_size) * 100),
+        'packing_level': (total_tokens_count / (sample_count * args.block_size) * 100),
     }
     stats_str = json.dumps(stats, indent=4, ensure_ascii=False)
     logger.info(f"Stats:\n{stats_str}")
@@ -373,4 +428,4 @@ if __name__ == "__main__":
             fin.write(f"{length}; {sample_lenght_histogram.get(length, 0)}\n")
     logger.info(f"Histogram saved in {histogram_file}")
 
-    logger.info(f"Dataset with {sample_count:,} samples ({total_tokens:,} tokens) has been created in {format_seconds_as_time(time.time()-timer)}")
+    logger.info(f"Dataset with {sample_count:,} samples ({total_tokens_count:,} tokens) has been created in {format_seconds_as_time(time.time()-timer)}")
