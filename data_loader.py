@@ -219,7 +219,7 @@ class AllamoDataset:
             'input_ids': torch.from_numpy(sample['input_ids']),
             'target_ids': torch.from_numpy(sample['target_ids'])
         }
-        if self.weighted_loss:
+        if self.weighted_loss and 'target_weights' in sample:
             result['target_weights'] = torch.from_numpy(sample['target_weights'])
         
         if self.pad_token_id >= 0:
@@ -227,7 +227,7 @@ class AllamoDataset:
                 result['input_ids'] = F.pad(result['input_ids'], (0, self.block_size - len(result['input_ids'])), value=self.pad_token_id)
             if len(result['target_ids']) < self.block_size:
                 result['target_ids'] = F.pad(result['target_ids'], (0, self.block_size - len(result['target_ids'])), value=self.ignore_index)
-            if len(result['target_weights']) < self.block_size:
+            if 'target_weights' in result and len(result['target_weights']) < self.block_size:
                 result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
