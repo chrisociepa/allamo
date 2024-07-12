@@ -270,7 +270,7 @@ class AllamoFSDPTrainer:
         if os.path.exists(ckpt_path):
             # requires each rank to have the full dict in CPU memory to reduce communication
             full_osd = torch.load(ckpt_path, map_location='cpu')
-            sharded_osd = FSDP.shard_full_optim_state_dict(full_osd, model)
+            sharded_osd = FSDP.optim_state_dict_to_load(model, optimizer, full_osd)
             optimizer.load_state_dict(sharded_osd)
             self.logger.info("Shared optimizer state loaded.")
         else:
