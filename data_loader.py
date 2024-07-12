@@ -219,8 +219,11 @@ class AllamoDataset:
             'input_ids': torch.from_numpy(sample['input_ids']),
             'target_ids': torch.from_numpy(sample['target_ids'])
         }
-        if self.weighted_loss and 'target_weights' in sample:
-            result['target_weights'] = torch.from_numpy(sample['target_weights'])
+        if self.weighted_loss:
+            if 'target_weights' in sample:
+                result['target_weights'] = torch.from_numpy(sample['target_weights'])
+            else:
+                result['target_weights'] = torch.where(result['target_ids'] == self.ignore_index, 0, 1)
         
         if self.pad_token_id >= 0:
             if len(result['input_ids']) < self.block_size:
