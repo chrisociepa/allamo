@@ -306,14 +306,15 @@ if __name__ == "__main__":
     logger.info(f"Initialized with {len(configs)} input files")
     
     logger.info("Loading data")
-    all_rows = []
-    for config in tqdm(configs, desc="Loading data", disable=(not args.verbose)):
+    def load_data_file(config):
         weight = config['weight'] if 'weight' in config else args.default_weight
         weight_doc_prefix = f"{weight};"
         with open(config['path'], 'r') as f:
-            for line in f:
-                if line:
-                    all_rows.append(weight_doc_prefix + line)
+            return list(weight_doc_prefix + line for line in f if line)
+        
+    chunks = joblib.Parallel(n_jobs=args.max_workers)(joblib.delayed(load_data_file)(config) for config in configs)
+    all_rows = list(chain.from_iterable(chunks))
+    del chunks
     del configs
     instruction_count = len(all_rows)
     logger.info(f"Loaded {instruction_count:,} rows")
