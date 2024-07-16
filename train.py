@@ -7,15 +7,13 @@ import json
 import os
 import time
 import math
-import pickle
-import random
 import logging
 import datetime
 import dataclasses
+import shutil
 import uuid
 from contextlib import nullcontext
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -38,6 +36,7 @@ from train_utils import (
     get_optimizer_checkpoint_path,
     model_checkpoint_files_exist,
     run_checkpoint_hook_program,
+    override_numa_affinity,
 )
 
 class AllamoTrainer:
@@ -87,7 +86,7 @@ class AllamoTrainer:
         else:
             # if not ddp, we are running on a single gpu, and one process
             self.rank = 0
-            self.local_rank = None
+            self.local_rank = 0
             self.world_size = 1
             self.master_process = True
             self.seed_offset = 0
@@ -99,6 +98,7 @@ class AllamoTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+        override_numa_affinity(self.local_rank)
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
         self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
@@ -239,12 +239,14 @@ class AllamoTrainer:
             correct_preds = 0
             total_preds = 0
             for k in range(self.config.eval_iters):
-                X, Y, W = self.data_loader.get_batch(split, True)
+                batch = self.data_loader.get_batch(split, True)
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y)
+                    logits, loss, _ = self.model(**batch)
+                if batch["target_weights"] is not None:
+                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
                 losses[k] = loss.item()
-                total_preds += torch.sum(Y.view(-1) != self.config.ignore_index).item()
-                correct_preds += (logits.max(2).indices == Y).sum().item()
+                total_preds += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                correct_preds += (logits.max(2).indices == batch["target_ids"]).sum().item()
             losses_out[split] = losses.mean()
             accuraces[split] = correct_preds / total_preds
         self.model.train()
@@ -255,13 +257,13 @@ class AllamoTrainer:
 
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
-        ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+        model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
+        self.logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
         if not self.config.ignore_last_checkpoint_backup:
-            rename_file_to_prev_version(ckpt_file_path)
-        torch.save(self.raw_model.state_dict(), ckpt_file_path)
+            rename_file_to_prev_version(model_ckpt_file_path)
+        torch.save(self.raw_model.state_dict(), model_ckpt_file_path)
         
-        md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
+        md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and config.log_checkpoint_md5_on_epoch else None
         
         checkpoint = {
             'model_args': dataclasses.asdict(self.raw_model.config),
@@ -282,25 +284,30 @@ class AllamoTrainer:
             checkpoint['checkpoint_md5sum'] = md5sum
             self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
         
-        ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
+        config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
+        self.logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
         if not self.config.ignore_last_checkpoint_backup:
-            rename_file_to_prev_version(ckpt_file_path)
-        with open(ckpt_file_path, "w", encoding="utf-8") as f:
+            rename_file_to_prev_version(config_ckpt_file_path)
+        with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        if self.config.save_optimizer_checkpoint and model_only == False:
-            ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+        if self.config.save_optimizer_checkpoint and model_only == False and \
+            (self.config.optimizer_checkpoint_interval is None or \
+             self.iter_num % self.config.optimizer_checkpoint_interval == 0):
+            optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
+            self.logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            torch.save(self.optimizer.state_dict(), ckpt_file_path)
+                rename_file_to_prev_version(optim_ckpt_file_path)
+            torch.save(self.optimizer.state_dict(), optim_ckpt_file_path)
             
+            if self.config.optimizer_checkpoint_interval is not None:
+                shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
+                shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
         self.logger.info(f"checkpoint files saved in {config.out_dir}")
         
     def train(self):
         self.logger.info(f"Starting training (run id: {self.run_uuid}) with configuration: {self.config}")
-        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
+        batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
@@ -312,6 +319,8 @@ class AllamoTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+            elif self.config.should_override_config(self.iter_num):
+                self.config.override_config_properties()
             
             timer = time.time()
             log_iter = (self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process)
@@ -379,6 +388,7 @@ class AllamoTrainer:
             
             accuracy = 0
             unmasked_labels = 0
+            grad_norm = 0
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -392,21 +402,24 @@ class AllamoTrainer:
                     # looking at the source of that context manager, it just toggles this variable
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
-                    logits, loss, _ = self.model(X, Y, W)
+                    logits, loss, _ = self.model(**batch)
                     if micro_steps > 1:
                         loss = loss / micro_steps # scale the loss to account for micro steps
-                    if W is not None:
-                        loss = loss / W.view(-1).sum()
+                    if batch["target_weights"] is not None:
+                        if self.config.weighted_loss_method == 'openchat':
+                            loss = loss / batch["target_weights"].sum()
+                        else:
+                            loss = loss / torch.sum(batch["target_weights"] > 0).item()
                 
                 mfu_excluded_time = time.time()
-                unmasked_labels += torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                unmasked_labels += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 
                 if log_iter and (micro_step == self.gradient_accumulation_steps - 1):
                     # calculate accuracy. note: this is a CPU-GPU sync point!
-                    accuracy = (logits.max(2).indices == Y).sum().item() / unmasked_labels
+                    accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
                     
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y, W = self.data_loader.get_batch('train')
+                batch = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling if training in fp16
@@ -415,10 +428,10 @@ class AllamoTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
             
             mfu_excluded_time = time.time()
-            # we can't count it precisely in DDP, so let's estimate
+            # we can't count it precisely in DDP, so let's approximate
             unmasked_labels *= self.world_size
             # adjust learning rate
             if self.config.adaptive_learning_rate:
@@ -461,17 +474,18 @@ class AllamoTrainer:
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
-                        "train/iter_time": iter_time_ms,
                         "train/loss": lossf,
-                        "train/ppl": ppl,
                         "train/acc": accuracy,
+                        "train/ppl": ppl,
+                        "train/grad_norm": grad_norm,
                         "train/lr": lr,
-                        "train/tokens": self.processed_tokens,
+                        "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
                         "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/tokens": self.processed_tokens,
+                        "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
-                        "train/mtu": mtu,
-                        "train/epoch": self.data_loader.epoch
+                        "train/iter_time": iter_time_ms,
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu

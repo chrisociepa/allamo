@@ -7,15 +7,12 @@ import json
 import os
 import time
 import math
-import pickle
-import random
 import logging
 import datetime
 import dataclasses
+import shutil
 import uuid
-from contextlib import nullcontext
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import functools
@@ -56,6 +53,7 @@ from train_utils import (
     get_optimizer_checkpoint_path,
     model_checkpoint_files_exist,
     run_checkpoint_hook_program,
+    override_numa_affinity,
 )
 
 class AllamoFSDPTrainer:
@@ -104,6 +102,7 @@ class AllamoFSDPTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+        override_numa_affinity(self.local_rank)
         if config.dtype == 'bfloat16-true':
             raise Exception('Full bfloat16 training is not supported with FSDP')
         ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
@@ -138,6 +137,10 @@ class AllamoFSDPTrainer:
         if config.gradient_checkpointing:
             self.fsdp_activation_checkpointing = True
             config.gradient_checkpointing = False # control gradient checkpointing with FSDP 
+            self.logger.info(
+                "Deactivated gradient checkpointing at the model configuration level. "
+                "Activated gradient checkpointing at the FSDP level."
+            )
         else:
             self.fsdp_activation_checkpointing = False
             
@@ -267,7 +270,7 @@ class AllamoFSDPTrainer:
         if os.path.exists(ckpt_path):
             # requires each rank to have the full dict in CPU memory to reduce communication
             full_osd = torch.load(ckpt_path, map_location='cpu')
-            sharded_osd = FSDP.shard_full_optim_state_dict(full_osd, model)
+            sharded_osd = FSDP.optim_state_dict_to_load(model, optimizer, full_osd)
             optimizer.load_state_dict(sharded_osd)
             self.logger.info("Shared optimizer state loaded.")
         else:
@@ -279,14 +282,14 @@ class AllamoFSDPTrainer:
         with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
             full_msd = self.model.state_dict()
         if self.master_process:
-            ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving model checkpoint to {ckpt_file_path}")
+            model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
+            self.logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            torch.save(full_msd, ckpt_file_path)
+                rename_file_to_prev_version(model_ckpt_file_path)
+            torch.save(full_msd, model_ckpt_file_path)
             del full_msd
             
-            md5sum = calculate_md5(ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
+            md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
             
             checkpoint = {
                 'model_args': dataclasses.asdict(self.model.config),
@@ -307,24 +310,30 @@ class AllamoFSDPTrainer:
                 checkpoint['checkpoint_md5sum'] = md5sum
                 self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
                 
-            ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving config checkpoint to {ckpt_file_path}")
+            config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
+            self.logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(ckpt_file_path)
-            with open(ckpt_file_path, "w", encoding="utf-8") as f:
+                rename_file_to_prev_version(config_ckpt_file_path)
+            with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint, f, indent=4, ensure_ascii=False)
         
-        if self.config.save_optimizer_checkpoint and model_only == False:
+        if self.config.save_optimizer_checkpoint and model_only == False and \
+            (self.config.optimizer_checkpoint_interval is None or \
+             self.iter_num % self.config.optimizer_checkpoint_interval == 0):
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.master_process:
-                ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-                self.logger.info(f"saving optimizer checkpoint to {ckpt_file_path}")
+                optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                self.logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
                 if not self.config.ignore_last_checkpoint_backup:
-                    rename_file_to_prev_version(ckpt_file_path)
-                torch.save(full_osd, ckpt_file_path)
+                    rename_file_to_prev_version(optim_ckpt_file_path)
+                torch.save(full_osd, optim_ckpt_file_path)
                 self.logger.info(f"checkpoint files saved in {config.out_dir}")
                 del full_osd
+                
+                if self.config.optimizer_checkpoint_interval is not None:
+                    shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
+                    shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
             
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -334,15 +343,15 @@ class AllamoFSDPTrainer:
         self.model.eval()
         for split in self.data_loader.splits:
             fsdp_loss_preds = torch.zeros(3).to(self.config.device)
-            for k in range(self.config.eval_iters):
-                X, Y, W = self.data_loader.get_batch(split, True)
-                logits, loss, _ = self.model(X, Y)
-                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
+            for _ in range(self.config.eval_iters):
+                batch = self.data_loader.get_batch(split, True)
+                logits, loss, _ = self.model(**batch)
+                if batch["target_weights"] is not None:
+                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
                 fsdp_loss_preds[0] += loss.item()
-                fsdp_loss_preds[1] += (logits.max(2).indices == Y).sum().item() / torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                fsdp_loss_preds[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_preds[2] += 1
             dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
-            steps = self.config.eval_iters * self.world_size
             losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.world_size)
             accuraces[split] = fsdp_loss_preds[1] / fsdp_loss_preds[2]
         self.model.train()
@@ -350,14 +359,14 @@ class AllamoFSDPTrainer:
             losses_out['val'] = losses_out['train']
             accuraces['val'] = accuraces['train']
         return losses_out, accuraces
-        
+    
     def train(self):
         self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
-        X, Y, W = self.data_loader.get_batch('train') # fetch the very first batch
+        batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
-        fsdp_loss_acc = torch.zeros(4).to(self.config.device)
+        fsdp_loss_acc = torch.zeros(5).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
@@ -366,6 +375,8 @@ class AllamoFSDPTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+            elif self.config.should_override_config(self.iter_num):
+                self.config.override_config_properties()
             
             timer = time.time()
             lr = get_lr(self.iter_num, self.config)
@@ -433,26 +444,28 @@ class AllamoFSDPTrainer:
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
-            for micro_step in range(self.gradient_accumulation_steps):
-                logits, loss, _ = self.model(X, Y, W)
+            for _ in range(self.gradient_accumulation_steps):
+                logits, loss, _ = self.model(**batch)
                 if self.gradient_accumulation_steps > 1:
                     loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
-                    
-                if W is not None:
-                    fsdp_loss_weight_acc = W.view(-1).sum()
-                    # sum loss weights over all processes
-                    dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
-                    loss = (self.world_size / fsdp_loss_weight_acc) * loss
-                
+                if batch["target_weights"] is not None:
+                    if self.config.weighted_loss_method == 'openchat':
+                        fsdp_loss_weight_acc = batch["target_weights"].sum()
+                        # sum loss weights over all processes
+                        dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
+                        loss = (self.world_size / fsdp_loss_weight_acc) * loss
+                    else:
+                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
+
                 mfu_excluded_time = time.time()
-                unmasked_labels = torch.sum(Y.view(-1) != self.config.ignore_index).item()
+                unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_acc[0] += loss.item()
                 fsdp_loss_acc[1] += unmasked_labels
-                fsdp_loss_acc[2] += (logits.max(2).indices == Y).sum().item() / unmasked_labels
+                fsdp_loss_acc[2] += (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
                 fsdp_loss_acc[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y, W = self.data_loader.get_batch('train')
+                batch = self.data_loader.get_batch('train')
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass
@@ -460,7 +473,7 @@ class AllamoFSDPTrainer:
                 
             # clip the gradient
             if self.config.grad_clip != 0.0:
-                self.model.clip_grad_norm_(self.config.grad_clip)
+                fsdp_loss_acc[4] += self.model.clip_grad_norm_(self.config.grad_clip).item()
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
@@ -490,6 +503,7 @@ class AllamoFSDPTrainer:
                 lossf = fsdp_loss_acc[0].item() / self.world_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = fsdp_loss_acc[2].item() / fsdp_loss_acc[3].item()
+                grad_norm = fsdp_loss_acc[4].item() / self.world_size
                 if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
@@ -507,17 +521,18 @@ class AllamoFSDPTrainer:
                 if self.config.wandb_log:
                     metrics = {
                         "iter": self.iter_num,
-                        "train/iter_time": iter_time_ms,
                         "train/loss": lossf,
-                        "train/ppl": ppl,
                         "train/acc": accuracy,
+                        "train/ppl": ppl,
+                        "train/grad_norm": grad_norm,
                         "train/lr": lr,
-                        "train/tokens": self.processed_tokens,
+                        "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
                         "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/tokens": self.processed_tokens,
+                        "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
-                        "train/mtu": mtu,
-                        "train/epoch": self.data_loader.epoch
+                        "train/iter_time": iter_time_ms,
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu

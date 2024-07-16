@@ -2,10 +2,14 @@
 This file contains the full configuration and helps with its management.
 """
 
-import time
-import json
 import argparse
+import json
+import logging
+import os
+import time
 from dataclasses import dataclass
+
+logger = logging.getLogger("AllamoConfiguration")
 
 @dataclass
 class AllamoConfiguration:
@@ -22,7 +26,10 @@ class AllamoConfiguration:
     ignore_last_checkpoint_backup: bool = False
     checkpoint_interval: int = 1000
     save_optimizer_checkpoint: bool = True
+    optimizer_checkpoint_interval: int = None
     save_best_checkpoint: bool = True
+    config_override_check_interval: int = None
+    config_override_path: str = None
     eval_interval: int = 1000
     eval_iters: int = 200
     eval_only: bool = False
@@ -87,6 +94,7 @@ class AllamoConfiguration:
     ignore_index: int = -100
     pad_token_id: int = -1
     weighted_loss: bool = False
+    weighted_loss_method: str = 'allamo'
     adaptive_learning_rate: bool = False
     fsdp_sharding_strategy: str = 'FULL_SHARD'
     epoch_completion_hook_program: str = None
@@ -117,7 +125,10 @@ class AllamoConfiguration:
         parser.add_argument('--ignore_last_checkpoint_backup', type=bool, help='Ignores preserving a copy of the last checkpoint version by overwriting it')
         parser.add_argument('--checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the model is saved')
         parser.add_argument('--save_optimizer_checkpoint', type=bool, help='Enable saving optimizer checkpoint')
+        parser.add_argument('--optimizer_checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the optimizer is saved. The same as checkpoint_interval, if not specified')
         parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
+        parser.add_argument('--config_override_check_interval', type=int, help='Number of iterations for checking override configuration. Feature disabled if not specified.')
+        parser.add_argument('--config_override_path', type=str, help='Specifies the location of the configuration override file')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
         parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
         parser.add_argument('--eval_only', type=bool, help='Exit right after the first evaluation. Indicates no training.')
@@ -180,6 +191,7 @@ class AllamoConfiguration:
         parser.add_argument('--ignore_index', type=int, help="Specifies a target value that is ignored and does not contribute to the input gradient")
         parser.add_argument('--pad_token_id', type=float, help="Enables padding and specifies the token id used for padding in sequences")
         parser.add_argument('--weighted_loss', type=bool, help='Whether to use weighted loss if available')
+        parser.add_argument('--weighted_loss_method', type=str, choices=['allamo', 'openchat'], help='How weighted loss is calculated')
         parser.add_argument('--adaptive_learning_rate', type=bool, help='Whether to use adaptive learning rate')
         parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
@@ -195,11 +207,34 @@ class AllamoConfiguration:
         if args.config:
             with open(args.config) as f:
                 config = json.load(f)
-            for k, v in config.items():
-                if hasattr(self, k):
-                    setattr(self, k, v)
+            self.override_values(config)
 
         for arg_name, arg_value in vars(args).items():
             if arg_value is not None and hasattr(self, arg_name):
                 setattr(self, arg_name, arg_value)
 
+    def override_values(self, config_dict):
+        modified = {}
+        for k, v in config_dict.items():
+            if hasattr(self, k) and getattr(self, k) != v:
+                modified[k] = {"prev": getattr(self, k), "curr": v}
+                setattr(self, k, v)
+        return modified
+    
+    def should_override_config(self, iter_num):
+        return self.config_override_check_interval is not None and \
+            self.config_override_path is not None and \
+            self.config_override_check_interval > 0 and \
+            iter_num % self.config_override_check_interval == 0
+            
+    def override_config_properties(self):
+        if os.path.exists(self.config_override_path):
+            try:
+                with open(self.config_override_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                modified = self.override_values(config)
+                if modified:
+                    logger.info(f"The following config properties were overridden: {modified}")
+            except Exception as err:
+                logger.warning(f"Unable to load override config. Error: {err}")
+        
