@@ -343,10 +343,11 @@ class AllamoFSDPTrainer:
         self.model.eval()
         for split in self.data_loader.splits:
             fsdp_loss_preds = torch.zeros(3).to(self.config.device)
-            for k in range(self.config.eval_iters):
+            for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
-                batch["target_weights"] = None # no need to weight loss
                 logits, loss, _ = self.model(**batch)
+                if batch["target_weights"] is not None:
+                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
                 fsdp_loss_preds[0] += loss.item()
                 fsdp_loss_preds[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_preds[2] += 1
