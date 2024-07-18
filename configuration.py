@@ -53,6 +53,7 @@ class AllamoConfiguration:
     dataset_train_processed_files_count: int = 0
     dataset_seq_train: bool = True
     dataset_seq_train_start: int = None
+    dataset_buffer: bool = False
     batch_size_initial: int = 2
     batch_size_max_iter: int = 2000
     batch_size_schedule: bool = False
@@ -152,6 +153,7 @@ class AllamoConfiguration:
         parser.add_argument('--dataset_train_processed_files_count', type=int, help='The number of files already processed in the training dataset')
         parser.add_argument('--dataset_seq_train', type=bool, help='Iterate dataset sequentially')
         parser.add_argument('--dataset_seq_train_start', type=int, help='Position in tokens to start with')
+        parser.add_argument('--dataset_buffer', type=bool, help='Enable buffer for dataset samples')
         parser.add_argument('--batch_size_initial', type=int, help='Initial batch_size value')
         parser.add_argument('--batch_size_max_iter', help='Number of iterations to reach maximum batch_size value')
         parser.add_argument('--batch_size_schedule', type=bool, help='Enable linear batch_size scheduler')

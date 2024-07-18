@@ -4,6 +4,7 @@ import joblib
 import logging
 import numpy as np
 import os
+import threading
 import time
 import torch
 import torch.nn.functional as F
@@ -293,6 +294,9 @@ class AllamoDataLoader:
         self.logger.info(f"Training dataset offset set to {self.dataset_offset:,}")
         
         self.load_datasets()
+        self.buffer = None
+        self.buffer_lock = threading.Lock()
+        self.buffer_thread = None
             
     def load_datasets(self):
         timer = time.time()
@@ -314,28 +318,8 @@ class AllamoDataLoader:
         
     def get_splits(self):
         return self.splits
-        
-    def get_batch(self, split='train', random_samples=False):
-        if split == 'train' or self.val_dataset is None:
-            dataset = self.train_dataset
-        else:
-            dataset = self.val_dataset
-        
-        if random_samples == False and split == 'train' and self.config.dataset_seq_train:
-            if self.dataset_offset + self.batch_size <= len(dataset):
-                samples = dataset[self.dataset_offset:self.dataset_offset+self.batch_size]
-                self.dataset_offset += self.batch_size
-            else:
-                samples = []
-                for _ in range(self.batch_size):
-                    if self.dataset_offset >= len(dataset):
-                        self.reload_dataset(dataset)
-                    samples.append(dataset[self.dataset_offset])
-                    self.dataset_offset += 1
-        else:
-            idx_batch = torch.randint(len(dataset), (self.batch_size,))
-            samples = [dataset[i] for i in idx_batch]
-            
+    
+    def prepare_samples(self, samples):
         if isinstance(samples[0], dict):
             input_ids = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
             target_ids = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
@@ -372,6 +356,55 @@ class AllamoDataLoader:
             "attn_mask": attn_mask,
             "input_pos": input_pos
         }
+        
+    def update_buffer(self, dataset):
+        with self.buffer_lock:
+            self.buffer = {
+                "batch": self.prepare_samples(dataset[self.dataset_offset:self.dataset_offset+self.batch_size]),
+                "offset": self.dataset_offset + self.batch_size
+            }
+    
+    def reload_buffer(self, dataset):
+        self.buffer = None
+        if self.dataset_offset + self.batch_size <= len(dataset):
+            self.buffer_thread = threading.Thread(target=self.update_buffer, args=(dataset,))
+            self.buffer_thread.start()
+        else:
+            self.buffer_thread = None
+            
+    def get_batch_from_buffer(self, dataset):
+        with self.buffer_lock:
+            batch = self.buffer["batch"]
+            self.dataset_offset = self.buffer["offset"]
+        assert self.buffer_thread is None or not self.buffer_thread.is_alive()
+        self.reload_buffer(dataset)
+        return batch
+        
+    def get_batch(self, split='train', random_samples=False):
+        if split == 'train' or self.val_dataset is None:
+            dataset = self.train_dataset
+        else:
+            dataset = self.val_dataset
+        
+        if random_samples == False and split == 'train' and self.config.dataset_seq_train:
+            if self.config.dataset_buffer and self.buffer is not None:
+                return self.get_batch_from_buffer(dataset)
+            elif self.dataset_offset + self.batch_size <= len(dataset):
+                samples = dataset[self.dataset_offset:self.dataset_offset+self.batch_size]
+                self.dataset_offset += self.batch_size
+            else:
+                samples = []
+                for _ in range(self.batch_size):
+                    if self.dataset_offset >= len(dataset):
+                        self.reload_dataset(dataset)
+                    samples.append(dataset[self.dataset_offset])
+                    self.dataset_offset += 1
+            self.reload_buffer(dataset)
+        else:
+            idx_batch = torch.randint(len(dataset), (self.batch_size,))
+            samples = [dataset[i] for i in idx_batch]
+            
+        return self.prepare_samples(samples)
     
     def reload_dataset(self, dataset):
         if len(dataset.dataset_files) > 1:
