@@ -217,12 +217,12 @@ class AllamoDataset:
         did not have padding and samples are of length up to block_size.
         """
         result = {
-            'input_ids': torch.from_numpy(sample['input_ids']),
-            'target_ids': torch.from_numpy(sample['target_ids'])
+            'input_ids': torch.from_numpy(sample['input_ids']).clone(),
+            'target_ids': torch.from_numpy(sample['target_ids']).clone()
         }
         if self.weighted_loss:
             if 'target_weights' in sample:
-                result['target_weights'] = torch.from_numpy(sample['target_weights'])
+                result['target_weights'] = torch.from_numpy(sample['target_weights']).clone()
             else:
                 result['target_weights'] = torch.where(result['target_ids'] == self.ignore_index, 0, 1)
         
