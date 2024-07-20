@@ -245,7 +245,7 @@ class AllamoDataset:
                 # append lower triangular matrix for causal mask
                 block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
                 
-            if total_seq_len < self.block_size and self.pad_token_id >= 0:
+            if total_seq_len < self.block_size:
                 new_pos = sample_input_pos[-1] + 1
                 num_pad = self.block_size - total_seq_len
                 sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
