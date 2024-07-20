@@ -196,8 +196,8 @@ def process_chunk(args):
         
     result = []
     for sample in data:
+        padding = max_sample_size - len(sample['input_ids'])
         if pad_token_id >= 0:
-            padding = max_sample_size - len(sample['input_ids'])
             assert padding >= 0
             if padding > 0:
                 if padding > 1:
@@ -221,10 +221,11 @@ def process_chunk(args):
                 if "seq_lens" in sample:
                     sample["seq_lens"][-1] -= 1
         else:
-            sample["input_ids"] = np.array(sample["input_ids"][:block_size], dtype=data_dtype)
-            sample["target_ids"] = np.array(sample["target_ids"][1:max_sample_size], dtype=data_dtype)
+            expected_len = len(sample['input_ids']) - 1 if padding > 0 else block_size
+            sample["input_ids"] = np.array(sample["input_ids"][:expected_len], dtype=data_dtype)
+            sample["target_ids"] = np.array(sample["target_ids"][1:expected_len+1], dtype=data_dtype)
             if "target_weights" in sample:
-                sample["target_weights"] = np.array(sample["target_weights"][1:max_sample_size], dtype=np.float16)
+                sample["target_weights"] = np.array(sample["target_weights"][1:expected_len+1], dtype=np.float16)
         
         assert isinstance(sample["input_ids"], np.ndarray)
         assert isinstance(sample["target_ids"], np.ndarray)
