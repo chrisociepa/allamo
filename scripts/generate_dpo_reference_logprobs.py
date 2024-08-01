@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import torch
+from contextlib import nullcontext
 from tqdm import tqdm
 
 sys.path.append(os.path.abspath('..'))
@@ -89,6 +90,16 @@ if __name__ == "__main__":
     config_checkpoint["config"]["load_configuration"] = False
     config = AllamoConfiguration(**(config_checkpoint["config"]))
     
+    # init torch
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed(config.seed)
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+    device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
+    torch_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    
     logger.info("Start preparing model")
     model_ckpt_path = os.path.join(args.checkpoint_dir, f'model_{args.checkpoint_name}.pt')
     model_config = AllamoTransformerConfig(**(config_checkpoint["model_args"]))
@@ -109,11 +120,12 @@ if __name__ == "__main__":
         with torch.no_grad():
             for sample in tqdm(samples, disable=(not args.verbose)):
                 batch = get_batch(sample, config, args.pin_memory)
-                reference_chosen_logits, _, _ = model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
-                reference_rejected_logits, _, _ = model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
+                with torch_ctx:
+                    reference_chosen_logits, _, _ = model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
+                    reference_rejected_logits, _, _ = model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
                 sample["reference_chosen_logps"] = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], config.ignore_index).item()
                 sample["reference_rejected_logps"] = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], config.ignore_index).item()
-            
+        
         output_file = os.path.join(args.output_dir, os.path.basename(input_file))
         with open(output_file, 'wb') as f:
             joblib.dump(samples, f)
