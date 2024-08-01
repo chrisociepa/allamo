@@ -70,7 +70,7 @@ class AllamoFSDPTrainer:
         self.best_train_loss = 1e2
         self.best_val_loss = 1e2
         self.processed_tokens = 0
-        self.data_loader = AllamoDataLoader(config, self.rank, self.world_size)
+        self.__init_dataloader(config)
         self.__init_training(config)
         
     def __init_logger(self, config: AllamoConfiguration):
@@ -144,6 +144,9 @@ class AllamoFSDPTrainer:
         else:
             self.fsdp_activation_checkpointing = False
             
+    def __init_dataloader(self, config: AllamoConfiguration):
+        self.data_loader = AllamoDataLoader(config, self.rank, self.world_size)
+            
     def __init_training(self, config: AllamoConfiguration):
         model_config_fields = [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
         ckpt_dir = config.checkpoint_path if config.checkpoint_path else config.out_dir
@@ -167,6 +170,8 @@ class AllamoFSDPTrainer:
                     self.logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
             else:
                 raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
+        self.checkpoint_name = checkpoint_name
+        self.checkpoint_dir = ckpt_dir
                 
         model_args = {k: getattr(config, k) for k in model_config_fields if hasattr(config, k)}
         modelConf = AllamoTransformerConfig(**model_args)
@@ -174,10 +179,10 @@ class AllamoFSDPTrainer:
             modelConf.gradient_checkpointing = False
         model = AllamoTransformer(modelConf)
         self.model_num_params = model.model_num_params
-        if checkpoint_name is None:
+        if self.checkpoint_name is None:
             self.logger.info("Initialized a new model from scratch")
         else:
-            self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), config)
+            self.load_model_checkpoint(model, os.path.join(self.checkpoint_dir, f'model_{self.checkpoint_name}.pt'), config)
         
         self.logger.info("Configuring model with FSDP")
         model = FSDP(model, **self.fsdp_config)
@@ -204,10 +209,10 @@ class AllamoFSDPTrainer:
         
         # optimizer
         self.optimizer = model.configure_optimizers(config, self.device_type)
-        if checkpoint_name is None:
+        if self.checkpoint_name is None:
             self.logger.info("Initializing optimizer from scratch")
         else:
-            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(ckpt_dir, f'optimizer_{checkpoint_name}.pt'))
+            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(self.checkpoint_dir, f'optimizer_{self.checkpoint_name}.pt'))
                 
         # gradient_accumulation scheduler
         if config.grad_accum_schedule: 
@@ -360,6 +365,24 @@ class AllamoFSDPTrainer:
             accuraces['val'] = accuraces['train']
         return losses_out, accuraces
     
+    def forward(self, batch, last_micro_step):
+        logits, loss, _ = self.model(**batch)
+        if self.gradient_accumulation_steps > 1:
+            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+        
+        if batch["target_weights"] is not None:
+            if self.config.weighted_loss_method == 'openchat':
+                fsdp_loss_weight_acc = batch["target_weights"].sum()
+                # sum loss weights over all processes
+                dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
+                loss = (self.world_size / fsdp_loss_weight_acc) * loss
+            else:
+                loss = loss / torch.sum(batch["target_weights"] > 0).item()
+        
+        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
+        return loss, unmasked_labels, accuracy
+    
     def train(self):
         self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
         batch = self.data_loader.get_batch('train') # fetch the very first batch
@@ -444,24 +467,13 @@ class AllamoFSDPTrainer:
             batch_mfu_excluded_time = 0
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
-            for _ in range(self.gradient_accumulation_steps):
-                logits, loss, _ = self.model(**batch)
-                if self.gradient_accumulation_steps > 1:
-                    loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
-                if batch["target_weights"] is not None:
-                    if self.config.weighted_loss_method == 'openchat':
-                        fsdp_loss_weight_acc = batch["target_weights"].sum()
-                        # sum loss weights over all processes
-                        dist.all_reduce(fsdp_loss_weight_acc, op=dist.ReduceOp.SUM)
-                        loss = (self.world_size / fsdp_loss_weight_acc) * loss
-                    else:
-                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
-
+            for micro_step in range(self.gradient_accumulation_steps):
+                loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
+                
                 mfu_excluded_time = time.time()
-                unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 fsdp_loss_acc[0] += loss.item()
                 fsdp_loss_acc[1] += unmasked_labels
-                fsdp_loss_acc[2] += (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
+                fsdp_loss_acc[2] += accuracy
                 fsdp_loss_acc[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU

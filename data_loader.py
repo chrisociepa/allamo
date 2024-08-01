@@ -23,6 +23,7 @@ class AllamoDataset:
         self.ignore_index = config.ignore_index
         self.pad_token_id = config.pad_token_id
         self.weighted_loss = config.weighted_loss
+        self.training_type = config.training_type
         self.data = None
         self.data_in_alm_format = False
         self.dataset_files = self.get_dataset_files(config, train_split)
@@ -67,6 +68,7 @@ class AllamoDataset:
         self.processed_files.append(load_dataset_file)
         new_data = None
         if load_dataset_file.endswith('.bin'):
+            assert self.training_type == 'pre', 'NumPy format is supported only for pre-training'
             step_size = self.world_size * self.sample_size
             new_data = torch.from_numpy(np.fromfile(load_dataset_file, dtype=np.uint16).astype(np.int16))
             if step_size > len(new_data):
@@ -79,6 +81,7 @@ class AllamoDataset:
             new_data = self.transform_continuous_data_to_samples(new_data)
             new_data = self.limit_samples_to_rank(new_data)
         elif load_dataset_file.endswith('.pt'):
+            assert self.training_type != 'dpo', 'DPO training only supports the ALM format'
             new_data = torch.load(load_dataset_file, map_location='cpu')
             if isinstance(new_data, torch.Tensor):
                 step_size = self.world_size * self.sample_size
@@ -207,6 +210,29 @@ class AllamoDataset:
     def has_data(self):
         return self.data and len(self.data) > 0
     
+    def prepare_alm_dpo_sample(self, sample):
+        result = {
+            'chosen_input_ids': torch.from_numpy(sample['chosen_input_ids']),
+            'chosen_target_ids': torch.from_numpy(sample['chosen_target_ids']),
+            'rejected_input_ids': torch.from_numpy(sample['rejected_input_ids']),
+            'rejected_target_ids': torch.from_numpy(sample['rejected_target_ids'])
+        }
+        if "reference_chosen_logps" in sample and "reference_rejected_logps" in sample:
+            result["reference_chosen_logps"] = torch.tensor(sample['reference_chosen_logps'])
+            result["reference_rejected_logps"] = torch.tensor(sample['reference_rejected_logps'])
+        
+        if self.pad_token_id >= 0:
+            if len(result['chosen_input_ids']) < self.block_size:
+                result['chosen_input_ids'] = F.pad(result['chosen_input_ids'], (0, self.block_size - len(result['chosen_input_ids'])), value=self.pad_token_id)
+            if len(result['chosen_target_ids']) < self.block_size:
+                result['chosen_target_ids'] = F.pad(result['chosen_target_ids'], (0, self.block_size - len(result['chosen_target_ids'])), value=self.ignore_index)
+            if len(result['rejected_input_ids']) < self.block_size:
+                result['rejected_input_ids'] = F.pad(result['rejected_input_ids'], (0, self.block_size - len(result['rejected_input_ids'])), value=self.pad_token_id)
+            if len(result['rejected_target_ids']) < self.block_size:
+                result['rejected_target_ids'] = F.pad(result['rejected_target_ids'], (0, self.block_size - len(result['rejected_target_ids'])), value=self.ignore_index)
+        
+        return result
+    
     def prepare_alm_sample(self, sample):
         """
         Assumes input sample contains at least 'input_ids' and 'target_ids' fields. 
@@ -216,6 +242,9 @@ class AllamoDataset:
         If pad_token_id is set in the configuration, it is assumed that the sample list
         did not have padding and samples are of length up to block_size.
         """
+        if self.training_type == 'dpo':
+            return self.prepare_alm_dpo_sample(sample)
+        
         result = {
             'input_ids': torch.from_numpy(sample['input_ids']),
             'target_ids': torch.from_numpy(sample['target_ids'])
@@ -319,7 +348,45 @@ class AllamoDataLoader:
     def get_splits(self):
         return self.splits
     
+    def prepare_dpo_samples(self, samples):
+        chosen_input_ids = torch.stack([sample['chosen_input_ids'] for sample in samples]).to(torch.int64)
+        chosen_target_ids = torch.stack([sample['chosen_target_ids'] for sample in samples]).to(torch.int64)
+        rejected_input_ids = torch.stack([sample['rejected_input_ids'] for sample in samples]).to(torch.int64)
+        rejected_target_ids = torch.stack([sample['rejected_target_ids'] for sample in samples]).to(torch.int64)
+        reference_chosen_logps = torch.stack([sample['reference_chosen_logps'] for sample in samples]).to(torch.float32) if 'reference_chosen_logps' in samples[0] else None
+        reference_rejected_logps = torch.stack([sample['reference_rejected_logps'] for sample in samples]).to(torch.float32) if 'reference_rejected_logps' in samples[0] else None
+        
+        if 'cuda' in self.config.device and self.pin_memory:
+            chosen_input_ids = chosen_input_ids.pin_memory().to(self.config.device, non_blocking=True)
+            chosen_target_ids = chosen_target_ids.pin_memory().to(self.config.device, non_blocking=True)
+            rejected_input_ids = rejected_input_ids.pin_memory().to(self.config.device, non_blocking=True)
+            rejected_target_ids = rejected_target_ids.pin_memory().to(self.config.device, non_blocking=True)
+            if reference_chosen_logps is not None:
+                reference_chosen_logps = reference_chosen_logps.pin_memory().to(self.config.device, non_blocking=True)
+            if reference_rejected_logps is not None:
+                reference_rejected_logps = reference_rejected_logps.pin_memory().to(self.config.device, non_blocking=True)
+        else:
+            chosen_input_ids = chosen_input_ids.to(self.config.device)
+            chosen_target_ids = chosen_target_ids.to(self.config.device)
+            rejected_input_ids = rejected_input_ids.to(self.config.device)
+            rejected_target_ids = rejected_target_ids.to(self.config.device)
+            if reference_chosen_logps is not None:
+                reference_chosen_logps = reference_chosen_logps.to(self.config.device)
+            if reference_rejected_logps is not None:
+                reference_rejected_logps = reference_rejected_logps.to(self.config.device)
+        return {
+            "chosen_input_ids": chosen_input_ids,
+            "chosen_target_ids": chosen_target_ids,
+            "rejected_input_ids": rejected_input_ids,
+            "rejected_target_ids": rejected_target_ids,
+            "reference_chosen_logps": reference_chosen_logps,
+            "reference_rejected_logps": reference_rejected_logps
+        }
+    
     def prepare_samples(self, samples):
+        if self.config.training_type == 'dpo':
+            return self.prepare_dpo_samples(samples)
+        
         if isinstance(samples[0], dict):
             input_ids = torch.stack([sample['input_ids'] for sample in samples]).to(torch.int64)
             target_ids = torch.stack([sample['target_ids'] for sample in samples]).to(torch.int64)
