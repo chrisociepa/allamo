@@ -4,7 +4,6 @@ This single file is intended to perform some magic for DPO training using FSDP.
 import datetime
 import gc
 import os
-import time
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -66,7 +65,6 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
-        timer = time.time()
         policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
         policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
@@ -112,25 +110,28 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reward_accuracies.item(),
                 reward_margins.item(),
                 chosen_rewards.item(),
-                rejected_rewards.item()
+                rejected_rewards.item(),
+                1
             ]).to(self.config.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
             if self.master_process:
-                fwd_time = time.time() - timer
+                cnt = metrics[4].item()
+                reward_accuracies = metrics[0].item() / cnt
+                reward_margins = metrics[1].item() / cnt
+                chosen_rewards = metrics[2].item() / cnt
+                rejected_rewards = metrics[3].item() / cnt
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
-                        "dpo/forward_time": fwd_time*1000,
-                        "dpo/loss": dpo_loss.item(),
-                        "dpo/rewards/accuracies": reward_accuracies.item(),
-                        "dpo/rewards/margins": reward_margins.item(),
-                        "dpo/rewards/chosen": chosen_rewards.item(),
-                        "dpo/rewards/rejected": rejected_rewards.item()
+                        "dpo/rewards/accuracies": reward_accuracies,
+                        "dpo/rewards/margins": reward_margins,
+                        "dpo/rewards/chosen": chosen_rewards,
+                        "dpo/rewards/rejected": rejected_rewards
                     })
                 else:
                     self.logger.info(
-                        f"iter {self.iter_num:,}: dpo loss={dpo_loss:.4f} "
+                        f"iter {self.iter_num:,}: "
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
                     )
