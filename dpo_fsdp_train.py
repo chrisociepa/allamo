@@ -64,23 +64,6 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
         else:
             self.ref_model = None
             self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
-        
-    def calculate_preference_loss(self,
-        policy_chosen_logps,
-        policy_rejected_logps,
-        reference_chosen_logps,
-        reference_rejected_logps,
-        beta=0.5
-    ):
-        prefered_relative_logps = policy_chosen_logps - reference_chosen_logps
-        disprefered_relative_logps = policy_rejected_logps - reference_rejected_logps
-        
-        reward_accuracies = (prefered_relative_logps > disprefered_relative_logps).float().mean(dim=-1)
-        reward_margins = (prefered_relative_logps - disprefered_relative_logps).mean(dim=-1)
-        
-        loss = -F.logsigmoid(beta * (prefered_relative_logps - disprefered_relative_logps)).mean(dim=-1)
-        
-        return loss, prefered_relative_logps.mean(dim=-1), disprefered_relative_logps.mean(dim=-1), reward_accuracies, reward_margins
     
     def forward(self, batch, last_micro_step):
         timer = time.time()
