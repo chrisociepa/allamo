@@ -65,9 +65,12 @@ if __name__ == "__main__":
     parser.add_argument("-f", "--input_file", help="Input file in the ALM format")
     parser.add_argument("-i", "--input_dir", help="Directory with input files in the ALM format")
     parser.add_argument("-o", "--output_dir", required=True, help="Output dir")
-    parser.add_argument("--checkpoint_dir", required=True, help="Model checkpoint dir")
-    parser.add_argument("--checkpoint_name", required=True, help="Model checkpoint name")
+    parser.add_argument("--checkpoint_dir", help="Model checkpoint dir")
+    parser.add_argument("--checkpoint_name",  help="Model checkpoint name")
+    parser.add_argument("--config_path", help="Path to ALLaMo json configuration file")
+    parser.add_argument("--hf_model_path", help="Model path in HF format")
     parser.add_argument("--pin_memory", type=bool, default=True, help="Specifies if the tensor is copied to pinned memory")
+    parser.add_argument('--save_samples', type=int, default=-1, help='Save this number of samples if positive')
     parser.add_argument('--verbose', action='store_true', help='Be verbose')
     args = parser.parse_args()
     
@@ -81,32 +84,44 @@ if __name__ == "__main__":
                     input_files.append(os.path.join(root, f))
     logger.info(f"Initialized with {len(input_files)} input file(s)")
     
-    assert model_checkpoint_files_exist(args.checkpoint_name, args.checkpoint_dir)
-    
-    ckpt_path = os.path.join(args.checkpoint_dir, f'config_{args.checkpoint_name}.json')
-    with open(ckpt_path, "r", encoding="utf-8") as f:
-        config_checkpoint = json.load(f)
+    if args.config_path and args.hf_model_path:
+        with open(args.config_path, "r", encoding="utf-8") as f:
+            json_config = json.load(f)
+        json_config["load_configuration"] = False
+        config = AllamoConfiguration(**json_config)
         
-    config_checkpoint["config"]["load_configuration"] = False
-    config = AllamoConfiguration(**(config_checkpoint["config"]))
+        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+        
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(args.hf_model_path, torch_dtype=ptdtype, device_map=config.device)
+        torch_ctx = nullcontext()
+    else: 
+        assert model_checkpoint_files_exist(args.checkpoint_name, args.checkpoint_dir)
     
-    # init torch
-    torch.manual_seed(config.seed)
-    torch.cuda.manual_seed(config.seed)
-    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-    torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
-    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-    device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-    torch_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-    
-    logger.info("Start preparing model")
-    model_ckpt_path = os.path.join(args.checkpoint_dir, f'model_{args.checkpoint_name}.pt')
-    model_config = AllamoTransformerConfig(**(config_checkpoint["model_args"]))
-    model = AllamoTransformer(model_config)
-    logger.info(f"Model initialized. Start loading checkpoint {model_ckpt_path}")
-    load_model_checkpoint(model, model_ckpt_path)
-    model.to(config.device)
+        ckpt_path = os.path.join(args.checkpoint_dir, f'config_{args.checkpoint_name}.json')
+        with open(ckpt_path, "r", encoding="utf-8") as f:
+            config_checkpoint = json.load(f)
+            
+        config_checkpoint["config"]["load_configuration"] = False
+        config = AllamoConfiguration(**(config_checkpoint["config"]))
+        
+        # init torch
+        torch.manual_seed(config.seed)
+        torch.cuda.manual_seed(config.seed)
+        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+        torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+        device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
+        torch_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+        
+        logger.info("Start preparing model")
+        model_ckpt_path = os.path.join(args.checkpoint_dir, f'model_{args.checkpoint_name}.pt')
+        model_config = AllamoTransformerConfig(**(config_checkpoint["model_args"]))
+        model = AllamoTransformer(model_config)
+        logger.info(f"Model initialized. Start loading checkpoint {model_ckpt_path}")
+        load_model_checkpoint(model, model_ckpt_path)
+        model.to(config.device)
     model.eval()
     logger.info(f"Model loaded")
     
@@ -121,8 +136,12 @@ if __name__ == "__main__":
             for sample in tqdm(samples, disable=(not args.verbose)):
                 batch = get_batch(sample, config, args.pin_memory)
                 with torch_ctx:
-                    reference_chosen_logits, _, _ = model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
-                    reference_rejected_logits, _, _ = model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
+                    if args.hf_model_path:
+                        reference_chosen_logits = model(input_ids=batch["chosen_input_ids"]).logits
+                        reference_rejected_logits = model(input_ids=batch["rejected_input_ids"]).logits
+                    else:
+                        reference_chosen_logits, _, _ = model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
+                        reference_rejected_logits, _, _ = model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
                 sample["reference_chosen_logps"] = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], config.ignore_index).item()
                 sample["reference_rejected_logps"] = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], config.ignore_index).item()
         
@@ -130,6 +149,29 @@ if __name__ == "__main__":
         with open(output_file, 'wb') as f:
             joblib.dump(samples, f)
         logger.info(f"Saved ({len(samples)}) samples in {output_file}")
+        
+        if args.save_samples > 0:
+            logger.info(f"Saving samples")
+            samples_file = output_file + "-samples.jsonl"
+            with open(samples_file, 'w') as f:
+                for sample in samples[:args.save_samples]:
+                    chosen_input_ids = sample["chosen_input_ids"].tolist()
+                    rejected_input_ids = sample["rejected_input_ids"].tolist()
+                    new_sample = {
+                        "chosen_len": len(chosen_input_ids),
+                        "rejected_len": len(rejected_input_ids),
+                        "batch_len": len(chosen_input_ids)+len(rejected_input_ids),
+                        "chosen_input_ids": chosen_input_ids,
+                        "chosen_target_ids": sample["chosen_target_ids"].tolist(),
+                        "rejected_input_ids": rejected_input_ids,
+                        "rejected_target_ids": sample["rejected_target_ids"].tolist(),
+                        "reference_chosen_logps": sample["reference_chosen_logps"],
+                        "reference_rejected_logps": sample["reference_rejected_logps"]
+                    }
+                    
+                    f.write(json.dumps(new_sample, ensure_ascii=False))
+                    f.write('\n')
+            logger.info(f"Samples saved in {samples_file}")
         
         sum_reference_chosen_logps = sum(sample["reference_chosen_logps"] for sample in samples)
         sum_reference_rejected_logps = sum(sample["reference_rejected_logps"] for sample in samples)
