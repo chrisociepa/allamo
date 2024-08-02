@@ -134,10 +134,6 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             
             if self.master_process:
                 fwd_time = time.time() - timer
-                self.logger.info(
-                    f"iter {self.iter_num:,}: dpo loss={dpo_loss:.4f} "
-                    f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f}"
-                )
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
@@ -148,6 +144,12 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         "dpo/rewards/chosen": chosen_rewards.item(),
                         "dpo/rewards/rejected": rejected_rewards.item()
                     })
+                else:
+                    self.logger.info(
+                        f"iter {self.iter_num:,}: dpo loss={dpo_loss:.4f} "
+                        f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
+                        f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
+                    )
         return dpo_loss, unmasked_labels, accuracy
 
 if __name__ == '__main__':
