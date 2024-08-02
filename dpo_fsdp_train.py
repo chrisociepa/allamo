@@ -94,9 +94,7 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
         rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
         unmasked_labels = chosen_unmasked_labels + rejected_unmasked_labels
         
-        chosen_accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item()
-        rejected_accuracy = (policy_rejected_logits.max(2).indices == batch["rejected_target_ids"]).sum().item()
-        accuracy = (chosen_accuracy + rejected_accuracy) / unmasked_labels
+        accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels
         
         if last_micro_step and self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0:
             chosen_rewards = chosen_rewards.detach() 
