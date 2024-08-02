@@ -12,6 +12,7 @@ import datetime
 import dataclasses
 import shutil
 import uuid
+import wandb
 
 import torch
 import torch.distributed as dist
@@ -568,7 +569,6 @@ if __name__ == '__main__':
     
     # logging
     if config.wandb_log and trainer.master_process:
-        import wandb
         wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
     
