@@ -159,9 +159,10 @@ def process_chunk(args):
         if 'messages' not in messages:
             rejected += 1
         else:
+            weight = messages['weight'] if "weight" in messages and messages['weight'] > 0 else float(cols[0])
             sample = tokenize_conversation({
                 "messages": messages['messages'], 
-                "weight": float(cols[0])
+                "weight": weight
             }, tokenizer, ignore_index, chat_format)
             
             input_ids_len = len(sample['input_ids'])
@@ -402,7 +403,7 @@ if __name__ == "__main__":
     if args.pack:
         sample_lenghts = [sum(sample['seq_lens']) for sample in all_samples]
     else:
-        sample_lenghts = [np.sum(sample['input_ids'] != args.pad_token_id) for sample in all_samples]
+        sample_lenghts = [np.sum(sample['input_ids'] != args.pad_token_id).item() for sample in all_samples]
     shortest_sample_tokens = min(sample_lenghts)
     longest_sample_tokens = max(sample_lenghts)
     total_tokens_count = sum(sample_lenghts)
