@@ -3,6 +3,7 @@ Use this file to add reference log probabilities to your DPO (Direct Preference 
 """
 
 import argparse
+import concurrent.futures
 import joblib
 import json
 import logging
@@ -10,17 +11,12 @@ import os
 import sys
 import time
 import torch
-from contextlib import nullcontext
+from itertools import chain
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM
 
 sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig, AllamoTransformer
-from configuration import AllamoConfiguration
 from dpo_fsdp_train import get_log_prob
-from train_utils import (
-    model_checkpoint_files_exist,
-    remove_unwanted_prefix_from_model_state_dict,
-)
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,44 +28,100 @@ def format_seconds_as_time(seconds):
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours)}:{int(minutes):02}:{int(seconds):02}"
 
-def load_model_checkpoint(model, ckpt_path):
-    state_dict = torch.load(ckpt_path, map_location='cpu')
-    remove_unwanted_prefix_from_model_state_dict(state_dict)
-    model.load_state_dict(state_dict)
+def get_dtype(dtype_str):
+    return {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype_str]
     
-def get_batch(sample, config, pin_memory):
+def get_batch(sample, device, pin_memory):
     chosen_input_ids = torch.stack([torch.from_numpy(sample['chosen_input_ids'])]).to(torch.int64)
     chosen_target_ids = torch.stack([torch.from_numpy(sample['chosen_target_ids'])]).to(torch.int64)
     rejected_input_ids = torch.stack([torch.from_numpy(sample['rejected_input_ids'])]).to(torch.int64)
     rejected_target_ids = torch.stack([torch.from_numpy(sample['rejected_target_ids'])]).to(torch.int64)
     
-    if 'cuda' in config.device and pin_memory:
-        chosen_input_ids = chosen_input_ids.pin_memory().to(config.device, non_blocking=True)
-        chosen_target_ids = chosen_target_ids.pin_memory().to(config.device, non_blocking=True)
-        rejected_input_ids = rejected_input_ids.pin_memory().to(config.device, non_blocking=True)
-        rejected_target_ids = rejected_target_ids.pin_memory().to(config.device, non_blocking=True)
+    if 'cuda' in device and pin_memory:
+        chosen_input_ids = chosen_input_ids.pin_memory().to(device, non_blocking=True)
+        chosen_target_ids = chosen_target_ids.pin_memory().to(device, non_blocking=True)
+        rejected_input_ids = rejected_input_ids.pin_memory().to(device, non_blocking=True)
+        rejected_target_ids = rejected_target_ids.pin_memory().to(device, non_blocking=True)
     else:
-        chosen_input_ids = chosen_input_ids.to(config.device)
-        chosen_target_ids = chosen_target_ids.to(config.device)
-        rejected_input_ids = rejected_input_ids.to(config.device)
-        rejected_target_ids = rejected_target_ids.to(config.device)
+        chosen_input_ids = chosen_input_ids.to(device)
+        chosen_target_ids = chosen_target_ids.to(device)
+        rejected_input_ids = rejected_input_ids.to(device)
+        rejected_target_ids = rejected_target_ids.to(device)
     return {
         "chosen_input_ids": chosen_input_ids,
         "chosen_target_ids": chosen_target_ids,
         "rejected_input_ids": rejected_input_ids,
         "rejected_target_ids": rejected_target_ids
     }
+    
+def calculate_sample_stats(samples):
+    sum_reference_chosen_logps = sum(sample["reference_chosen_logps"] for sample in samples)
+    sum_reference_rejected_logps = sum(sample["reference_rejected_logps"] for sample in samples)
+    return {
+        'min_reference_chosen_logps': min(sample["reference_chosen_logps"] for sample in samples),
+        'max_reference_chosen_logps': max(sample["reference_chosen_logps"] for sample in samples),
+        'sum_reference_chosen_logps': sum_reference_chosen_logps,
+        'avg_reference_chosen_logps': sum_reference_chosen_logps / len(samples),
+        'min_reference_rejected_logps': min(sample["reference_rejected_logps"] for sample in samples),
+        'max_reference_rejected_logps': max(sample["reference_rejected_logps"] for sample in samples),
+        'sum_reference_rejected_logps': sum_reference_rejected_logps,
+        'avg_reference_rejected_logps': sum_reference_rejected_logps / len(samples)
+    }
+        
+def process_file(input_file, model, device, pin_memory, ignore_index, disable_logging=True):
+    samples = joblib.load(input_file)
+    
+    with torch.no_grad():
+        for sample in tqdm(samples, disable=disable_logging):
+            batch = get_batch(sample, device, pin_memory)
+            reference_chosen_logits = model(input_ids=batch["chosen_input_ids"]).logits
+            reference_rejected_logits = model(input_ids=batch["rejected_input_ids"]).logits
+            sample["reference_chosen_logps"] = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], ignore_index).item()
+            sample["reference_rejected_logps"] = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], ignore_index).item()
+    
+    with open(input_file, 'wb') as f:
+        joblib.dump(samples, f)
+    return samples
+        
+def process_chunk(input_file, hf_model_path, hf_model_dtype, device, pin_memory, ignore_index):
+    model = AutoModelForCausalLM.from_pretrained(hf_model_path, torch_dtype=get_dtype(hf_model_dtype), device_map=device)
+    process_file(input_file, model, device, pin_memory, ignore_index)
+    
+def save_samples(samples, input_file, args):
+    if args.save_samples > 0:
+        logger.info(f"Saving samples")
+        samples_file = os.path.join(args.output_dir, os.path.basename(input_file) + "-samples.jsonl")
+        with open(samples_file, 'w') as f:
+            for sample in samples[:args.save_samples]:
+                chosen_input_ids = sample["chosen_input_ids"].tolist()
+                rejected_input_ids = sample["rejected_input_ids"].tolist()
+                new_sample = {
+                    "chosen_len": len(chosen_input_ids),
+                    "rejected_len": len(rejected_input_ids),
+                    "batch_len": len(chosen_input_ids)+len(rejected_input_ids),
+                    "chosen_input_ids": chosen_input_ids,
+                    "chosen_target_ids": sample["chosen_target_ids"].tolist(),
+                    "rejected_input_ids": rejected_input_ids,
+                    "rejected_target_ids": sample["rejected_target_ids"].tolist(),
+                    "reference_chosen_logps": sample["reference_chosen_logps"],
+                    "reference_rejected_logps": sample["reference_rejected_logps"]
+                }
+                
+                f.write(json.dumps(new_sample, ensure_ascii=False))
+                f.write('\n')
+        logger.info(f"Samples saved in {samples_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tokenize dialogues for DPO training')
     parser.add_argument("-f", "--input_file", help="Input file in the ALM format")
     parser.add_argument("-i", "--input_dir", help="Directory with input files in the ALM format")
     parser.add_argument("-o", "--output_dir", required=True, help="Output dir")
-    parser.add_argument("--checkpoint_dir", help="Model checkpoint dir")
-    parser.add_argument("--checkpoint_name",  help="Model checkpoint name")
-    parser.add_argument("--config_path", help="Path to ALLaMo json configuration file")
-    parser.add_argument("--hf_model_path", help="Model path in HF format")
+    parser.add_argument("--hf_model_path", required=True, help="Model path in HF format")
+    parser.add_argument("--hf_model_dtype", required=True, help="HF model dtype")
+    parser.add_argument("--hf_model_device", required=True, help="Device to load the HF model on")
+    parser.add_argument("--hf_model_copies", default=1, help="Number of model copies to run on separate devices")
     parser.add_argument("--pin_memory", type=bool, default=True, help="Specifies if the tensor is copied to pinned memory")
+    parser.add_argument("--ignore_index", type=int, default=-100, help="Specifies a target value that is ignored in loss computation. Default is -100")
     parser.add_argument('--save_samples', type=int, default=-1, help='Save this number of samples if positive')
     parser.add_argument('--verbose', action='store_true', help='Be verbose')
     args = parser.parse_args()
@@ -84,108 +136,66 @@ if __name__ == "__main__":
                     input_files.append(os.path.join(root, f))
     logger.info(f"Initialized with {len(input_files)} input file(s)")
     
-    if args.config_path and args.hf_model_path:
-        with open(args.config_path, "r", encoding="utf-8") as f:
-            json_config = json.load(f)
-        json_config["load_configuration"] = False
-        config = AllamoConfiguration(**json_config)
-        
-        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-        
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(args.hf_model_path, torch_dtype=ptdtype, device_map=config.device)
-        torch_ctx = nullcontext()
-    else: 
-        assert model_checkpoint_files_exist(args.checkpoint_name, args.checkpoint_dir)
-    
-        ckpt_path = os.path.join(args.checkpoint_dir, f'config_{args.checkpoint_name}.json')
-        with open(ckpt_path, "r", encoding="utf-8") as f:
-            config_checkpoint = json.load(f)
-            
-        config_checkpoint["config"]["load_configuration"] = False
-        config = AllamoConfiguration(**(config_checkpoint["config"]))
-        
-        # init torch
-        torch.manual_seed(config.seed)
-        torch.cuda.manual_seed(config.seed)
-        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-        torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
-        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
-        device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-        torch_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-        
-        logger.info("Start preparing model")
-        model_ckpt_path = os.path.join(args.checkpoint_dir, f'model_{args.checkpoint_name}.pt')
-        model_config = AllamoTransformerConfig(**(config_checkpoint["model_args"]))
-        model = AllamoTransformer(model_config)
-        logger.info(f"Model initialized. Start loading checkpoint {model_ckpt_path}")
-        load_model_checkpoint(model, model_ckpt_path)
-        model.to(config.device)
-    model.eval()
-    logger.info(f"Model loaded")
-    
     os.makedirs(args.output_dir, exist_ok=True)
     timer = time.time()
-    for input_file in input_files:
-        logger.info(f'Loading data from {input_file}')
-        samples = joblib.load(input_file)
-        logger.info(f'Loaded {len(samples)} samples. Start generating log probabilities')
+    if args.hf_model_copies > 1:
+        assert args.hf_model_device.startswith("cuda"), "Only CUDA devices are supported in parallel mode"
         
-        with torch.no_grad():
-            for sample in tqdm(samples, disable=(not args.verbose)):
-                batch = get_batch(sample, config, args.pin_memory)
-                with torch_ctx:
-                    if args.hf_model_path:
-                        reference_chosen_logits = model(input_ids=batch["chosen_input_ids"]).logits
-                        reference_rejected_logits = model(input_ids=batch["rejected_input_ids"]).logits
-                    else:
-                        reference_chosen_logits, _, _ = model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
-                        reference_rejected_logits, _, _ = model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
-                sample["reference_chosen_logps"] = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], config.ignore_index).item()
-                sample["reference_rejected_logps"] = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], config.ignore_index).item()
+        for input_file in input_files:
+            logger.info(f'Loading data from {input_file}')
+            samples = joblib.load(input_file)
+            logger.info(f'Loaded {len(samples)} samples. Start generating log probabilities')
         
-        output_file = os.path.join(args.output_dir, os.path.basename(input_file))
-        with open(output_file, 'wb') as f:
-            joblib.dump(samples, f)
-        logger.info(f"Saved ({len(samples)}) samples in {output_file}")
+            logger.info(f"Chunking {len(samples):,} samples into {args.hf_model_copies} files")
+            chunk_files = []
+            for rank in tqdm(range(args.hf_model_copies), total=args.hf_model_copies, desc="Chunking", disable=(not args.verbose)):
+                chunk_file = os.path.join(args.output_dir, f"chunk_{rank:05}.tmp")
+                with open(chunk_file, 'wb') as f:
+                    joblib.dump(samples[rank::args.hf_model_copies], f)
+                chunk_files.append(chunk_file)
+            del samples
+            logger.info(f"Saved {len(chunk_files)} chunks in {args.output_dir}")
+            
+            logger.info(f"Start generating log probabilities for {len(chunk_files)} chunks")
+            max_workers = min(len(chunk_files), args.hf_model_copies)
+            chunk_batches = list((chunk_file, args.hf_model_path, args.hf_model_dtype, f"cuda:{rank}", args.pin_memory, args.ignore_index) for rank, chunk_file in enumerate(chunk_files))
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                for _ in executor.map(process_chunk, chunk_batches):
+                    pass
+            del executor
+            logger.info(f"Log probabilities generated in {len(chunk_files)} chunks")
+            
+            logger.info(f"Merging {len(chunk_files)} chunks")
+            chunks = joblib.Parallel(n_jobs=len(chunk_files))(joblib.delayed(joblib.load)(f) for f in chunk_files)
+            samples = list(chain.from_iterable(chunks))
+            logger.info(f"{len(samples):,} samples merged")
+            
+            output_file = os.path.join(args.output_dir, os.path.basename(input_file))
+            with open(output_file, 'wb') as f:
+                joblib.dump(samples, f)
+            logger.info(f"Saved ({len(samples)}) samples in {output_file}")
+            
+            stats = calculate_sample_stats(samples)
+            stats_str = json.dumps(stats, indent=4, ensure_ascii=False)
+            logger.info(f"Stats for {input_file}:\n{stats_str}")
+            
+            # cleanup
+            for chunk_file in chunk_files:
+                os.remove(chunk_file)
+    else:
+        device = args.hf_model_device
         
-        if args.save_samples > 0:
-            logger.info(f"Saving samples")
-            samples_file = output_file + "-samples.jsonl"
-            with open(samples_file, 'w') as f:
-                for sample in samples[:args.save_samples]:
-                    chosen_input_ids = sample["chosen_input_ids"].tolist()
-                    rejected_input_ids = sample["rejected_input_ids"].tolist()
-                    new_sample = {
-                        "chosen_len": len(chosen_input_ids),
-                        "rejected_len": len(rejected_input_ids),
-                        "batch_len": len(chosen_input_ids)+len(rejected_input_ids),
-                        "chosen_input_ids": chosen_input_ids,
-                        "chosen_target_ids": sample["chosen_target_ids"].tolist(),
-                        "rejected_input_ids": rejected_input_ids,
-                        "rejected_target_ids": sample["rejected_target_ids"].tolist(),
-                        "reference_chosen_logps": sample["reference_chosen_logps"],
-                        "reference_rejected_logps": sample["reference_rejected_logps"]
-                    }
-                    
-                    f.write(json.dumps(new_sample, ensure_ascii=False))
-                    f.write('\n')
-            logger.info(f"Samples saved in {samples_file}")
+        model = AutoModelForCausalLM.from_pretrained(args.hf_model_path, torch_dtype=get_dtype(args.hf_model_dtype), device_map=device)
+        logger.info(f"Model loaded")
         
-        sum_reference_chosen_logps = sum(sample["reference_chosen_logps"] for sample in samples)
-        sum_reference_rejected_logps = sum(sample["reference_rejected_logps"] for sample in samples)
-        stats = {
-            'min_reference_chosen_logps': min(sample["reference_chosen_logps"] for sample in samples),
-            'max_reference_chosen_logps': max(sample["reference_chosen_logps"] for sample in samples),
-            'sum_reference_chosen_logps': sum_reference_chosen_logps,
-            'avg_reference_chosen_logps': sum_reference_chosen_logps / len(samples),
-            'min_reference_rejected_logps': min(sample["reference_rejected_logps"] for sample in samples),
-            'max_reference_rejected_logps': max(sample["reference_rejected_logps"] for sample in samples),
-            'sum_reference_rejected_logps': sum_reference_rejected_logps,
-            'avg_reference_rejected_logps': sum_reference_rejected_logps / len(samples)
-        }
-        stats_str = json.dumps(stats, indent=4, ensure_ascii=False)
-        logger.info(f"Stats: {stats_str}")
+        for input_file in input_files:
+            logger.info(f'Processing {input_file}')
+            samples =  process_file(input_file, model, device, args.pin_memory, args.ignore_index, disable_logging=(not args.verbose))
+            
+            save_samples(samples, input_file, args)
 
-    logger.info(f"Generated log probabilities in {format_seconds_as_time(time.time()-timer)}")
+            stats = calculate_sample_stats(samples)
+            stats_str = json.dumps(stats, indent=4, ensure_ascii=False)
+            logger.info(f"Stats for {input_file}:\n{stats_str}")
+    
+    logger.info(f"Generated log probabilities for {len(input_files)} file(s) in {format_seconds_as_time(time.time()-timer)}")
