@@ -65,7 +65,7 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
-        policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
+        policy_chosen_logits, policy_chosen_loss, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
         policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
         policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
@@ -81,15 +81,14 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reference_chosen_logps = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
                 reference_rejected_logps = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
         
-        # calculate DPOP loss
+        # calculate DPO loss
         chosen_rewards = self.config.preference_beta * (policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.config.preference_beta * (policy_rejected_logps - reference_rejected_logps)
-        penalty = self.config.preference_beta * self.config.preference_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
         
-        dpop_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - penalty).mean()
+        dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean() - self.config.preference_lambda * policy_chosen_loss
         
         if self.gradient_accumulation_steps > 1:
-            dpop_loss = dpop_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+            dpo_loss = dpo_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
             
         chosen_unmasked_labels = torch.sum(batch["chosen_target_ids"].view(-1) != self.config.ignore_index).item()
         rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
@@ -134,13 +133,13 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
                     )
-        return dpop_loss, unmasked_labels, accuracy
+        return dpo_loss, unmasked_labels, accuracy
 
 if __name__ == '__main__':
     config = AllamoConfiguration()
     config.training_type = 'dpo'
     if config.preference_lambda is None:
-        config.preference_lambda = 50
+        config.preference_lambda = 0.2
     trainer = DPOAllamoFSDPTrainer(config)
     
     # logging
