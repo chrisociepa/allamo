@@ -103,13 +103,22 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             reward_margins = (chosen_rewards - rejected_rewards).mean()
             chosen_rewards = chosen_rewards.mean()
             rejected_rewards = rejected_rewards.mean()
-            
+
+            policy_chosen_logps = policy_chosen_logps.detach()
+            policy_rejected_logps = policy_rejected_logps.detach()
+            policy_accuracies = (policy_chosen_logps > policy_rejected_logps).float().mean()
+            policy_chosen_logps = policy_chosen_logps.mean()
+            policy_rejected_logps = policy_rejected_logps.mean()
+
             metrics = torch.tensor([
                 reward_accuracies.item(),
                 reward_margins.item(),
                 chosen_rewards.item(),
                 rejected_rewards.item(),
-                1
+                1,
+                policy_accuracies.item(),
+                policy_chosen_logps.item(),
+                policy_rejected_logps.item()
             ]).to(self.config.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
@@ -119,13 +128,19 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reward_margins = metrics[1].item() / cnt
                 chosen_rewards = metrics[2].item() / cnt
                 rejected_rewards = metrics[3].item() / cnt
+                policy_accuracies = metrics[5].item() / cnt
+                policy_chosen_logps = metrics[6].item() / cnt
+                policy_rejected_logps = metrics[7].item() / cnt
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
                         "dpo/rewards/accuracies": reward_accuracies,
                         "dpo/rewards/margins": reward_margins,
                         "dpo/rewards/chosen": chosen_rewards,
-                        "dpo/rewards/rejected": rejected_rewards
+                        "dpo/rewards/rejected": rejected_rewards,
+                        "dpo/logps/chosen": policy_chosen_logps,
+                        "dpo/logps/rejected": policy_rejected_logps,
+                        "dpo/logps/accuracies": policy_accuracies
                     })
                 else:
                     self.logger.info(
