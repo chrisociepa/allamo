@@ -103,13 +103,22 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             reward_margins = (chosen_rewards - rejected_rewards).mean()
             chosen_rewards = chosen_rewards.mean()
             rejected_rewards = rejected_rewards.mean()
-            
+
+            ranking_chosen = policy_chosen_logps.detach()
+            ranking_rejected = policy_rejected_logps.detach()
+            ranking_accuracies = (ranking_chosen > ranking_rejected).float().mean()
+            ranking_chosen = ranking_chosen.mean()
+            ranking_rejected = ranking_rejected.mean()
+
             metrics = torch.tensor([
                 reward_accuracies.item(),
                 reward_margins.item(),
                 chosen_rewards.item(),
                 rejected_rewards.item(),
-                1
+                1,
+                ranking_accuracies.item(),
+                ranking_chosen.item(),
+                ranking_rejected.item()
             ]).to(self.config.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
@@ -119,13 +128,19 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reward_margins = metrics[1].item() / cnt
                 chosen_rewards = metrics[2].item() / cnt
                 rejected_rewards = metrics[3].item() / cnt
+                ranking_accuracies = metrics[5].item() / cnt
+                ranking_chosen = metrics[6].item() / cnt
+                ranking_rejected = metrics[7].item() / cnt
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
                         "dpo/rewards/accuracies": reward_accuracies,
                         "dpo/rewards/margins": reward_margins,
                         "dpo/rewards/chosen": chosen_rewards,
-                        "dpo/rewards/rejected": rejected_rewards
+                        "dpo/rewards/rejected": rejected_rewards,
+                        "dpo/ranking/chosen": ranking_chosen,
+                        "dpo/ranking/rejected": ranking_rejected,
+                        "dpo/ranking/accuracies": ranking_accuracies
                     })
                 else:
                     self.logger.info(
