@@ -65,6 +65,8 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
+        batch["chosen_target_ids"][:, -5:] = self.config.ignore_index
+        batch["rejected_target_ids"][:, -5:] = self.config.ignore_index
         policy_chosen_logits, policy_chosen_loss, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
         policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
