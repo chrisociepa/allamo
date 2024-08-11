@@ -83,7 +83,8 @@ def process_file(input_file, model, device, pin_memory, ignore_index, disable_lo
         joblib.dump(samples, f)
     return samples
         
-def process_chunk(input_file, hf_model_path, hf_model_dtype, device, pin_memory, ignore_index):
+def process_chunk(args):
+    input_file, hf_model_path, hf_model_dtype, device, pin_memory, ignore_index = args
     model = AutoModelForCausalLM.from_pretrained(hf_model_path, torch_dtype=get_dtype(hf_model_dtype), device_map=device)
     process_file(input_file, model, device, pin_memory, ignore_index)
     
