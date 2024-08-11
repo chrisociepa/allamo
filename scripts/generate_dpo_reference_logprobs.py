@@ -176,6 +176,8 @@ if __name__ == "__main__":
                 joblib.dump(samples, f)
             logger.info(f"Saved ({len(samples)}) samples in {output_file}")
             
+            save_samples(samples, input_file, args)
+            
             stats = calculate_sample_stats(samples)
             stats_str = json.dumps(stats, indent=4, ensure_ascii=False)
             logger.info(f"Stats for {input_file}:\n{stats_str}")
