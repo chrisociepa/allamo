@@ -119,7 +119,7 @@ if __name__ == "__main__":
     parser.add_argument("--hf_model_path", required=True, help="Model path in HF format")
     parser.add_argument("--hf_model_dtype", required=True, help="HF model dtype")
     parser.add_argument("--hf_model_device", required=True, help="Device to load the HF model on")
-    parser.add_argument("--hf_model_copies", default=1, help="Number of model copies to run on separate devices")
+    parser.add_argument("--hf_model_copies", type=int, default=1, help="Number of model copies to run on separate devices")
     parser.add_argument("--pin_memory", type=bool, default=True, help="Specifies if the tensor is copied to pinned memory")
     parser.add_argument("--ignore_index", type=int, default=-100, help="Specifies a target value that is ignored in loss computation. Default is -100")
     parser.add_argument('--save_samples', type=int, default=-1, help='Save this number of samples if positive')
