@@ -85,7 +85,11 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
         chosen_rewards = self.config.preference_beta * (policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.config.preference_beta * (policy_rejected_logps - reference_rejected_logps)
         
-        dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
+        if self.config.dpo_strategy == "DPOP":
+            penalty = self.config.preference_beta * self.config.dpop_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
+            dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - penalty).mean()
+        else:
+            dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
         
         if self.gradient_accumulation_steps > 1:
             dpo_loss = dpo_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
@@ -111,11 +115,11 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             policy_rejected_logps = policy_rejected_logps.mean()
 
             metrics = torch.tensor([
+                1,
                 reward_accuracies.item(),
                 reward_margins.item(),
                 chosen_rewards.item(),
                 rejected_rewards.item(),
-                1,
                 policy_accuracies.item(),
                 policy_chosen_logps.item(),
                 policy_rejected_logps.item()
@@ -123,11 +127,11 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
             if self.master_process:
-                cnt = metrics[4].item()
-                reward_accuracies = metrics[0].item() / cnt
-                reward_margins = metrics[1].item() / cnt
-                chosen_rewards = metrics[2].item() / cnt
-                rejected_rewards = metrics[3].item() / cnt
+                cnt = metrics[0].item()
+                reward_accuracies = metrics[1].item() / cnt
+                reward_margins = metrics[2].item() / cnt
+                chosen_rewards = metrics[3].item() / cnt
+                rejected_rewards = metrics[4].item() / cnt
                 policy_accuracies = metrics[5].item() / cnt
                 policy_chosen_logps = metrics[6].item() / cnt
                 policy_rejected_logps = metrics[7].item() / cnt
