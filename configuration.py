@@ -102,6 +102,7 @@ class AllamoConfiguration:
     dpo_chosen_beta: float = 0.5
     dpo_rejected_beta: float = 0.1
     dpo_penalty_lambda: float = 50.0
+    dpo_rsgu: bool = False
     reference_checkpoint_name: str = 'ref_ckpt'
     training_type: str = 'pre'
     
@@ -204,6 +205,7 @@ class AllamoConfiguration:
         parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_rejected_beta', type=float, help='Temperature parameter for the rejected part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_penalty_lambda', type=float, help='Temperature parameter for penalty-positive in the DPO loss, typically in the range of 1 to 100')
+        parser.add_argument('--dpo_rsgu', type=bool, help='Whether to use DPO Rejected Selective Gradient Update')
         parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')

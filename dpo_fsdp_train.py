@@ -65,11 +65,6 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
-        policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
-        policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
-        policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
-        policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
-        
         if "reference_chosen_logps" in batch and batch["reference_chosen_logps"] is not None:
             reference_chosen_logps = batch["reference_chosen_logps"]
             reference_rejected_logps = batch["reference_rejected_logps"]
@@ -80,6 +75,28 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reference_rejected_logits, _, _ = self.ref_model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
                 reference_chosen_logps = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
                 reference_rejected_logps = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+        
+        rsgu_ratio = 0
+        if self.config.dpo_rsgu:
+            self.model.eval()
+            with torch.no_grad():
+                policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
+                policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+            self.model.train()
+            rsgu_ratio = torch.tensor([1, (policy_rejected_logps > reference_rejected_logps).float().mean().item()]).to(self.config.device)
+            dist.all_reduce(rsgu_ratio, op=dist.ReduceOp.SUM)
+            rsgu_ratio = rsgu_ratio[1].item() / rsgu_ratio[0].item()
+            
+            if rsgu_ratio >= 0.5:
+                policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
+                policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+        else:
+            policy_rejected_logits, _, _ = self.model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
+            policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+        
+        policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
+        policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
+        
         
         # calculate DPO loss
         chosen_rewards = self.config.dpo_chosen_beta * (policy_chosen_logps - reference_chosen_logps)
@@ -144,14 +161,15 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         "dpo/rewards/penalty": reward_penalty,
                         "dpo/logps/chosen": policy_chosen_logps,
                         "dpo/logps/rejected": policy_rejected_logps,
-                        "dpo/logps/accuracies": policy_accuracies
+                        "dpo/logps/accuracies": policy_accuracies,
+                        "dpo/logps/rsgu_ratio": rsgu_ratio
                     })
                 else:
                     self.logger.info(
                         f"iter {self.iter_num:,}: "
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
-                        f"reward_penalty={reward_penalty:.4f}"
+                        f"reward_penalty={reward_penalty:.4f} rsgu_ratio={rsgu_ratio:.4f}"
                     )
         return dpo_loss, unmasked_labels, accuracy
 
