@@ -99,10 +99,9 @@ class AllamoConfiguration:
     fsdp_sharding_strategy: str = 'FULL_SHARD'
     epoch_completion_hook_program: str = None
     regular_checkpoint_hook_program: str = None
-    preference_beta: float = 0.5
-    dpo_strategy: str = "DPO"
-    dpop_lambda: float = 50.0
-    dpon_lambda: float = 50.0
+    dpo_chosen_beta: float = 0.5
+    dpo_rejected_beta: float = 0.1
+    dpo_penalty_lambda: float = 50.0
     reference_checkpoint_name: str = 'ref_ckpt'
     training_type: str = 'pre'
     
@@ -202,10 +201,9 @@ class AllamoConfiguration:
         parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
-        parser.add_argument('--preference_beta', type=float, help='Temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5')
-        parser.add_argument('--dpo_strategy', type=str, choices=['DPO', 'DPOPN'], help='Specifies DPO strategy')
-        parser.add_argument('--dpop_lambda', type=float, help='Temperature parameter for penalty-positive in the DPOPN loss, typically in the range of 5 to 500')
-        parser.add_argument('--dpon_lambda', type=float, help='Temperature parameter for penalty-negative in the DPOPN loss, typically in the range of 5 to 500')
+        parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
+        parser.add_argument('--dpo_rejected_beta', type=float, help='Temperature parameter for the rejected part of the DPO loss, typically something in the range of 0.1 to 0.5')
+        parser.add_argument('--dpo_penalty_lambda', type=float, help='Temperature parameter for penalty-positive in the DPO loss, typically in the range of 1 to 100')
         parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
