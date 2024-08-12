@@ -85,11 +85,14 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
         chosen_rewards = self.config.preference_beta * (policy_chosen_logps - reference_chosen_logps)
         rejected_rewards = self.config.preference_beta * (policy_rejected_logps - reference_rejected_logps)
         
-        if self.config.dpo_strategy == "DPOP":
-            penalty = self.config.preference_beta * self.config.dpop_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
-            dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - penalty).mean()
+        
+        if self.config.dpo_strategy == "DPOPN":
+            reward_penalty_positive = self.config.preference_beta * self.config.dpop_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
+            reward_penalty_negative = self.config.preference_beta * self.config.dpon_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), policy_rejected_logps - reference_rejected_logps)
         else:
-            dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
+            reward_penalty_positive = torch.zeros_like(policy_chosen_logps)
+            reward_penalty_negative = reward_penalty_positive
+        dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - reward_penalty_positive - reward_penalty_negative).mean()
         
         if self.gradient_accumulation_steps > 1:
             dpo_loss = dpo_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
@@ -107,19 +110,23 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             reward_margins = (chosen_rewards - rejected_rewards).mean()
             chosen_rewards = chosen_rewards.mean()
             rejected_rewards = rejected_rewards.mean()
+            reward_penalty_positive = reward_penalty_positive.mean()
+            reward_penalty_negative = reward_penalty_negative.mean()
 
             policy_chosen_logps = policy_chosen_logps.detach()
             policy_rejected_logps = policy_rejected_logps.detach()
             policy_accuracies = (policy_chosen_logps > policy_rejected_logps).float().mean()
             policy_chosen_logps = policy_chosen_logps.mean()
             policy_rejected_logps = policy_rejected_logps.mean()
-
+            
             metrics = torch.tensor([
                 1,
                 reward_accuracies.item(),
                 reward_margins.item(),
                 chosen_rewards.item(),
                 rejected_rewards.item(),
+                reward_penalty_positive.item(),
+                reward_penalty_negative.item(),
                 policy_accuracies.item(),
                 policy_chosen_logps.item(),
                 policy_rejected_logps.item()
@@ -132,9 +139,11 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                 reward_margins = metrics[2].item() / cnt
                 chosen_rewards = metrics[3].item() / cnt
                 rejected_rewards = metrics[4].item() / cnt
-                policy_accuracies = metrics[5].item() / cnt
-                policy_chosen_logps = metrics[6].item() / cnt
-                policy_rejected_logps = metrics[7].item() / cnt
+                reward_penalty_positive = metrics[5].item() / cnt
+                reward_penalty_negative = metrics[6].item() / cnt
+                policy_accuracies = metrics[7].item() / cnt
+                policy_chosen_logps = metrics[8].item() / cnt
+                policy_rejected_logps = metrics[9].item() / cnt
                 if self.config.wandb_log:
                     wandb.log({
                         "iter": self.iter_num,
@@ -142,6 +151,8 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         "dpo/rewards/margins": reward_margins,
                         "dpo/rewards/chosen": chosen_rewards,
                         "dpo/rewards/rejected": rejected_rewards,
+                        "dpo/rewards/penalty_positive": reward_penalty_positive,
+                        "dpo/rewards/penalty_negative": reward_penalty_negative,
                         "dpo/logps/chosen": policy_chosen_logps,
                         "dpo/logps/rejected": policy_rejected_logps,
                         "dpo/logps/accuracies": policy_accuracies
@@ -151,6 +162,7 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         f"iter {self.iter_num:,}: "
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
+                        f"reward_penalty_pos={reward_penalty_positive:.4f} reward_penalty_neg={reward_penalty_negative:.4f}"
                     )
         return dpo_loss, unmasked_labels, accuracy
 
