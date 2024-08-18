@@ -490,4 +490,6 @@ class AllamoDataLoader:
         if self.config.batch_size_schedule and self.batch_size < self.config.batch_size_max:
             self.batch_size = min(self.batch_size + 1, self.config.batch_size_max) if iter_num % (self.config.batch_size_max_iter/100) == 0 else self.batch_size 
         return self.batch_size
-        
+    
+    def get_num_loaded_files(self):
+        return len(self.train_dataset.processed_files)

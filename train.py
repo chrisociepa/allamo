@@ -312,6 +312,7 @@ class AllamoTrainer:
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
+        current_num_loaded_files = self.data_loader.get_num_loaded_files()
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
@@ -320,6 +321,11 @@ class AllamoTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+                current_num_loaded_files = self.data_loader.get_num_loaded_files()
+            elif self.config.save_checkpoint_on_dataset_reload and current_num_loaded_files != self.data_loader.get_num_loaded_files():
+                ckpt_file_name = f'ds_reload_{current_epoch}-{current_num_loaded_files}'
+                self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=False)
+                current_num_loaded_files = self.data_loader.get_num_loaded_files()
             elif self.config.should_override_config(self.iter_num):
                 self.config.override_config_properties()
             

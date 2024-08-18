@@ -27,6 +27,7 @@ class AllamoConfiguration:
     save_optimizer_checkpoint: bool = True
     optimizer_checkpoint_interval: int = None
     save_best_checkpoint: bool = True
+    save_checkpoint_on_dataset_reload: bool = False
     config_override_check_interval: int = None
     config_override_path: str = None
     eval_interval: int = 1000
@@ -131,6 +132,7 @@ class AllamoConfiguration:
         parser.add_argument('--save_optimizer_checkpoint', type=bool, help='Enable saving optimizer checkpoint')
         parser.add_argument('--optimizer_checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the optimizer is saved. The same as checkpoint_interval, if not specified')
         parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
+        parser.add_argument('--save_checkpoint_on_dataset_reload', type=bool, help='Enable model checkpoint saving on dataset reload')
         parser.add_argument('--config_override_check_interval', type=int, help='Number of iterations for checking override configuration. Feature disabled if not specified.')
         parser.add_argument('--config_override_path', type=str, help='Specifies the location of the configuration override file')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')

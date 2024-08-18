@@ -385,11 +385,12 @@ class AllamoFSDPTrainer:
         return loss, unmasked_labels, accuracy
     
     def train(self):
-        self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}) with configuration: {self.config}")
+        self.logger.info(f"Starting FSDP training (run id: {self.run_uuid}, world size: {self.world_size}) with configuration: {self.config}")
         batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
+        current_num_loaded_files = self.data_loader.get_num_loaded_files()
         fsdp_loss_acc = torch.zeros(5).to(self.config.device)
         while has_next_iter_to_perform(self.iter_num, self.config, self.data_loader):
             if current_epoch < self.data_loader.epoch:
@@ -399,6 +400,11 @@ class AllamoFSDPTrainer:
                     pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
                     self.logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
+                current_num_loaded_files = self.data_loader.get_num_loaded_files()
+            elif self.config.save_checkpoint_on_dataset_reload and current_num_loaded_files != self.data_loader.get_num_loaded_files():
+                ckpt_file_name = f'ds_reload_{current_epoch}-{current_num_loaded_files}'
+                self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=False)
+                current_num_loaded_files = self.data_loader.get_num_loaded_files()
             elif self.config.should_override_config(self.iter_num):
                 self.config.override_config_properties()
             
