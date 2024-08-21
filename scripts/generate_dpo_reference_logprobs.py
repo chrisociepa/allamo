@@ -76,9 +76,9 @@ def process_file(input_file, model, device, pin_memory, ignore_index, disable_lo
             batch = get_batch(sample, device, pin_memory)
             reference_chosen_output = model(input_ids=batch["chosen_input_ids"])
             reference_rejected_output = model(input_ids=batch["rejected_input_ids"])
-            sample["reference_chosen_loss"] = reference_chosen_output.loss.item()
+            sample["reference_chosen_loss"] = reference_chosen_output.loss
             sample["reference_chosen_logps"] = get_log_prob(reference_chosen_output.logits, batch["chosen_target_ids"], ignore_index).item()
-            sample["reference_rejected_loss"] = reference_rejected_output.loss.item()
+            sample["reference_rejected_loss"] = reference_rejected_output.loss
             sample["reference_rejected_logps"] = get_log_prob(reference_rejected_output.logits, batch["rejected_target_ids"], ignore_index).item()
     
     with open(input_file, 'wb') as f:
