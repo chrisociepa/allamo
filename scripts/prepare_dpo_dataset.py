@@ -142,7 +142,8 @@ def process_chunk(args):
     data = []
     pa_table = pq.read_table(chunk_file)
     for i in range(len(pa_table['rows'])):
-        row = json.loads(pa_table['rows'][i].as_py())
+        cols = pa_table['rows'][i].as_py().split(';', 1)
+        row = json.loads(cols[1])
         if 'messages' not in row or 'chosen' not in row or 'rejected' not in row:
             rejected += 1
         else:
@@ -164,7 +165,8 @@ def process_chunk(args):
                 'chosen_input_ids': chosen_sample['input_ids'],
                 'chosen_target_ids': chosen_sample['target_ids'],
                 'rejected_input_ids': rejected_sample['input_ids'],
-                'rejected_target_ids': rejected_sample['target_ids']
+                'rejected_target_ids': rejected_sample['target_ids'],
+                'source_file': cols[0]
             })
     del pa_table
     
@@ -245,8 +247,9 @@ if __name__ == "__main__":
     
     logger.info("Loading data")
     def load_data_file(config):
+        filename_prefix = os.path.basename(config['path']) + ";"
         with open(config['path'], 'r') as f:
-            return list(line for line in f if line)
+            return list(filename_prefix + line for line in f if line)
         
     chunks = joblib.Parallel(n_jobs=args.max_workers)(joblib.delayed(load_data_file)(config) for config in configs)
     all_rows = list(chain.from_iterable(chunks))
