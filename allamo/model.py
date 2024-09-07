@@ -1,7 +1,3 @@
-"""
-The full definition of the model is located in this file.
-"""
-
 import math
 import inspect
 import logging
@@ -12,6 +8,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
+
+from allamo.logging import logger
 
 _flash_attention_version = 1 if hasattr(torch.nn.functional, 'scaled_dot_product_attention') else 0
 _flash_attn_2_supports_window_size = False
@@ -281,17 +279,16 @@ class AllamoTransformer(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        self.logger = logging.getLogger('AllamoTransformer')
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
-            self.logger.info(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
+            logger.info(f"defaulting to head_size={config.head_size} (n_embd / n_head)")
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
-        self.logger.info(f"AllamoTransformerConfig: {config}")
+        logger.info(f"AllamoTransformerConfig: {config}")
         self.__log_flash_attention_version()
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
@@ -314,13 +311,13 @@ class AllamoTransformer(nn.Module):
 
     def __log_flash_attention_version(self):
         if _flash_attention_version == 2:
-            self.logger.info("Using Flash Attention 2")
+            logger.info("Using Flash Attention 2")
             if _flash_attn_2_supports_window_size and self.config.sliding_window:
-                self.logger.info("Using sliding window")
+                logger.info("Using sliding window")
         elif _flash_attention_version == 1:
-            self.logger.info("Using scaled_dot_product_attention")
+            logger.info("Using scaled_dot_product_attention")
         elif _flash_attention_version == 0:
-            self.logger.info("WARNING: using slow attention")
+            logger.info("WARNING: using slow attention")
         else:
             raise Exception('Unsupported Flash Attention version!')
 
@@ -342,7 +339,7 @@ class AllamoTransformer(nn.Module):
         self.model_num_params, self.model_num_bytes = self.estimate_size()
         model_params = self.model_num_params / 1e6
         model_bytes = self.model_num_bytes / 1024**2
-        self.logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
+        logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -441,14 +438,14 @@ class AllamoTransformer(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        self.logger.info(f"Decayed parameter tensors: {len(decay_params):,}, with {num_decay_params:,} parameters")
-        self.logger.info(f"Non-decayed parameter tensors: {len(nodecay_params):,}, with {num_nodecay_params:,} parameters")
+        logger.info(f"Decayed parameter tensors: {len(decay_params):,}, with {num_decay_params:,} parameters")
+        logger.info(f"Non-decayed parameter tensors: {len(nodecay_params):,}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=(config.beta1, config.beta2), **extra_args)
-        self.logger.info(f"Using fused AdamW: {use_fused}")
+        logger.info(f"Using fused AdamW: {use_fused}")
 
         return optimizer
         
@@ -467,7 +464,7 @@ class AllamoTransformer(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         if tokens.size(1) > self.config.block_size:
-            self.logger.info(
+            logger.info(
                 f"Input of {tokens.size(1)} tokens exceeds limit {self.config.block_size}. "
                 f"Initial tokens will be dropped to fit."
             )

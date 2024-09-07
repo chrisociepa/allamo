@@ -7,11 +7,9 @@ import json
 import os
 import time
 import math
-import logging
 import datetime
 import dataclasses
 import shutil
-import uuid
 import wandb
 from contextlib import nullcontext
 
@@ -19,10 +17,16 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from model import AllamoTransformerConfig, AllamoTransformer
-from configuration import AllamoConfiguration
-from data_loader import AllamoDataLoader
-from train_utils import (
+from allamo.logging import configure_logger, logger
+from allamo.training_context import TrainingContext
+from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.configuration import AllamoConfiguration
+from allamo.data_loader import AllamoDataLoader
+from allamo.torch_utils import (
+    TORCH_DTYPE_MAP,
+    init_torch,
+)
+from allamo.train_utils import (
     rename_file_to_prev_version,
     calculate_md5,
     remove_unwanted_prefix_from_model_state_dict,
@@ -37,72 +41,34 @@ from train_utils import (
     get_optimizer_checkpoint_path,
     model_checkpoint_files_exist,
     run_checkpoint_hook_program,
-    override_numa_affinity,
 )
 
 class AllamoTrainer:
 
-    def __init__(self, config: AllamoConfiguration, ddp=False):
-        self.run_uuid = str(uuid.uuid4())
-        self.training_uuid = self.run_uuid
-        self.config = config
-        self.ddp = ddp
-        self.__init_torch(config)
-        self.__init_logger(config)
-        self.logger.info(f"Torch initialized for run {self.run_uuid}")
+    def __init__(self, config: AllamoConfiguration):
+        self.train_ctx = TrainingContext()
+        if self.train_ctx.master_process:
+            configure_logger(config)
         
+        self.config = config
+        self.__init_torch(config)
+        logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
+        
+        self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
+
         self.iter_num = 0
         self.best_train_loss = 1e2
         self.best_val_loss = 1e2
         self.processed_tokens = 0
-        self.data_loader = AllamoDataLoader(config, self.rank, self.world_size)
         self.__init_training(config)
         
-    def __init_logger(self, config: AllamoConfiguration):
-        run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        if self.ddp:
-            log_file_name_base = f'train-{run_timestamp_str}-rank_{self.rank}'
-        else:
-            log_file_name_base = f'train-{run_timestamp_str}'
-        log_file_path = os.path.join(config.out_dir, f'{log_file_name_base}.log')
-        logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler(), logging.FileHandler(log_file_path)])
-        self.logger = logging.getLogger('AllamoTrainer')
-            
+    def ddp(self):
+        return self.train_ctx.world_size > 1
+        
     def __init_torch(self, config: AllamoConfiguration):
-        if self.ddp:
-            dist.init_process_group(backend=config.backend)
-            self.rank = int(os.environ['RANK'])
-            self.local_rank = int(os.environ['LOCAL_RANK'])
-            self.world_size = int(os.environ['WORLD_SIZE'])
-            print(
-                f"RANK: {self.rank}, LOCAL_RANK: {self.local_rank}, "
-                f"WORLD_SIZE: {self.world_size}, LOCAL_WORLD_SIZE: {os.environ['LOCAL_WORLD_SIZE']}"
-            )
-            config.device = f'cuda:{self.local_rank}'
-            torch.cuda.set_device(config.device)
-            self.master_process = self.rank == 0 # this process will do logging, checkpointing etc.
-            self.seed_offset = self.rank # each process gets a different seed
-        else:
-            # if not ddp, we are running on a single gpu, and one process
-            self.rank = 0
-            self.local_rank = 0
-            self.world_size = 1
-            self.master_process = True
-            self.seed_offset = 0
-    
-        if self.master_process:
-            os.makedirs(config.out_dir, exist_ok=True)
-        torch.manual_seed(config.seed + self.seed_offset)
-        torch.cuda.manual_seed(config.seed + self.seed_offset)
-        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-        torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
-        override_numa_affinity(self.local_rank)
-        ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'bfloat16-true': torch.bfloat16, 'float16': torch.float16}[config.dtype]
+        init_torch(self.train_ctx, config, distributed=self.ddp())
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu' # for later use in torch.autocast
-        self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
+        self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=TORCH_DTYPE_MAP[config.dtype])
         if config.dtype == 'bfloat16-true':
             # torch.set_float32_matmul_precision("high")
             torch.set_default_dtype(torch.bfloat16)
@@ -117,16 +83,16 @@ class AllamoTrainer:
             checkpoint_name = 'last_eval_ckpt'
         else:
             if model_checkpoint_files_exist('ckpt', ckpt_dir):
-                self.logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
+                logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
                 exit()
         
         if checkpoint_name is not None:
             if model_checkpoint_files_exist(checkpoint_name, ckpt_dir):
-                self.logger.info(f"Resuming training from {ckpt_dir} and start loading '{checkpoint_name}' checkpoint files")
+                logger.info(f"Resuming training from {ckpt_dir} and start loading '{checkpoint_name}' checkpoint files")
                 self.load_config_checkpoint(os.path.join(ckpt_dir, f'config_{checkpoint_name}.json'), config, model_config_fields)
             elif config.init_from == 'resume_last':
                 checkpoint_name = None
-                self.logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
+                logger.warning(f"'{checkpoint_name}' checkpoint files not found but allowing to start from scratch")
             else:
                 raise Exception(f"'{checkpoint_name}' checkpoint files not found!")
     
@@ -135,25 +101,24 @@ class AllamoTrainer:
         model = AllamoTransformer(modelConf)
         self.model_num_params = model.model_num_params
         if checkpoint_name is None:
-            self.logger.info("Initialized a new model from scratch")
+            logger.info("Initialized a new model from scratch")
         else:
             self.load_model_checkpoint(model, os.path.join(ckpt_dir, f'model_{checkpoint_name}.pt'), config)
         model.to(config.device)
 
-        # compile the model - requires PyTorch 2.0
         if config.compile:
-            self.logger.info("compiling the model... (takes a ~minute)")
+            logger.info("compiling the model... (takes a ~minute)")
             try:
                 model = torch.compile(model, mode=config.compile_mode)
-                self.logger.info("Model compiled and ready to use")
+                logger.info("Model compiled and ready to use")
             except Exception as err:
-                self.logger.warn(f"Model compile not supported: {err}")
+                logger.warn(f"Model compile not supported: {err}")
 
         self.raw_model = model # neeeded in DDP training
         self.model = model
         # wrap model into DDP container
-        if self.ddp:
-            self.model = DDP(self.model, device_ids=[self.local_rank])
+        if self.ddp():
+            self.model = DDP(self.model, device_ids=[self.train_ctx.local_rank])
             
         # initialize a GradScaler. If enabled=False scaler is a no-op
         self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16' or config.dtype == 'bfloat16'))
@@ -167,22 +132,22 @@ class AllamoTrainer:
         if config.grad_accum_schedule: 
             config.grad_accum_max = config.gradient_accumulation_steps
             config.gradient_accumulation_steps = config.grad_accum_initial
-            self.logger.info(
+            logger.info(
                 f"Gradient accumulation scheduler enabled. "
                 f"Current gradient accumulation steps: {config.gradient_accumulation_steps}"
             )
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
         
         if config.decay_lr:
-            self.logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(self.iter_num, self.config)}")
+            logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {get_lr(self.iter_num, self.config)}")
         else:
-            self.logger.info(f"Using constant learning rate: {config.learning_rate}")
+            logger.info(f"Using constant learning rate: {config.learning_rate}")
 
     def load_config_checkpoint(self, ckpt_path, config, model_config_fields):
         with open(ckpt_path, "r", encoding="utf-8") as f:
             config_checkpoint = json.load(f)
         if 'training_uuid' in config_checkpoint:
-            self.training_uuid = config_checkpoint['training_uuid']
+            self.train_ctx.training_uuid = config_checkpoint['training_uuid']
         # force these config attributes to be equal otherwise we can't even resume training
         # the rest of the attributes (e.g. dropout) can stay as desired from command line
         for k in model_config_fields:
@@ -206,7 +171,7 @@ class AllamoTrainer:
                     self.data_loader.train_dataset.processed_files.pop()
                     self.data_loader.train_dataset.load_next_dataset()
             if 'dataset_offset' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.world_size
+                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.train_ctx.world_size
             if 'epoch' in config_checkpoint['allamo_dataloader']:
                 self.data_loader.epoch = config_checkpoint['allamo_dataloader']['epoch']
         
@@ -214,20 +179,20 @@ class AllamoTrainer:
         state_dict = torch.load(ckpt_path, map_location='cpu')
         remove_unwanted_prefix_from_model_state_dict(state_dict)
         model.load_state_dict(state_dict)
-        if config.log_checkpoint_md5_on_load and self.master_process:
+        if config.log_checkpoint_md5_on_load and self.train_ctx.master_process:
             md5sum = calculate_md5(ckpt_path)
-            self.logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
+            logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
         else:
-            self.logger.info(f"Loaded model from checkpoint {ckpt_path}")
+            logger.info(f"Loaded model from checkpoint {ckpt_path}")
         
         
     def load_optimizer_checkpoint(self, optimizer, ckpt_path):
         if os.path.exists(ckpt_path):
             state_dict = torch.load(ckpt_path, map_location=config.device)
             optimizer.load_state_dict(state_dict)
-            self.logger.info("Optimizer state loaded.")
+            logger.info("Optimizer state loaded.")
         else:
-            self.logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
+            logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
 
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -259,7 +224,7 @@ class AllamoTrainer:
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
         model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        self.logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
+        logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
         if not self.config.ignore_last_checkpoint_backup:
             rename_file_to_prev_version(model_ckpt_file_path)
         torch.save(self.raw_model.state_dict(), model_ckpt_file_path)
@@ -268,8 +233,8 @@ class AllamoTrainer:
         
         checkpoint = {
             'model_args': dataclasses.asdict(self.raw_model.config),
-            'run_uuid': self.run_uuid,
-            'training_uuid': self.training_uuid,
+            'run_uuid': self.train_ctx.run_uuid,
+            'training_uuid': self.train_ctx.training_uuid,
             'iter_num': self.iter_num,
             'best_train_loss': self.best_train_loss,
             'best_val_loss': self.best_val_loss,
@@ -277,16 +242,16 @@ class AllamoTrainer:
             'config': dataclasses.asdict(self.config),
             'allamo_dataloader': {
                 'train_processed_files': self.data_loader.train_dataset.processed_files,
-                'dataset_offset': self.data_loader.dataset_offset * self.world_size,
+                'dataset_offset': self.data_loader.dataset_offset * self.train_ctx.world_size,
                 'epoch': self.data_loader.epoch
             }
         }
         if md5sum is not None:
             checkpoint['checkpoint_md5sum'] = md5sum
-            self.logger.info(f"model checkpoint saved - MD5: {md5sum}")
+            logger.info(f"model checkpoint saved - MD5: {md5sum}")
         
         config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        self.logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
+        logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
         if not self.config.ignore_last_checkpoint_backup:
             rename_file_to_prev_version(config_ckpt_file_path)
         with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
@@ -296,7 +261,7 @@ class AllamoTrainer:
             (self.config.optimizer_checkpoint_interval is None or \
              self.iter_num % self.config.optimizer_checkpoint_interval == 0):
             optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
+            logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:
                 rename_file_to_prev_version(optim_ckpt_file_path)
             torch.save(self.optimizer.state_dict(), optim_ckpt_file_path)
@@ -304,10 +269,10 @@ class AllamoTrainer:
             if self.config.optimizer_checkpoint_interval is not None:
                 shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
                 shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
-        self.logger.info(f"checkpoint files saved in {config.out_dir}")
+        logger.info(f"checkpoint files saved in {config.out_dir}")
         
     def train(self):
-        self.logger.info(f"Starting training (run id: {self.run_uuid}) with configuration: {self.config}")
+        logger.info(f"Starting training (run id: {self.train_ctx.run_uuid}) with configuration: {self.config}")
         batch = self.data_loader.get_batch('train') # fetch the very first batch
         self.start_iter = self.iter_num
         self.start_timestamp = datetime.datetime.now()
@@ -317,9 +282,9 @@ class AllamoTrainer:
             if current_epoch < self.data_loader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
-                if self.config.epoch_completion_hook_program and self.master_process:
-                    pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
-                    self.logger.info(f"Epoch completion hook program started with pid {pid}")
+                if self.config.epoch_completion_hook_program and self.train_ctx.master_process:
+                    pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.train_ctx.run_uuid, self.train_ctx.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                    logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
                 current_num_loaded_files = self.data_loader.get_num_loaded_files()
             elif self.config.save_checkpoint_on_dataset_reload and current_num_loaded_files != self.data_loader.get_num_loaded_files():
@@ -330,15 +295,15 @@ class AllamoTrainer:
                 self.config.override_config_properties()
             
             timer = time.time()
-            log_iter = (self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.master_process)
-            eval_iter = (self.config.eval_interval > 0 and self.iter_num % self.config.eval_interval == 0 and self.master_process)
+            log_iter = (self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.train_ctx.master_process)
+            eval_iter = (self.config.eval_interval > 0 and self.iter_num % self.config.eval_interval == 0 and self.train_ctx.master_process)
             lr = get_lr(self.iter_num, self.config)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.world_size
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.train_ctx.world_size
             self.gradient_accumulation_steps = get_grad_accum(self.gradient_accumulation_steps, self.iter_num, self.config)
 
             # evaluate the loss on train/val sets and write best checkpoint
@@ -350,7 +315,7 @@ class AllamoTrainer:
                 val_loss = losses['val'].item()
                 train_ppl = torch.exp(losses['train']).item()
                 val_ppl = torch.exp(losses['val']).item()
-                self.logger.info(
+                logger.info(
                     f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
                     f"acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), "
                     f"val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} "
@@ -389,9 +354,9 @@ class AllamoTrainer:
             if self.config.checkpoint_interval > 0 and self.iter_num > self.start_iter and self.iter_num % self.config.checkpoint_interval == 0:
                 ckpt_file_name = 'last_eval_ckpt'
                 self.save_checkpoint(ckpt_file_name)
-                if self.config.regular_checkpoint_hook_program and self.master_process:
-                    pid = run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
-                    self.logger.info(f"Regular checkpoint hook program started with pid {pid}")
+                if self.config.regular_checkpoint_hook_program and self.train_ctx.master_process:
+                    pid = run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, self.train_ctx.run_uuid, self.train_ctx.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                    logger.info(f"Regular checkpoint hook program started with pid {pid}")
             
             accuracy = 0
             unmasked_labels = 0
@@ -402,7 +367,7 @@ class AllamoTrainer:
             # and using the GradScaler if data type is float16
             micro_steps = self.gradient_accumulation_steps
             for micro_step in range(self.gradient_accumulation_steps):
-                if self.ddp:
+                if self.ddp():
                     # in DDP training we only need to sync gradients at the last micro step.
                     # the official way to do this is with model.no_sync() context manager, but
                     # I really dislike that this bloats the code and forces us to repeat code
@@ -439,7 +404,7 @@ class AllamoTrainer:
             
             mfu_excluded_time = time.time()
             # we can't count it precisely in DDP, so let's approximate
-            unmasked_labels *= self.world_size
+            unmasked_labels *= self.train_ctx.world_size
             # adjust learning rate
             if self.config.adaptive_learning_rate:
                 lr = lr * math.sqrt(unmasked_labels / total_batch_size)
@@ -472,9 +437,9 @@ class AllamoTrainer:
                     mfu_str = 'n/a'
                 mtu = fwdbwd_time/iter_time # model time utilization
                 iter_time_ms = iter_time * 1000
-                self.logger.info(
+                logger.info(
                     f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time_ms:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.6f}, "
+                    f"iter time {iter_time_ms:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.8f}, "
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
                     f"ETA: {calculate_eta(self.iter_num, self.start_iter, self.start_timestamp, self.config)}"
                 )
@@ -488,7 +453,7 @@ class AllamoTrainer:
                         "train/lr": lr,
                         "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
-                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.world_size/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
                         "train/tokens": self.processed_tokens,
                         "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
@@ -502,22 +467,26 @@ class AllamoTrainer:
             self.iter_num += 1
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
-        self.logger.info(f"Training finished in {training_time}")
+        logger.info(f"Training finished in {training_time}")
         
-        if self.master_process and not self.config.eval_only:
+        if self.train_ctx.master_process and not self.config.eval_only:
             ckpt_file_name = 'final_ckpt'
             self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
-            if self.config.epoch_completion_hook_program and self.master_process:
-                pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.run_uuid, self.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
-                self.logger.info(f"Epoch completion hook program started with pid {pid}")
+            if self.config.epoch_completion_hook_program and self.train_ctx.master_process:
+                pid = run_checkpoint_hook_program(self.config.epoch_completion_hook_program, self.train_ctx.run_uuid, self.train_ctx.training_uuid, current_epoch, self.iter_num, ckpt_file_name, self.config)
+                logger.info(f"Epoch completion hook program started with pid {pid}")
+
+    def close(self):
+        if self.ddp():
+            dist.barrier()
+            dist.destroy_process_group()
 
 if __name__ == '__main__':
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     config = AllamoConfiguration()
-    trainer = AllamoTrainer(config, ddp)
+    trainer = AllamoTrainer(config)
     
     # logging
-    if config.wandb_log and trainer.master_process:
+    if config.wandb_log and trainer.train_ctx.master_process:
         wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
     
@@ -525,7 +494,5 @@ if __name__ == '__main__':
     gc.collect()
     torch.cuda.empty_cache()
     
-    trainer.train()  
-      
-    if ddp:
-        dist.destroy_process_group()
+    trainer.train()
+    trainer.close()

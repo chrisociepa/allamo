@@ -1,20 +1,19 @@
 import gc
 import glob
 import joblib
-import logging
 import numpy as np
 import os
 import threading
 import time
 import torch
 import torch.nn.functional as F
-from configuration import AllamoConfiguration
+from allamo.configuration import AllamoConfiguration
+from allamo.logging import logger
 
 class AllamoDataset:
     """ In-Memory map-style dataset """
 
     def __init__(self, config: AllamoConfiguration, train_split=True, rank=None, world_size=None):
-        self.logger = logging.getLogger('AllamoDataset')
         self.rank = rank
         self.world_size = world_size
         self.data_dir = config.data_dir
@@ -44,7 +43,7 @@ class AllamoDataset:
             for dataset_file in glob.glob(os.path.join(dataset_dir, "*.*")):
                 if self.is_file_type_supported(dataset_file) and os.path.basename(dataset_file).startswith(prefix):
                     dataset_files.append(dataset_file)
-            self.logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
+            logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
         if dataset_files:
             return sorted(dataset_files)
         elif train_split:
@@ -72,7 +71,7 @@ class AllamoDataset:
             step_size = self.world_size * self.sample_size
             new_data = torch.from_numpy(np.fromfile(load_dataset_file, dtype=np.uint16).astype(np.int16))
             if step_size > len(new_data):
-                self.logger.warning(
+                logger.warning(
                     f"Dataset file {load_dataset_file} does not have enough data and will be ignored. "
                     f"Expected at least {step_size} tokens but found only {len(new_data)}"
                 )
@@ -86,7 +85,7 @@ class AllamoDataset:
             if isinstance(new_data, torch.Tensor):
                 step_size = self.world_size * self.sample_size
                 if step_size > len(new_data):
-                    self.logger.warning(
+                    logger.warning(
                         f"Dataset file {load_dataset_file} does not have enough data and will be ignored. "
                         f"Expected at least {step_size} tokens but found only {len(new_data)}"
                     )
@@ -105,7 +104,7 @@ class AllamoDataset:
         if new_data:
             self.data = new_data
             self.data_in_alm_format = load_dataset_file.endswith('.alm')
-            self.logger.info(f"New dataset file {load_dataset_file} loaded. Processed files: {len(self.processed_files)}")
+            logger.info(f"New dataset file {load_dataset_file} loaded. Processed files: {len(self.processed_files)}")
             gc.collect()
             return True
         else:
@@ -114,7 +113,7 @@ class AllamoDataset:
     def align_and_limit_to_rank(self, new_data, load_dataset_file):
         if isinstance(new_data, list):
             if self.world_size > len(new_data):
-                self.logger.warning(
+                logger.warning(
                     f"Dataset file {load_dataset_file} does not have enough data and will be ignored. "
                     f"Expected at least {self.world_size} samples but found only {len(new_data)}"
                 )
@@ -122,7 +121,7 @@ class AllamoDataset:
             new_data = self.align_data_to_step_size(new_data, self.world_size)
             new_data = self.limit_samples_to_rank(new_data)
         else:
-            self.logger.info(f"Unsupported format of {load_dataset_file}!")
+            logger.info(f"Unsupported format of {load_dataset_file}!")
             new_data = None
         return new_data
     
@@ -135,7 +134,7 @@ class AllamoDataset:
                 data.extend(data[:padding_length])
             else:
                 data = torch.concat((data, data[:padding_length]))
-            self.logger.info(f"Data aligned. Pre-alignment size: {pre_size}, "
+            logger.info(f"Data aligned. Pre-alignment size: {pre_size}, "
                              f"post-alignment size: {len(data)}, "
                              f"padding added: {padding_length}")
         return data
@@ -303,7 +302,6 @@ class AllamoDataset:
 class AllamoDataLoader:
 
     def __init__(self, config: AllamoConfiguration, rank=None, world_size=None):
-        self.logger = logging.getLogger('AllamoDataLoader')
         self.config = config
         self.epoch = 0
         self.rank = rank if rank is not None else 0
@@ -320,7 +318,7 @@ class AllamoDataLoader:
             self.dataset_offset = config.dataset_seq_train_start if config.dataset_seq_train_start is not None else 0
         else:
             self.dataset_offset = 0
-        self.logger.info(f"Training dataset offset set to {self.dataset_offset:,}")
+        logger.info(f"Training dataset offset set to {self.dataset_offset:,}")
         
         self.load_datasets()
         self.buffer = None
@@ -331,19 +329,19 @@ class AllamoDataLoader:
         timer = time.time()
         self.train_dataset = AllamoDataset(self.config, True, self.rank, self.world_size)
         self.splits = ['train']
-        self.logger.info(f"Training dataset created with files: {','.join(self.train_dataset.dataset_files)}")
-        self.logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
+        logger.info(f"Training dataset created with files: {','.join(self.train_dataset.dataset_files)}")
+        logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
         
         self.val_dataset = AllamoDataset(self.config, False, self.rank, self.world_size)
         if self.val_dataset.has_data():
             self.splits.append('val')
-            self.logger.info(f"Validation dataset created with files: {','.join(self.val_dataset.dataset_files)}")
-            self.logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
+            logger.info(f"Validation dataset created with files: {','.join(self.val_dataset.dataset_files)}")
+            logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
         else:
             self.val_dataset = None
-            self.logger.info(f"Validation dataset is missing. Testing only on the training dataset")
+            logger.info(f"Validation dataset is missing. Testing only on the training dataset")
         dt = time.time() - timer
-        self.logger.info(f"Datasets loaded in {dt:.2f} secs")
+        logger.info(f"Datasets loaded in {dt:.2f} secs")
         
     def get_splits(self):
         return self.splits
@@ -484,7 +482,7 @@ class AllamoDataLoader:
                 assert dataset.load_next_dataset(), 'Something very bad has happend and we are unable to reload dataset'
         self.dataset_offset = 0
         self.epoch += 1
-        self.logger.info(f"Epoch {self.epoch} finished")
+        logger.info(f"Epoch {self.epoch} finished")
         
     def update_batch_size(self, iter_num):
         if self.config.batch_size_schedule and self.batch_size < self.config.batch_size_max:

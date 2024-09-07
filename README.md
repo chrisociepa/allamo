@@ -155,9 +155,10 @@ $ python export_to_hf.py \
 
 ## Sampling / Inference
 
-Use the script `sample.py` to sample from a model you trained. For example:
+Go to `inference/` and use the script `sample.py` to sample from a model you trained. For example:
 
 ```
+$ cd inference/
 $ python sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
@@ -170,6 +171,7 @@ $ python sample.py \
 You can also prompt the model with some text from a file prefixing its path with `FILE:`, example:
 
 ```
+$ cd inference/
 $ python sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
@@ -181,11 +183,12 @@ $ python sample.py \
 
 Specify the tokenizer using `--tiktoken_tokenizer_name` for Tiktoken (e.g. `cl100k_base`), or thanks to HuggingFace Transformers, you can easily use your own pretrained tokenizer using `--custom_tokenizer_path` to provide your tokenizer's JSON config file.
 
-Use the script 'sample_api.py' to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
+Use the script `sample_api.py` to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
 
 To run the API with a pretrained model, example:
 
 ```
+$ cd inference/
 $ python sample_api.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=10 \
@@ -215,7 +218,8 @@ $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens 
 To run the UI at top of the API, example:
 
 ```
-$ python sample_u.py
+$ cd inference/
+$ python sample_ui.py
 ```
 
 ## Running LLaMA 7B on CPU
@@ -225,6 +229,7 @@ $ python sample_u.py
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
 ```
+$ cd inference/
 $ python sample_api.py \
     --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
     --llama_tokenizer_path="../data/llama-7b/" \

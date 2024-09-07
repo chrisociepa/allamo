@@ -8,13 +8,12 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import wandb
-from model import AllamoTransformer
-from configuration import AllamoConfiguration
-
 from copy import deepcopy
+from allamo.logging import logger
+from allamo.model import AllamoTransformer
+from allamo.configuration import AllamoConfiguration
+from allamo.train_utils import model_checkpoint_files_exist
 from fsdp_train import AllamoFSDPTrainer
-from train_utils import model_checkpoint_files_exist
-
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 def get_log_prob(logits, target_ids, ignore_index):
@@ -46,23 +45,23 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             ref_model = AllamoTransformer(ref_model_conf)
             self.load_model_checkpoint(ref_model, os.path.join(self.checkpoint_dir, f'model_{config.reference_checkpoint_name}.pt'), config)
             
-            self.logger.info("Configuring reference model with FSDP")
+            logger.info("Configuring reference model with FSDP")
             ref_model = FSDP(ref_model, **self.fsdp_config)
-            self.logger.info(f"Reference model configured with FSDP and sharding strategy {self.sharding_strategy}")
+            logger.info(f"Reference model configured with FSDP and sharding strategy {self.sharding_strategy}")
             
             # compile the model - requires PyTorch 2.0
             if config.compile:
-                self.logger.info("compiling the reference model... (takes a ~minute)")
+                logger.info("compiling the reference model... (takes a ~minute)")
                 try:
                     ref_model = torch.compile(ref_model, mode=config.compile_mode)
-                    self.logger.info("Reference model compiled and ready to use")
+                    logger.info("Reference model compiled and ready to use")
                 except Exception as err:
-                    self.logger.warning(f"Reference model cannot be compiled, because torch.compile is not supported: {err}")
+                    logger.warning(f"Reference model cannot be compiled, because torch.compile is not supported: {err}")
             self.ref_model = ref_model
             self.ref_model.eval()
         else:
             self.ref_model = None
-            self.logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
+            logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
         policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
@@ -124,7 +123,7 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
             ]).to(self.config.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             
-            if self.master_process:
+            if self.train_ctx.master_process:
                 cnt = metrics[0].item()
                 reward_accuracies = metrics[1].item() / cnt
                 reward_margins = metrics[2].item() / cnt
@@ -147,7 +146,7 @@ class DPOAllamoFSDPTrainer(AllamoFSDPTrainer):
                         "dpo/logps/accuracies": policy_accuracies
                     })
                 else:
-                    self.logger.info(
+                    logger.info(
                         f"iter {self.iter_num:,}: "
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
@@ -161,7 +160,7 @@ if __name__ == '__main__':
     trainer = DPOAllamoFSDPTrainer(config)
     
     # logging
-    if config.wandb_log and trainer.master_process:
+    if config.wandb_log and trainer.train_ctx.master_process:
         wandb_run_name = config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         wandb.init(project=config.wandb_project, name=wandb_run_name, config=config)
     
@@ -169,7 +168,5 @@ if __name__ == '__main__':
     gc.collect()
     torch.cuda.empty_cache()
     
-    trainer.train()  
-    
-    dist.barrier()
-    dist.destroy_process_group()
+    trainer.train()
+    trainer.close()

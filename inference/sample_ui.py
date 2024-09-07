@@ -1,4 +1,3 @@
-import json
 import gradio as gr
 import requests
 
