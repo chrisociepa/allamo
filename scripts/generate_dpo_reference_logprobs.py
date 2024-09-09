@@ -6,7 +6,6 @@ import argparse
 import concurrent.futures
 import joblib
 import json
-import logging
 import os
 import sys
 import time
@@ -14,15 +13,11 @@ import torch
 from itertools import chain
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
+from allamo.logging import configure_logger, logger
 
 sys.path.append(os.path.abspath('..'))
 from dpo_fsdp_train import get_log_prob
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger()
-    
 def format_seconds_as_time(seconds):
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -115,6 +110,7 @@ def save_samples(samples, input_file, args):
         logger.info(f"Samples saved in {samples_file}")
 
 if __name__ == "__main__":
+    configure_logger()
     parser = argparse.ArgumentParser(description='Tokenize dialogues for DPO training')
     parser.add_argument("-f", "--input_file", help="Input file in the ALM format")
     parser.add_argument("-i", "--input_dir", help="Directory with input files in the ALM format")

@@ -1,22 +1,13 @@
 """
-Use this file to import original LLaMA weights to ALLaMo model.   
+Use this file to import original LLaMA weights to ALLaMo format.   
 """
 import argparse
-import datetime
 import json
-import logging
 import os
-import sys
 import torch
 import shutil
-
-sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig, AllamoTransformer
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('AllamoModelImporter')
+from allamo.logging import configure_logger, logger
+from allamo.model import AllamoTransformerConfig, AllamoTransformer
 
 DEFAULT_BLOCK_SIZE = 4096
 
@@ -33,7 +24,7 @@ def permute(w, dim, n_heads):
     return w.view(n_heads, dim // n_heads // 2, 2, dim).transpose(1, 2).reshape(dim, dim)
     
 def import_model(input_base_path, output_model_path, max_num_layers, max_block_size):
-    print(f"start importing llama weights")
+    logger.info(f"start importing llama weights")
     params = read_json(os.path.join(input_base_path, "params.json"))
     
     config = AllamoTransformerConfig()
@@ -51,14 +42,14 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     # Switch to half tensors
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
 
-    print(f"initializing vanilla model")
+    logger.info(f"initializing vanilla model")
     model = AllamoTransformer(config)
     
-    print(f"loading llama weights")
+    logger.info(f"loading llama weights")
     # Sharded models are not supported!
     loaded = torch.load(os.path.join(input_base_path, "consolidated.00.pth"), map_location="cpu")
 
-    print(f"copying llama weights to the model")
+    logger.info(f"copying llama weights to the model")
     theta = 10000.0
     inv_freq = 1.0 / (theta ** (torch.arange(0, config.head_size, 2).float() / config.head_size))
     
@@ -66,10 +57,9 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     torch.set_default_tensor_type(torch.FloatTensor)
     
     param_count = 0
-    index_dict = {"weight_map": {}}
     model_sd = model.state_dict()
     for layer_i in range(config.n_layer):
-        print(f"copying weights in layer {layer_i}")
+        logger.info(f"copying weights in layer {layer_i}")
         state_dict = {
             f"layers.{layer_i}.attention.q_proj.weight": permute(loaded[f"layers.{layer_i}.attention.wq.weight"], config.n_embd, config.n_head),
             f"layers.{layer_i}.attention.k_proj.weight": permute(loaded[f"layers.{layer_i}.attention.wk.weight"], config.n_embd, config.n_head),
@@ -98,23 +88,23 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
         with torch.no_grad():
             model_sd[k].copy_(v)
         param_count += v.numel()
-    print(f"{param_count} params imported to the model")
+    logger.info(f"{param_count} params imported to the model")
         
     ckpt_file_name = 'import_ckpt'
     config_checkpoint = {
         'model_args': config
     }
     ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
-    print(f"saving config checkpoint to {ckpt_file_path}")
+    logger.info(f"saving config checkpoint to {ckpt_file_path}")
     with open(ckpt_file_path, "w", encoding="utf-8") as f:
         json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
     ckpt_file_path = os.path.join(output_model_path, f'model_{ckpt_file_name}.pt')
-    print(f"saving model checkpoint to {ckpt_file_path}")
+    logger.info(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(model_sd, ckpt_file_path)
-    print(f"checkpoint files saved in {output_model_path}")
+    logger.info(f"checkpoint files saved in {output_model_path}")
     
 def import_tokenizer(input_tokenizer_path, output_model_path, max_block_size):
-    print(f"start importing tokenizer")
+    logger.info(f"start importing tokenizer")
     model_max_length = min(max_block_size, DEFAULT_BLOCK_SIZE) if max_block_size else DEFAULT_BLOCK_SIZE
     write_json({}, os.path.join(output_model_path, "special_tokens_map.json"))
     write_json(
@@ -128,9 +118,10 @@ def import_tokenizer(input_tokenizer_path, output_model_path, max_block_size):
         os.path.join(output_model_path, "tokenizer_config.json"),
     )
     shutil.copyfile(input_tokenizer_path, os.path.join(output_model_path, "tokenizer.model"))
-    print(f"tokenizer files saved in {output_model_path}")
+    logger.info(f"tokenizer files saved in {output_model_path}")
         
 if __name__ == '__main__':
+    configure_logger()
     parser = argparse.ArgumentParser(description='Import LLaMA weights to ALLaMo model')
     parser.add_argument('--input_data_dir', type=str, help='Path to a directory with LLaMA model files')
     parser.add_argument('--input_tokenizer_path', type=str, help='Path to LLaMA tokenizer.model file')
@@ -147,4 +138,4 @@ if __name__ == '__main__':
     if args.input_data_dir:
         import_model(args.input_data_dir, args.output_data_dir, args.max_num_layers, args.max_block_size)
     
-    print(f"import completed")
+    logger.info("import completed")

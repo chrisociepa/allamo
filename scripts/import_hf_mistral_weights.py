@@ -1,20 +1,13 @@
 """
-Use this file to import Huggingface MistralForCausalLM weights to ALLaMo model.   
+Use this file to import Huggingface MistralForCausalLM weights to ALLaMo format.   
 """
 import argparse
-import logging
+import json
 import os
-import sys
 import torch
 from transformers import MistralForCausalLM
-
-sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig, AllamoTransformer
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('AllamoModelImporter')
+from allamo.logging import configure_logger, logger
+from allamo.model import AllamoTransformerConfig, AllamoTransformer
 
 def import_model(hf_model_path, output_model_path):
     logger.info(f"Importing Huggingface MistralForCausalLM weights")
@@ -89,16 +82,17 @@ def import_model(hf_model_path, output_model_path):
         'model_args': config
     }
     ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
-    print(f"saving config checkpoint to {ckpt_file_path}")
+    logger.info(f"saving config checkpoint to {ckpt_file_path}")
     with open(ckpt_file_path, "w", encoding="utf-8") as f:
         json.dump(config_checkpoint, f, indent=4, ensure_ascii=False)
     ckpt_file_path = os.path.join(output_model_path, f'model_{ckpt_file_name}.pt')
-    print(f"saving model checkpoint to {ckpt_file_path}")
+    logger.info(f"saving model checkpoint to {ckpt_file_path}")
     torch.save(model_sd, ckpt_file_path)
-    print(f"checkpoint files saved in {output_model_path}")
+    logger.info(f"checkpoint files saved in {output_model_path}")
     
-def main():
-    parser = argparse.ArgumentParser(description='Import Huggingface MistralForCausalLM weights to ALLaMo model')
+if __name__ == '__main__':
+    configure_logger()
+    parser = argparse.ArgumentParser(description='Import Huggingface MistralForCausalLM weights to ALLaMo format')
     parser.add_argument(
         "--huggingface_model",
         help="Huggingface model path",
@@ -114,8 +108,4 @@ def main():
         hf_model_path=args.huggingface_model,
         output_model_path=args.output_dir,
     )
-    
-if __name__ == '__main__':
-    main()    
-    print(f"import completed")
-    
+    logger.info("import completed")

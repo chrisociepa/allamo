@@ -15,7 +15,7 @@ from allamo.train_utils import remove_unwanted_prefix_from_model_state_dict
 class AllamoSampler:
 
     def __init__(self, config: AllamoConfiguration):
-        configure_logger(config, with_file_handler=False)
+        configure_logger()
         self.config = config
         configure_torch(config)
 

@@ -48,7 +48,7 @@ class AllamoTrainer:
     def __init__(self, config: AllamoConfiguration):
         self.train_ctx = TrainingContext()
         if self.train_ctx.master_process:
-            configure_logger(config)
+            configure_logger(config, True)
         
         self.config = config
         self.__init_torch(config)

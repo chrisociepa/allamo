@@ -2,15 +2,9 @@ import argparse
 import datetime
 import glob
 import numpy as np
-import os
 import os.path
 import pandas as pd
-import pickle
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('DatasetCreator')
+from allamo.logging import configure_logger, logger
 
 EOS_TOKEN = "</s>"
 
@@ -97,6 +91,7 @@ def create_datasets(txt_files_df, tokenizer, input_data_dir, output_data_dir):
     logger.info(f"Datasets created in {output_data_dir} from {files_cnt} files. Tokens: {total_tokens:,} (Train: {train_tokens:,} Val: {val_tokens:,})")
 
 if __name__ == '__main__':
+    configure_logger()
     parser = argparse.ArgumentParser(description='Prepare your datasets')
     parser.add_argument('--index_file', type=str, help='Path to an index file')
     parser.add_argument('--input_data_dir', type=str, help='Path to a directory with txt files')
@@ -109,4 +104,3 @@ if __name__ == '__main__':
     tokenizer = init_tokenizer(args.output_data_dir, args.tiktoken_tokenizer_name, args.hf_tokenizer_path)
     txt_files_df = load_list_of_txt_files(args.index_file, args.input_data_dir, args.data_split)
     create_datasets(txt_files_df, tokenizer, args.input_data_dir, args.output_data_dir)
-    

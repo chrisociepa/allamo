@@ -5,25 +5,14 @@ More details: https://arxiv.org/abs/2312.15166
 """
 
 import argparse
-import datetime
-import gc
 import json
-import logging
 import os
-import shutil
-import sys
 import torch
-
-sys.path.append(os.path.abspath('..'))
-from train_utils import (
+from allamo.logging import configure_logger, logger
+from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
 )
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('AllamoModelDepthUpScaler')
 
 def prepare_layer_keys_mapping(n_layers, last_layers_to_drop, first_layers_to_drop):
     mapping_pairs = []
@@ -104,6 +93,7 @@ def depth_up_scale_model(input_dir_path, input_checkpoint_name_base, output_dir_
 
 
 def main():
+    configure_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input_dir",
@@ -146,7 +136,5 @@ def main():
         bfloat16=args.bfloat16
     )
 
-
 if __name__ == "__main__":
     main()
-    

@@ -1,28 +1,19 @@
 """
-Use this file to export ALLaMo weights to Huggingface LLaMA model.   
+Use this file to export ALLaMo weights to Huggingface formats.   
 """
 import argparse
-import datetime
 import gc
 import json
-import logging
 import os
 import shutil
-import sys
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
-
-sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig
-from train_utils import (
+from allamo.logging import configure_logger, logger
+from allamo.model import AllamoTransformerConfig
+from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
 )
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('AllamoModelExporter')
 
 def compute_intermediate_size(config):
     return config.multiple_of * ((int(config.n_embd * 8 / 3) + config.multiple_of - 1) // config.multiple_of)
@@ -151,7 +142,8 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
     logger.info(f"conversion completed!")
 
 
-def main():
+if __name__ == "__main__":
+    configure_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input_dir",
@@ -190,7 +182,3 @@ def main():
         hf_model_dtype=args.output_dtype,
         hf_model_max_position_embeddings=args.max_position_embeddings,
     )
-
-
-if __name__ == "__main__":
-    main()
