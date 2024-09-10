@@ -7,16 +7,13 @@ import concurrent.futures
 import joblib
 import json
 import os
-import sys
 import time
 import torch
 from itertools import chain
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from allamo.logging import configure_logger, logger
-
-sys.path.append(os.path.abspath('..'))
-from dpo_fsdp_train import get_log_prob
+from allamo.trainer.dpo_fsdp_trainer import get_log_prob
 
 def format_seconds_as_time(seconds):
     hours, remainder = divmod(seconds, 3600)

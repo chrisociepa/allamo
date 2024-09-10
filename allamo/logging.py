@@ -5,7 +5,7 @@ from allamo.configuration import AllamoConfiguration
 
 logger = logging.getLogger()
 
-def configure_logger(config: AllamoConfiguration = None, with_file_handler: bool = True):
+def configure_logger(config: AllamoConfiguration = None, with_file_handler: bool = False):
     log_formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )

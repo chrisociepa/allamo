@@ -128,7 +128,7 @@ Below are some empirically derived example values for extending the context wind
 
 ## Import LLaMA models
 
-Use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
+Go to `scripts/` and use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
 
 ```
 python import_llama_weights.py \
@@ -155,11 +155,10 @@ $ python export_to_hf.py \
 
 ## Sampling / Inference
 
-Go to `inference/` and use the script `sample.py` to sample from a model you trained. For example:
+Use the script `sample.py` to sample from a model you trained. For example:
 
 ```
-$ cd inference/
-$ python sample.py \
+$ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
@@ -171,8 +170,7 @@ $ python sample.py \
 You can also prompt the model with some text from a file prefixing its path with `FILE:`, example:
 
 ```
-$ cd inference/
-$ python sample.py \
+$ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
@@ -188,8 +186,7 @@ Use the script `sample_api.py` to expose 3 API endpoints. Then you will be able 
 To run the API with a pretrained model, example:
 
 ```
-$ cd inference/
-$ python sample_api.py \
+$ python inference/sample_api.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=10 \
     --temperature=0.7 \
@@ -218,8 +215,7 @@ $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens 
 To run the UI at top of the API, example:
 
 ```
-$ cd inference/
-$ python sample_ui.py
+$ python inference/sample_ui.py
 ```
 
 ## Running LLaMA 7B on CPU
@@ -229,8 +225,7 @@ $ python sample_ui.py
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
 ```
-$ cd inference/
-$ python sample_api.py \
+$ python inference/sample_api.py \
     --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
     --llama_tokenizer_path="../data/llama-7b/" \
     --device=cpu
