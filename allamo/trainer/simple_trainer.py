@@ -144,33 +144,6 @@ class SimpleTrainer(BaseTrainer):
                 shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
         logger.info(f"checkpoint files saved in {self.config.out_dir}")
 
-    # helps estimate an arbitrarily accurate loss over either split using many batches
-    @torch.no_grad()
-    def estimate_loss(self):
-        losses_out = {}
-        accuraces = {}
-        self.model.eval()
-        for split in self.data_loader.splits:
-            losses = torch.zeros(self.config.eval_iters)
-            correct_preds = 0
-            total_preds = 0
-            for k in range(self.config.eval_iters):
-                batch = self.data_loader.get_batch(split, True)
-                with self.ctx:
-                    logits, loss, _ = self.model(**batch)
-                if batch["target_weights"] is not None:
-                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                losses[k] = loss.item()
-                total_preds += torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                correct_preds += (logits.max(2).indices == batch["target_ids"]).sum().item()
-            losses_out[split] = losses.mean()
-            accuraces[split] = correct_preds / total_preds
-        self.model.train()
-        if 'val' not in losses_out:
-            losses_out['val'] = losses_out['train']
-            accuraces['val'] = accuraces['train']
-        return losses_out, accuraces
-
     def should_evaluate(self):
         return super().should_evaluate() and self.train_ctx.master_process
     

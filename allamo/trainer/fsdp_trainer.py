@@ -9,7 +9,6 @@ from torch.distributed.fsdp import (
     StateDictType,
     FullStateDictConfig, # general model non-sharded, non-flattened params
 )
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
@@ -161,31 +160,6 @@ class FSDPTrainer(BaseTrainer):
     def clip_grad_norm(self):
         return self.model.clip_grad_norm_(self.config.grad_clip).item()
             
-    # helps estimate an arbitrarily accurate loss over either split using many batches
-    @torch.no_grad()
-    def estimate_loss(self):
-        losses_out = {}
-        accuraces = {}
-        self.model.eval()
-        for split in self.data_loader.splits:
-            fsdp_loss_preds = torch.zeros(3).to(self.config.device)
-            for _ in range(self.config.eval_iters):
-                batch = self.data_loader.get_batch(split, True)
-                logits, loss, _ = self.model(**batch)
-                if batch["target_weights"] is not None:
-                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                fsdp_loss_preds[0] += loss.item()
-                fsdp_loss_preds[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                fsdp_loss_preds[2] += 1
-            dist.all_reduce(fsdp_loss_preds, op=dist.ReduceOp.SUM)
-            losses_out[split] = fsdp_loss_preds[0] / (self.config.eval_iters * self.train_ctx.world_size)
-            accuraces[split] = fsdp_loss_preds[1] / fsdp_loss_preds[2]
-        self.model.train()
-        if 'val' not in losses_out:
-            losses_out['val'] = losses_out['train']
-            accuraces['val'] = accuraces['train']
-        return losses_out, accuraces
-    
     def forward(self, batch, last_micro_step):
         logits, loss, _ = self.model(**batch)
         if self.gradient_accumulation_steps > 1:

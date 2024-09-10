@@ -52,10 +52,6 @@ class BaseTrainer:
     def init_training(self):
         raise NotImplementedError("Not implemented")
     
-    @torch.no_grad()
-    def estimate_loss(self):
-        raise NotImplementedError("Not implemented")
-    
     def init_torch(self, config: AllamoConfiguration):
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
         init_torch(self.train_ctx, config, distributed=self.distributed())
@@ -159,6 +155,32 @@ class BaseTrainer:
     
     def clip_grad_norm(self):
         return torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
+    
+    # helps estimate an arbitrarily accurate loss over either split using many batches
+    @torch.no_grad()
+    def estimate_loss(self):
+        losses_out = {}
+        accuraces = {}
+        self.model.eval()
+        for split in self.data_loader.splits:
+            validation_metrics = torch.zeros(3).to(self.config.device)
+            for _ in range(self.config.eval_iters):
+                batch = self.data_loader.get_batch(split, True)
+                logits, loss, _ = self.model(**batch)
+                if batch["target_weights"] is not None:
+                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
+                validation_metrics[0] += loss.item()
+                validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                validation_metrics[2] += 1
+            if self.distributed():
+                dist.all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
+            losses_out[split] = validation_metrics[0] / (self.config.eval_iters * self.train_ctx.world_size)
+            accuraces[split] = validation_metrics[1] / validation_metrics[2]
+        self.model.train()
+        if 'val' not in losses_out:
+            losses_out['val'] = losses_out['train']
+            accuraces['val'] = accuraces['train']
+        return losses_out, accuraces
     
     def evaluate(self):
         eval_time = time.time()
