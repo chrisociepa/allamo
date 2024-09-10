@@ -157,6 +157,9 @@ class BaseTrainer:
     def should_log_metrics(self):
         return self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.train_ctx.master_process
     
+    def clip_grad_norm(self):
+        return torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
+    
     def evaluate(self):
         eval_time = time.time()
         losses, accuraces = self.estimate_loss()
@@ -270,7 +273,7 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                iter_metrics[4] += torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item() #self.model.clip_grad_norm_(self.config.grad_clip).item()
+                iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
             if self.distributed():

@@ -63,7 +63,7 @@ class SimpleTrainer(BaseTrainer):
             self.model = DDP(self.model, device_ids=[self.train_ctx.local_rank])
             
         # initialize a GradScaler. If enabled=False scaler is a no-op
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
+        self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
         
         # optimizer
         self.optimizer = self.model.configure_optimizers(self.config, self.device_type)

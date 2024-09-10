@@ -9,6 +9,7 @@ from torch.distributed.fsdp import (
     StateDictType,
     FullStateDictConfig, # general model non-sharded, non-flattened params
 )
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
@@ -65,8 +66,8 @@ class FSDPTrainer(BaseTrainer):
         logger.info("Configuring model with FSDP")
         self.model = parallelize_with_fsdp(model, self.config, self.fsdp_activation_checkpointing)
         
-        # initialize a GradScaler as a no-op for FSDP training
-        self.scaler = torch.cuda.amp.GradScaler(enabled=False)
+        # initialize a GradScaler only for FSDP's built-in mixed precision with fp16
+        self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16'))
         
         # optimizer
         self.optimizer = model.configure_optimizers(self.config, self.device_type)
@@ -156,6 +157,9 @@ class FSDPTrainer(BaseTrainer):
                 if self.config.optimizer_checkpoint_interval is not None:
                     shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
                     shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
+                    
+    def clip_grad_norm(self):
+        return self.model.clip_grad_norm_(self.config.grad_clip).item()
             
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
