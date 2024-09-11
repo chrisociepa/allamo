@@ -50,6 +50,7 @@ class FSDPTrainer(BaseTrainer):
             
     def init_training(self):
         self.init_checkpoint()
+        self.load_datasets()
         
         modelConf = self.create_model_config()
         if self.fsdp_activation_checkpointing:

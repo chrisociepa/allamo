@@ -4,7 +4,7 @@
   <img src="./assets/allamo_logo.jpg" width=512>
 </p>
 
-This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
+This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference LLaMA-based models.
 
 If you're interested in seeing how we trained a 1B model for the Polish language using a single RTX 4090, with 60B tokens over 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
 
@@ -24,11 +24,12 @@ Dependencies:
 - [pytorch](https://pytorch.org) - PyTorch 2 is highly recommended
 - [joblib](https://joblib.readthedocs.io)
 - [numpy](https://numpy.org/install/)
-- [huggingface transformers](https://huggingface.co/docs/transformers/installation)
+- [wandb](https://wandb.ai/quickstart/)
+- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
+- [huggingface transformers](https://huggingface.co/docs/transformers/installation) - optional
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
 - [tiktoken](https://github.com/openai/tiktoken) - optional
 - [gradio](https://www.gradio.app/) - optional, for demo UI
-- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
 
 ## Datasets
 

@@ -39,6 +39,7 @@ class SimpleTrainer(BaseTrainer):
         
     def init_training(self):
         self.init_checkpoint()
+        self.load_datasets()
         
         model = AllamoTransformer(self.create_model_config())
         self.model_num_params = model.model_num_params

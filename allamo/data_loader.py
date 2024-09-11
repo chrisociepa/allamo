@@ -29,7 +29,6 @@ class AllamoDataset:
         self.processed_files = []
         if config.dataset_train_processed_files_count > 0:
             self.processed_files = self.dataset_files[:config.dataset_train_processed_files_count]
-        self.load_next_dataset()
         
     def get_dataset_files(self, config, train_split):
         dataset_files = []
@@ -320,26 +319,33 @@ class AllamoDataLoader:
             self.dataset_offset = 0
         logger.info(f"Training dataset offset set to {self.dataset_offset:,}")
         
-        self.load_datasets()
+        self.init_datasets()
         self.buffer = None
         self.buffer_lock = threading.Lock()
         self.buffer_thread = None
             
-    def load_datasets(self):
-        timer = time.time()
+    def init_datasets(self):
         self.train_dataset = AllamoDataset(self.config, True, self.rank, self.world_size)
         self.splits = ['train']
-        logger.info(f"Training dataset created with files: {','.join(self.train_dataset.dataset_files)}")
-        logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
+        logger.info(f"Training dataset initialized with files: {','.join(self.train_dataset.dataset_files)}")
         
         self.val_dataset = AllamoDataset(self.config, False, self.rank, self.world_size)
         if self.val_dataset.has_data():
             self.splits.append('val')
-            logger.info(f"Validation dataset created with files: {','.join(self.val_dataset.dataset_files)}")
-            logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
+            logger.info(f"Validation dataset initialized with files: {','.join(self.val_dataset.dataset_files)}")
         else:
             self.val_dataset = None
             logger.info(f"Validation dataset is missing. Testing only on the training dataset")
+        
+    def load_datasets(self):
+        logger.info(f"Loading dataset samples")
+        timer = time.time()
+        self.train_dataset.load_next_dataset()
+        logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
+        
+        if self.val_dataset is not None:
+            self.val_dataset.load_next_dataset()
+            logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
         dt = time.time() - timer
         logger.info(f"Datasets loaded in {dt:.2f} secs")
         
