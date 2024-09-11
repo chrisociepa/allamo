@@ -15,7 +15,7 @@ from allamo.logging import configure_logger, logger
 from allamo.training_context import TrainingContext
 from allamo.model import AllamoTransformerConfig
 from allamo.configuration import AllamoConfiguration
-from allamo.data_loader import AllamoDataLoader
+from allamo.datasets.data_loader import AllamoDataLoader
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
