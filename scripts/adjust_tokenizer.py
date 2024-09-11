@@ -7,25 +7,16 @@ or for experimenting with different tokenization strategies.
 
 import argparse
 import json
-import logging
 import os
-import sys
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 from tqdm import tqdm
-
-sys.path.append(os.path.abspath('..'))
-from train_utils import (
+from allamo.logging import configure_logger, logger
+from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
 )
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger()
-
 
 def copy_layer(model_checkpoint, state_dict, src_layer_idx, dest_layer_idx):
     logger.info(f"copying weights from layer {src_layer_idx} to layer {dest_layer_idx}")
@@ -126,6 +117,7 @@ def adjust_model(input_dir_path, input_checkpoint_name_base, output_dir_path, ou
 
 
 if __name__ == "__main__":
+    configure_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input_dir",

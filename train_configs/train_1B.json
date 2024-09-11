@@ -1,10 +1,11 @@
 {
     "data_dir": "../data/",
     "out_dir": "../data/out-allamo-1B/",
-    "eval_interval": 10,
+    "checkpoint_interval": 1000,
+    "save_best_checkpoint": false,
+    "eval_interval": 1000,
     "eval_iters": 200,
     "log_interval": 1,
-    "always_save_checkpoint": true,
     "vocab_size": 8000,
     "custom_tokenizer_path": "../data/allamo_1B_dataset/tokenizer.json",
     "wandb_log": false,

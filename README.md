@@ -4,7 +4,7 @@
   <img src="./assets/allamo_logo.jpg" width=512>
 </p>
 
-This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/)-based models ([arXiv](https://arxiv.org/abs/2302.13971v1)).
+This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference LLaMA-based models.
 
 If you're interested in seeing how we trained a 1B model for the Polish language using a single RTX 4090, with 60B tokens over 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
 
@@ -24,11 +24,12 @@ Dependencies:
 - [pytorch](https://pytorch.org) - PyTorch 2 is highly recommended
 - [joblib](https://joblib.readthedocs.io)
 - [numpy](https://numpy.org/install/)
-- [huggingface transformers](https://huggingface.co/docs/transformers/installation)
+- [wandb](https://wandb.ai/quickstart/)
+- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
+- [huggingface transformers](https://huggingface.co/docs/transformers/installation) - optional
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
 - [tiktoken](https://github.com/openai/tiktoken) - optional
 - [gradio](https://www.gradio.app/) - optional, for demo UI
-- [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
 
 ## Datasets
 
@@ -128,7 +129,7 @@ Below are some empirically derived example values for extending the context wind
 
 ## Import LLaMA models
 
-Use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
+Go to `scripts/` and use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
 
 ```
 python import_llama_weights.py \
@@ -158,7 +159,7 @@ $ python export_to_hf.py \
 Use the script `sample.py` to sample from a model you trained. For example:
 
 ```
-$ python sample.py \
+$ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
@@ -170,7 +171,7 @@ $ python sample.py \
 You can also prompt the model with some text from a file prefixing its path with `FILE:`, example:
 
 ```
-$ python sample.py \
+$ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
     --temperature=0.7 \
@@ -181,12 +182,12 @@ $ python sample.py \
 
 Specify the tokenizer using `--tiktoken_tokenizer_name` for Tiktoken (e.g. `cl100k_base`), or thanks to HuggingFace Transformers, you can easily use your own pretrained tokenizer using `--custom_tokenizer_path` to provide your tokenizer's JSON config file.
 
-Use the script 'sample_api.py' to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
+Use the script `sample_api.py` to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
 
 To run the API with a pretrained model, example:
 
 ```
-$ python sample_api.py \
+$ python inference/sample_api.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=10 \
     --temperature=0.7 \
@@ -215,7 +216,7 @@ $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens 
 To run the UI at top of the API, example:
 
 ```
-$ python sample_u.py
+$ python inference/sample_ui.py
 ```
 
 ## Running LLaMA 7B on CPU
@@ -225,7 +226,7 @@ $ python sample_u.py
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
 ```
-$ python sample_api.py \
+$ python inference/sample_api.py \
     --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
     --llama_tokenizer_path="../data/llama-7b/" \
     --device=cpu

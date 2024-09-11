@@ -25,7 +25,6 @@ import argparse
 import concurrent.futures
 import joblib
 import json
-import logging
 import numpy as np
 import os
 import pyarrow as pa
@@ -36,11 +35,7 @@ from collections import Counter
 from itertools import chain
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger()
+from allamo.logging import configure_logger, logger
 
 MIN_WEIGHT = 0.001
 
@@ -261,6 +256,7 @@ def create_sample_for(input_ids, target_weights, seq_lens, data_dtype):
     return sample
 
 if __name__ == "__main__":
+    configure_logger()
     parser = argparse.ArgumentParser(description='Tokenize dialogues with weights')
     parser.add_argument("-c", "--config_path", help="Config file with a list of input files")
     parser.add_argument("-f", "--input_file", help="Input file")

@@ -23,7 +23,6 @@ import argparse
 import concurrent.futures
 import joblib
 import json
-import logging
 import numpy as np
 import os
 import pyarrow as pa
@@ -34,11 +33,7 @@ from collections import Counter
 from itertools import chain
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger()
+from allamo.logging import configure_logger, logger
 
 def tokenize_openchatml_conversation(messages, tokenizer, ignore_index):
     result = {'input_ids': [], 'target_ids': []}
@@ -203,6 +198,7 @@ def format_seconds_as_time(seconds):
     return f"{int(hours)}:{int(minutes):02}:{int(seconds):02}"
 
 if __name__ == "__main__":
+    configure_logger()
     parser = argparse.ArgumentParser(description='Tokenize dialogues for DPO training')
     parser.add_argument("-c", "--config_path", help="Config file with a list of input files")
     parser.add_argument("-f", "--input_file", help="Input file")

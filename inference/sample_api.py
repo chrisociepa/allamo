@@ -1,11 +1,7 @@
 import logging
 from flask import Flask, request, jsonify
 from sample import AllamoSampler
-from configuration import AllamoConfiguration
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
+from allamo.configuration import AllamoConfiguration
 
 config = AllamoConfiguration()
 sampler = AllamoSampler(config)

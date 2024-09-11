@@ -4,14 +4,8 @@ Use this file to convert config checkpoint from PyTorch to JSON format
 import argparse
 import dataclasses
 import json
-import logging
-import os
-import sys
 import torch
-
-sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig
-from configuration import AllamoConfiguration
+from allamo.logging import configure_logger, logger
 
 def convert_ckpt(config_ckpt):
     config_checkpoint = torch.load(config_ckpt, map_location='cpu')
@@ -43,10 +37,13 @@ def convert_ckpt(config_ckpt):
     if data_loader_ckpt:
         json_checkpoint['allamo_dataloader'] = data_loader_ckpt
     
-    with open(config_ckpt[:-3] + '.json', "w", encoding="utf-8") as f:
+    output_file = config_ckpt[:-3] + '.json'
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(json_checkpoint, f, indent=4, ensure_ascii=False)
+    logger.info(f"Conversion completed! New config saved in {output_file}")
         
 if __name__ == '__main__':
+    configure_logger()
     parser = argparse.ArgumentParser(description='Convert config checkpoint to JSON format')
     parser.add_argument(
         "--config_ckpt",

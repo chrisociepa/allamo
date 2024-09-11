@@ -1,20 +1,11 @@
 import dataclasses
 import gc
-import logging
-import numpy as np
-import os
-import sys
 import torch
+from allamo.logging import configure_logger, logger
+from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.configuration import AllamoConfiguration
 
-sys.path.append(os.path.abspath('..'))
-from model import AllamoTransformerConfig, AllamoTransformer
-from configuration import AllamoConfiguration
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger('AllamoModelEstimator')
-
+configure_logger()
 config = AllamoConfiguration()
 if config.dtype == 'bfloat16-true':
     torch.set_default_dtype(torch.bfloat16)

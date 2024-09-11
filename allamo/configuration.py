@@ -1,7 +1,3 @@
-"""
-This file contains the full configuration and helps with its management.
-"""
-
 import argparse
 import json
 import logging
