@@ -43,6 +43,9 @@ class RMSNorm(torch.nn.Module):
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x.to(input_dtype)
+    
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
         
 class RotaryEmbedding(torch.nn.Module):
     
@@ -55,7 +58,7 @@ class RotaryEmbedding(torch.nn.Module):
         self._rope_init()
         
     # Define reset_parameters for FSDP initialization
-    def reset_parameters(self):
+    def reset_buffers(self):
         self._rope_init()
 
     def _rope_init(self):
@@ -110,6 +113,11 @@ class FeedForward(nn.Module):
         self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         self.gradient_checkpointing = config.gradient_checkpointing
+        
+    def init_weights(self, init_std: float):
+        torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
+        for module in (self.down_proj, self.up_proj):
+            torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
 
     def forward(self, x):
         if self.training and self.gradient_checkpointing:
@@ -150,6 +158,15 @@ class Attention(nn.Module):
         if attention_version.version == 0:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("temp_mask", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)), persistent=False)
+            
+    def init_weights(self, init_std: float):
+        for module in (self.q_proj, self.k_proj, self.v_proj):
+            torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
+        torch.nn.init.trunc_normal_(self.c_proj.weight, mean=0.0, std=init_std)
+        
+        if attention_version.version == 0:
+            with torch.device(self.temp_mask.device):
+                self.temp_mask = torch.tril(torch.ones(1, 1, self.temp_mask.shape[2], self.temp_mask.shape[3]))
         
     def forward(self,
                 q_x: torch.Tensor,
@@ -251,6 +268,12 @@ class SelfAttentionBlock(nn.Module):
         self.feed_forward = FeedForward(config)
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
+    
+    def init_weights(self, init_std: float):
+        self.attention.init_weights(init_std)
+        self.feed_forward.init_weights(init_std)
+        for norm in (self.attention_norm, self.ffn_norm):
+            norm.reset_parameters()
 
     def forward(self,
         x: torch.Tensor,
@@ -280,9 +303,11 @@ class AllamoTransformer(nn.Module):
         
         self.init_attention()
         attention_version.log_version(self.config.sliding_window)
-
+        
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
+        
+        self.rotary_emb = RotaryEmbedding(config)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
@@ -291,15 +316,30 @@ class AllamoTransformer(nn.Module):
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        self.rotary_emb = RotaryEmbedding(config)
-        
         self.log_estimated_size()
-        self.init_all_weights()
+        self.init_model_weights()
         
-    def init_all_weights(self):
-        # init all weights
-        self.apply(self.init_weights)
-        self.init_scaled_residual_projections(self)
+    def init_model_weights(self):
+        with torch.device(self.rotary_emb.inv_freq.device):
+            self.rotary_emb.reset_buffers()
+        
+        if self.tok_embeddings is not None:
+            torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=1.0)
+            
+        weight_init_std = self.calculate_weight_init_std(self.config.n_layer)
+        for layer in self.layers:
+            if layer is not None:
+                layer.init_weights(weight_init_std)
+        
+        if self.norm is not None:
+            self.norm.reset_parameters()
+        
+        if self.lm_head is not None:
+            cutoff_factor = 3
+            weight_init_std = self.config.n_embd ** -0.5
+            lower = -cutoff_factor * weight_init_std
+            upper = cutoff_factor * weight_init_std
+            torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
 
     def init_attention(self):
         if attention_version.version == 2:
@@ -309,6 +349,9 @@ class AllamoTransformer(nn.Module):
             except ImportError:
                 attention_version.disable_flash_attn_2()
                 logger.warning("Flash Attention 2 is not available!")
+                
+    def calculate_weight_init_std(self, num_layers):
+        return 0.02 / math.sqrt(2 * num_layers)
 
     def estimate_size(self):
         """
@@ -329,27 +372,13 @@ class AllamoTransformer(nn.Module):
         model_params = self.model_num_params / 1e6
         model_bytes = self.model_num_bytes / 1024**2
         logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
-
-    def init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            
-    def init_scaled_residual_projections(self, module):
-        for pn, p in module.named_parameters():
-            if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.config.n_layer))
             
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
             layer = SelfAttentionBlock(self.config)
-            layer.apply(self.init_weights)
-            self.init_scaled_residual_projections(layer)
             self.layers.append(layer)
             self.config.n_layer += 1
+            layer.init_weights(self.calculate_weight_init_std(self.config.n_layer))
             
     def freeze_params(self, module):
         for param in module.parameters():
