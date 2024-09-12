@@ -48,9 +48,11 @@ def override_numa_affinity(local_rank: int, verbose: Optional[bool] = None) -> N
 def configure_torch(config: AllamoConfiguration, rank: int = 0):
     torch.manual_seed(config.seed + rank)
     torch.cuda.manual_seed(config.seed + rank)
-    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-    torch.set_float32_matmul_precision("highest") # set to "high" for faster matrix multiplications with bfloat16
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Use for setting the internal precision of float32 matrix multiplications    
+    # torch.set_float32_matmul_precision("highest")
 
 def init_torch(train_ctx: TrainingContext, config: AllamoConfiguration, distributed=True):
     if distributed:
