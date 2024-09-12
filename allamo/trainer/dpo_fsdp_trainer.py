@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import wandb
 from copy import deepcopy
 from allamo.logging import logger
-from allamo.model import AllamoTransformer
+from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.train_utils import model_checkpoint_files_exist
 from allamo.trainer.fsdp_trainer import FSDPTrainer

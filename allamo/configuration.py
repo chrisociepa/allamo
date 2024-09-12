@@ -101,6 +101,7 @@ class AllamoConfiguration:
     dpo_penalty_lambda: float = 50.0
     reference_checkpoint_name: str = 'ref_ckpt'
     training_type: str = 'pre'
+    attention_implementation: str = 'sdpa'
     
     # inference params
     prompt: str = "\n" 
@@ -204,6 +205,7 @@ class AllamoConfiguration:
         parser.add_argument('--dpo_penalty_lambda', type=float, help='Temperature parameter for penalty-positive in the DPO loss, typically in the range of 1 to 100')
         parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
+        parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')

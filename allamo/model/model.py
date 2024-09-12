@@ -9,18 +9,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from allamo.logging import logger
-
-_flash_attention_version = 1 if hasattr(torch.nn.functional, 'scaled_dot_product_attention') else 0
-_flash_attn_2_supports_window_size = False
-# uncomment code below to enable installed FlashAttention. PyTorch 2.2+ supports it as part of the scaled_dot_product_attention
-"""
-try:
-    from flash_attn import flash_attn_func
-    _flash_attention_version = 2
-    _flash_attn_2_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-except ImportError:
-    _flash_attn_2_supports_window_size = False
-"""
+from allamo.model.attentions import attention_version
 
 @dataclass
 class AllamoTransformerConfig:
@@ -143,7 +132,7 @@ class Attention(nn.Module):
         self.num_kv_heads = config.num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
-        self.sliding_window = config.sliding_window if _flash_attn_2_supports_window_size else None
+        self.sliding_window = config.sliding_window if attention_version.flash_attn_2_supports_window_size else None
         self.gradient_checkpointing = config.gradient_checkpointing
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
@@ -155,13 +144,13 @@ class Attention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(self.num_heads * self.head_size, config.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout) if _flash_attention_version == 0 and config.dropout != 0 else None
+        self.attn_dropout = nn.Dropout(config.dropout) if attention_version.version == 0 and config.dropout != 0 else None
         self.proj_dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
-        if _flash_attention_version == 0:
+        if attention_version.version == 0:
             # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)))
-
+            self.register_buffer("temp_mask", torch.tril(torch.ones(1, 1, config.block_size, config.block_size)), persistent=False)
+        
     def forward(self,
                 q_x: torch.Tensor,
                 kv_x: torch.Tensor,
@@ -193,7 +182,7 @@ class Attention(nn.Module):
             v = self.repeat_kv(v, self.num_key_value_groups)
         
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if _flash_attention_version == 2:
+        if attention_version.version == 2:
             if attn_mask is not None:
                 raise ValueError(f"Custom attention mask is not supported for FlashAttention2")
             # Flash Attention 2 requires (B, T, nh, hs)
@@ -204,7 +193,7 @@ class Attention(nn.Module):
                 y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
             else:
                 y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
-        elif _flash_attention_version == 1:
+        elif attention_version.version == 1:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -219,7 +208,7 @@ class Attention(nn.Module):
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if attn_mask is None:
-                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+                att = att.masked_fill(self.temp_mask[:,:,:T,:T] == 0, float('-inf'))
             else:
                 att = att.masked_fill(attn_mask.logical_not(), float('-inf'))
             att = F.softmax(att, dim=-1)
@@ -288,7 +277,9 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         logger.info(f"AllamoTransformerConfig: {config}")
-        self.__log_flash_attention_version()
+        
+        self.init_attention()
+        attention_version.log_version(self.config.sliding_window)
 
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
@@ -301,24 +292,23 @@ class AllamoTransformer(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
         self.rotary_emb = RotaryEmbedding(config)
-
-        # init all weights
-        self.apply(self._init_weights)
-        self._init_scaled_residual_projections(self)
         
         self.log_estimated_size()
+        self.init_all_weights()
+        
+    def init_all_weights(self):
+        # init all weights
+        self.apply(self.init_weights)
+        self.init_scaled_residual_projections(self)
 
-    def __log_flash_attention_version(self):
-        if _flash_attention_version == 2:
-            logger.info("Using Flash Attention 2")
-            if _flash_attn_2_supports_window_size and self.config.sliding_window:
-                logger.info("Using sliding window")
-        elif _flash_attention_version == 1:
-            logger.info("Using scaled_dot_product_attention")
-        elif _flash_attention_version == 0:
-            logger.info("WARNING: using slow attention")
-        else:
-            raise Exception('Unsupported Flash Attention version!')
+    def init_attention(self):
+        if attention_version.version == 2:
+            try:
+                from flash_attn import flash_attn_func
+                attention_version.flash_attn_2_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            except ImportError:
+                attention_version.disable_flash_attn_2()
+                logger.warning("Flash Attention 2 is not available!")
 
     def estimate_size(self):
         """
@@ -340,7 +330,7 @@ class AllamoTransformer(nn.Module):
         model_bytes = self.model_num_bytes / 1024**2
         logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
 
-    def _init_weights(self, module):
+    def init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -348,7 +338,7 @@ class AllamoTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             
-    def _init_scaled_residual_projections(self, module):
+    def init_scaled_residual_projections(self, module):
         for pn, p in module.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.config.n_layer))
@@ -356,8 +346,8 @@ class AllamoTransformer(nn.Module):
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
             layer = SelfAttentionBlock(self.config)
-            layer.apply(self._init_weights)
-            self._init_scaled_residual_projections(layer)
+            layer.apply(self.init_weights)
+            self.init_scaled_residual_projections(layer)
             self.layers.append(layer)
             self.config.n_layer += 1
             

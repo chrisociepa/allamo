@@ -8,7 +8,7 @@ import time
 import torch
 from allamo.logging import configure_logger, logger
 from allamo.configuration import AllamoConfiguration
-from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.model.model import AllamoTransformerConfig, AllamoTransformer
 from allamo.torch_utils import configure_torch
 from allamo.train_utils import remove_unwanted_prefix_from_model_state_dict
 

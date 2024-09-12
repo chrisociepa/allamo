@@ -12,7 +12,7 @@ from torch.distributed.fsdp import (
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
-from allamo.model import AllamoTransformer
+from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.fsdp_utils import parallelize_with_fsdp
 from allamo.train_utils import (

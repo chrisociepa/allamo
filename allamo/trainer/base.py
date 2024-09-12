@@ -13,7 +13,8 @@ import torch.distributed as dist
 
 from allamo.logging import configure_logger, logger
 from allamo.training_context import TrainingContext
-from allamo.model import AllamoTransformerConfig
+from allamo.model.attentions import attention_version
+from allamo.model.model import AllamoTransformerConfig
 from allamo.configuration import AllamoConfiguration
 from allamo.datasets.data_loader import AllamoDataLoader
 from allamo.torch_utils import init_torch
@@ -35,6 +36,8 @@ class BaseTrainer:
         self.config = config
         self.init_torch(config)
         logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
+        
+        attention_version.configure(config)
         
         self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
 

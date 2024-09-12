@@ -17,7 +17,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 
 from allamo.logging import logger
 from allamo.configuration import AllamoConfiguration
-from allamo.model import SelfAttentionBlock
+from allamo.model.model import SelfAttentionBlock
 from allamo.torch_utils import (
     TORCH_DTYPE_MAP,
 )

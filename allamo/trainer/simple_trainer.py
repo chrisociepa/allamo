@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
-from allamo.model import AllamoTransformer
+from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.torch_utils import TORCH_DTYPE_MAP
 from allamo.train_utils import (
