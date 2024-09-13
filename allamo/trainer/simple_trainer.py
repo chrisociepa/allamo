@@ -107,7 +107,7 @@ class SimpleTrainer(BaseTrainer):
         
         if self.config.save_optimizer_checkpoint and model_only == False and \
             (self.config.optimizer_checkpoint_interval is None or \
-             self.iter_num % self.config.optimizer_checkpoint_interval == 0):
+             self.train_ctx.iter_num % self.config.optimizer_checkpoint_interval == 0):
             optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
             logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
             if not self.config.ignore_last_checkpoint_backup:

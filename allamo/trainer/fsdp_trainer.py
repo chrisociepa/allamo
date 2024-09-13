@@ -116,7 +116,7 @@ class FSDPTrainer(BaseTrainer):
         
         if self.config.save_optimizer_checkpoint and model_only == False and \
             (self.config.optimizer_checkpoint_interval is None or \
-             self.iter_num % self.config.optimizer_checkpoint_interval == 0):
+             self.train_ctx.iter_num % self.config.optimizer_checkpoint_interval == 0):
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.train_ctx.master_process:

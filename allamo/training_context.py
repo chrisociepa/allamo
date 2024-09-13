@@ -17,6 +17,10 @@ class TrainingContext:
         
         self.run_uuid = str(uuid.uuid4())
         self.training_uuid = self.run_uuid
+        self.iter_num = 0
+        self.best_train_loss = 1e2
+        self.best_val_loss = 1e2
+        self.processed_tokens = 0
         
         self._validate()
 

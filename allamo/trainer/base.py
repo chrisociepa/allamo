@@ -38,14 +38,9 @@ class BaseTrainer:
         self.init_torch(config)
         logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
         
-        attention_version.configure(config)
-        
         self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
-
-        self.iter_num = 0
-        self.best_train_loss = 1e2
-        self.best_val_loss = 1e2
-        self.processed_tokens = 0
+        
+        attention_version.configure(config)
         self.init_training()
         
     def distributed(self):
@@ -92,13 +87,13 @@ class BaseTrainer:
             if hasattr(self.config, k) and k in config_checkpoint['model_args']:
                 setattr(self.config, k, config_checkpoint['model_args'][k])
         if 'iter_num' in config_checkpoint:
-            self.iter_num = config_checkpoint['iter_num']
+            self.train_ctx.iter_num = config_checkpoint['iter_num']
         if 'best_train_loss' in config_checkpoint:
-            self.best_train_loss = config_checkpoint['best_train_loss']
+            self.train_ctx.best_train_loss = config_checkpoint['best_train_loss']
         if 'best_val_loss' in config_checkpoint:
-            self.best_val_loss = config_checkpoint['best_val_loss']
+            self.train_ctx.best_val_loss = config_checkpoint['best_val_loss']
         if 'processed_tokens' in config_checkpoint:
-            self.processed_tokens = config_checkpoint['processed_tokens']
+            self.train_ctx.processed_tokens = config_checkpoint['processed_tokens']
         
         if 'allamo_dataloader' in config_checkpoint:
             if  'train_processed_files' in config_checkpoint['allamo_dataloader']:
@@ -120,10 +115,10 @@ class BaseTrainer:
             'model_args': dataclasses.asdict(self.model.config),
             'run_uuid': self.train_ctx.run_uuid,
             'training_uuid': self.train_ctx.training_uuid,
-            'iter_num': self.iter_num,
-            'best_train_loss': self.best_train_loss,
-            'best_val_loss': self.best_val_loss,
-            'processed_tokens': self.processed_tokens,
+            'iter_num': self.train_ctx.iter_num,
+            'best_train_loss': self.train_ctx.best_train_loss,
+            'best_val_loss': self.train_ctx.best_val_loss,
+            'processed_tokens': self.train_ctx.processed_tokens,
             'config': dataclasses.asdict(self.config),
             'allamo_dataloader': {
                 'train_processed_files': self.data_loader.train_dataset.processed_files,
@@ -177,13 +172,13 @@ class BaseTrainer:
         torch.cuda.empty_cache()
     
     def should_evaluate(self):
-        return self.config.eval_interval > 0 and self.iter_num % self.config.eval_interval == 0
+        return self.config.eval_interval > 0 and self.train_ctx.iter_num % self.config.eval_interval == 0
 
     def should_save_last_checkpoint(self):
-        return self.config.checkpoint_interval > 0 and self.iter_num > self.start_iter and self.iter_num % self.config.checkpoint_interval == 0
+        return self.config.checkpoint_interval > 0 and self.train_ctx.iter_num > self.start_iter and self.train_ctx.iter_num % self.config.checkpoint_interval == 0
     
     def should_log_metrics(self):
-        return self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0 and self.train_ctx.master_process
+        return self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0 and self.train_ctx.master_process
     
     def clip_grad_norm(self):
         return torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
@@ -191,36 +186,36 @@ class BaseTrainer:
     def has_next_iter_to_perform(self):
         if self.config.num_train_epochs is not None and self.data_loader.epoch >= self.config.num_train_epochs:
             return False
-        return self.iter_num <= self.config.max_iters
+        return self.train_ctx.iter_num <= self.config.max_iters
     
     def calculate_eta(self):
         current_time = datetime.datetime.now()
         elapsed_time = current_time - self.start_timestamp
-        elapsed_iters = self.iter_num - self.start_iter
+        elapsed_iters = self.train_ctx.iter_num - self.start_iter
         if elapsed_iters < 1:
             return 'N/A'
         avg_time_per_iter = elapsed_time.total_seconds() / elapsed_iters
-        eta_seconds = math.ceil(avg_time_per_iter * (self.config.max_iters - self.iter_num))
+        eta_seconds = math.ceil(avg_time_per_iter * (self.config.max_iters - self.train_ctx.iter_num))
         return format_seconds_as_time(eta_seconds)
     
     def get_grad_accum(self):
-        if self.config.grad_accum_schedule and self.gradient_accumulation_steps < self.config.grad_accum_max and self.iter_num % (self.config.grad_accum_max_iter/100) == 0:
+        if self.config.grad_accum_schedule and self.gradient_accumulation_steps < self.config.grad_accum_max and self.train_ctx.iter_num % (self.config.grad_accum_max_iter/100) == 0:
             return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
         else:
             return self.gradient_accumulation_steps
         
     def get_lr(self):
         """ learning rate decay scheduler (cosine with warmup) """
-        if self.iter_num < self.config.warmup_iters:
-            return self.config.learning_rate * self.iter_num / self.config.warmup_iters
+        if self.train_ctx.iter_num < self.config.warmup_iters:
+            return self.config.learning_rate * self.train_ctx.iter_num / self.config.warmup_iters
             
         if self.config.decay_lr:   
-            if self.iter_num >= self.config.lr_decay_iters:
+            if self.train_ctx.iter_num >= self.config.lr_decay_iters:
                 return self.config.min_lr
             if self.config.lr_decay_reset_iters is not None:
-                decay_ratio = (self.iter_num % self.config.lr_decay_reset_iters) / self.config.lr_decay_reset_iters
+                decay_ratio = (self.train_ctx.iter_num % self.config.lr_decay_reset_iters) / self.config.lr_decay_reset_iters
             else:
-                decay_ratio = (self.iter_num - self.config.warmup_iters) / (self.config.lr_decay_iters - self.config.warmup_iters)
+                decay_ratio = (self.train_ctx.iter_num - self.config.warmup_iters) / (self.config.lr_decay_iters - self.config.warmup_iters)
             assert 0 <= decay_ratio <= 1
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
             return self.config.min_lr + coeff * (self.config.learning_rate - self.config.min_lr)
@@ -232,7 +227,7 @@ class BaseTrainer:
             "ALLAMO_EPOCH_HOOK_RUN_UUID": self.train_ctx.run_uuid,
             "ALLAMO_EPOCH_HOOK_TRAINING_UUID": self.train_ctx.training_uuid,
             "ALLAMO_EPOCH_HOOK_EPOCH": str(current_epoch),
-            "ALLAMO_EPOCH_HOOK_ITERATION": str(self.iter_num),
+            "ALLAMO_EPOCH_HOOK_ITERATION": str(self.train_ctx.iter_num),
             "ALLAMO_EPOCH_HOOK_MODEL_CKPT_PATH": str(os.path.abspath(get_model_checkpoint_path(ckpt_file_name, self.config.out_dir))),
             "ALLAMO_EPOCH_HOOK_CONFIG_CKPT_PATH": str(os.path.abspath(get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)))
         }
@@ -274,11 +269,11 @@ class BaseTrainer:
         eval_time = time.time() - eval_time
         train_loss = losses['train'].item()
         val_loss = losses['val'].item()
-        if self.iter_num > self.start_iter:
-            if train_loss < self.best_train_loss:
-                self.best_train_loss = train_loss
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
+        if self.train_ctx.iter_num > self.start_iter:
+            if train_loss < self.train_ctx.best_train_loss:
+                self.train_ctx.best_train_loss = train_loss
+            if val_loss < self.train_ctx.best_val_loss:
+                self.train_ctx.best_val_loss = val_loss
                 if self.config.save_best_checkpoint:
                     self.save_checkpoint('ckpt')
                 
@@ -286,14 +281,14 @@ class BaseTrainer:
             train_ppl = torch.exp(losses['train']).item()
             val_ppl = torch.exp(losses['val']).item()
             logger.info(
-                f"iter {self.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
-                f"acc={accuraces['train']:.4f} (best loss={self.best_train_loss:.4f}), "
+                f"iter {self.train_ctx.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
+                f"acc={accuraces['train']:.4f} (best loss={self.train_ctx.best_train_loss:.4f}), "
                 f"val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} "
-                f"(best loss={self.best_val_loss:.4f}), tokens {self.processed_tokens:,}"
+                f"(best loss={self.train_ctx.best_val_loss:.4f}), tokens {self.train_ctx.processed_tokens:,}"
             )
             if self.config.wandb_log:
                 wandb.log({
-                    "iter": self.iter_num,
+                    "iter": self.train_ctx.iter_num,
                     "eval/time": eval_time*1000,
                     "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
                     "eval/train_loss": train_loss,
@@ -305,15 +300,15 @@ class BaseTrainer:
                     "eval/diff_loss": (val_loss-train_loss),
                     "eval/diff_acc": (accuraces['train']-accuraces['val']).item(),
                     "eval/diff_ppl": (val_ppl-train_ppl),
-                    "eval/best_train_loss": self.best_train_loss,
-                    "eval/best_val_loss": self.best_val_loss
+                    "eval/best_train_loss": self.train_ctx.best_train_loss,
+                    "eval/best_val_loss": self.train_ctx.best_val_loss
                 })
         self.trigger_gc()
     
     def train(self):
         logger.info(f"Starting training (run id: {self.train_ctx.run_uuid}, world size: {self.train_ctx.world_size}) with configuration:\n{self.config}")
         batch = self.data_loader.get_batch('train') # fetch the very first batch
-        self.start_iter = self.iter_num
+        self.start_iter = self.train_ctx.iter_num
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.data_loader.epoch
         current_num_loaded_files = self.data_loader.get_num_loaded_files()
@@ -332,7 +327,7 @@ class BaseTrainer:
                 ckpt_file_name = f'ds_reload_{current_epoch}-{current_num_loaded_files}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=False)
                 current_num_loaded_files = self.data_loader.get_num_loaded_files()
-            elif self.config.should_override_config(self.iter_num):
+            elif self.config.should_override_config(self.train_ctx.iter_num):
                 self.config.override_config_properties()
             
             timer = time.time()
@@ -342,7 +337,7 @@ class BaseTrainer:
                 param_group['lr'] = lr
                 
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
-            micro_batch_size = self.data_loader.update_batch_size(self.iter_num)
+            micro_batch_size = self.data_loader.update_batch_size(self.train_ctx.iter_num)
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.train_ctx.world_size
             self.gradient_accumulation_steps = self.get_grad_accum()
 
@@ -395,7 +390,7 @@ class BaseTrainer:
                     param_group['lr'] = lr
             
             if self.train_ctx.master_process:
-                self.processed_tokens += int(iter_metrics[1])
+                self.train_ctx.processed_tokens += int(iter_metrics[1])
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
             # step the optimizer and scaler
@@ -412,7 +407,7 @@ class BaseTrainer:
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = iter_metrics[2].item() / iter_metrics[3].item()
                 grad_norm = iter_metrics[4].item() / self.train_ctx.world_size
-                if self.config.mfu_flops_peak > 0 and self.iter_num > self.start_iter:
+                if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
                 else:
@@ -421,14 +416,14 @@ class BaseTrainer:
                 mtu = fwdbwd_time/iter_time # model time utilization
                 iter_time_ms = iter_time * 1000
                 logger.info(
-                    f"iter {self.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
-                    f"iter time {iter_time_ms:.2f}ms, tokens {self.processed_tokens:,}, lr {lr:.8f}, "
+                    f"iter {self.train_ctx.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
+                    f"iter time {iter_time_ms:.2f}ms, tokens {self.train_ctx.processed_tokens:,}, lr {lr:.8f}, "
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
                     f"ETA: {self.calculate_eta()}"
                 )
                 if self.config.wandb_log:
                     metrics = {
-                        "iter": self.iter_num,
+                        "iter": self.train_ctx.iter_num,
                         "train/loss": lossf,
                         "train/acc": accuracy,
                         "train/ppl": ppl,
@@ -437,7 +432,7 @@ class BaseTrainer:
                         "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
                         "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
-                        "train/tokens": self.processed_tokens,
+                        "train/tokens": self.train_ctx.processed_tokens,
                         "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
                         "train/iter_time": iter_time_ms,
@@ -447,7 +442,7 @@ class BaseTrainer:
                     if self.config.dataset_seq_train:
                         metrics['train/ds_offset'] = self.data_loader.dataset_offset
                     wandb.log(metrics)
-            self.iter_num += 1
+            self.train_ctx.iter_num += 1
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
         logger.info(f"Training finished in {training_time}")

@@ -90,7 +90,7 @@ class DPOTrainer(FSDPTrainer):
         
         accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels
         
-        if last_micro_step and self.config.log_interval > 0 and self.iter_num % self.config.log_interval == 0:
+        if last_micro_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
             chosen_rewards = chosen_rewards.detach() 
             rejected_rewards = rejected_rewards.detach()
             reward_accuracies = (chosen_rewards > rejected_rewards).float().mean()
@@ -130,7 +130,7 @@ class DPOTrainer(FSDPTrainer):
                 policy_rejected_logps = metrics[8].item() / cnt
                 if self.config.wandb_log:
                     wandb.log({
-                        "iter": self.iter_num,
+                        "iter": self.train_ctx.iter_num,
                         "dpo/rewards/accuracies": reward_accuracies,
                         "dpo/rewards/margins": reward_margins,
                         "dpo/rewards/chosen": chosen_rewards,
@@ -142,7 +142,7 @@ class DPOTrainer(FSDPTrainer):
                     })
                 else:
                     logger.info(
-                        f"iter {self.iter_num:,}: "
+                        f"iter {self.train_ctx.iter_num:,}: "
                         f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
                         f"reward_penalty={reward_penalty:.4f}"
