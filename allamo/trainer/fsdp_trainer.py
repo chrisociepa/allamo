@@ -1,6 +1,4 @@
-import json
 import os
-import dataclasses
 import shutil
 import torch
 import torch.distributed as dist
@@ -113,32 +111,8 @@ class FSDPTrainer(BaseTrainer):
             del full_msd
             
             md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
-            
-            checkpoint = {
-                'model_args': dataclasses.asdict(self.model.config),
-                'run_uuid': self.train_ctx.run_uuid,
-                'training_uuid': self.train_ctx.training_uuid,
-                'iter_num': self.iter_num,
-                'best_train_loss': self.best_train_loss,
-                'best_val_loss': self.best_val_loss,
-                'processed_tokens': self.processed_tokens,
-                'config': dataclasses.asdict(self.config),
-                'allamo_dataloader': {
-                    'train_processed_files': self.data_loader.train_dataset.processed_files,
-                    'dataset_offset': self.data_loader.dataset_offset * self.train_ctx.world_size,
-                    'epoch': self.data_loader.epoch
-                }
-            }
-            if md5sum is not None:
-                checkpoint['checkpoint_md5sum'] = md5sum
-                logger.info(f"model checkpoint saved - MD5: {md5sum}")
-                
             config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
-            if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(config_ckpt_file_path)
-            with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
-                json.dump(checkpoint, f, indent=4, ensure_ascii=False)
+            self.save_config_checkpoint(config_ckpt_file_path, md5sum)
         
         if self.config.save_optimizer_checkpoint and model_only == False and \
             (self.config.optimizer_checkpoint_interval is None or \
