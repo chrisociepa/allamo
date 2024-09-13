@@ -12,16 +12,14 @@ def calculate_md5(file_path, chunk_size=1024*1024):
             md5.update(chunk)
     return md5.hexdigest()
 
-def remove_unwanted_prefix_from_model_state_dict(state_dict):
-    unwanted_prefix = '_orig_mod.'
+def remove_unwanted_prefix_from_model_state_dict(state_dict, unwanted_prefix = '_orig_mod.'):
     unwanted_prefix_len = len(unwanted_prefix)
     for k, _ in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[unwanted_prefix_len:]] = state_dict.pop(k)
             
-def remove_unwanted_prefix_from_optimizer_state_dict(optimizer_state_dict):
+def remove_unwanted_prefix_from_optimizer_state_dict(optimizer_state_dict, unwanted_prefix = '_orig_mod.'):
     if "param_groups" in optimizer_state_dict:
-        unwanted_prefix = '_orig_mod.'
         unwanted_prefix_len = len(unwanted_prefix)
         for param_group in optimizer_state_dict["param_groups"]:
             param_group['params'] = [p[unwanted_prefix_len:] if p.startswith(unwanted_prefix) else p for p in param_group['params']]
