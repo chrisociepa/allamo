@@ -46,12 +46,12 @@ class DPOTrainer(FSDPTrainer):
             
             # compile the model - requires PyTorch 2.0
             if self.config.compile:
-                logger.info("compiling the reference model... (takes a ~minute)")
+                logger.info("Compiling reference model")
                 try:
                     ref_model = torch.compile(ref_model, mode=self.config.compile_mode)
                     logger.info("Reference model compiled and ready to use")
                 except Exception as err:
-                    logger.warning(f"Reference model cannot be compiled, because torch.compile is not supported: {err}")
+                    logger.warning(f"Unable to compile the reference model: {err}")
             self.ref_model = ref_model
             self.ref_model.eval()
         else:

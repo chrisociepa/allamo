@@ -1,5 +1,7 @@
+import dataclasses
 import hashlib
 import os
+from allamo.model.model import AllamoTransformerConfig
 
 def rename_file_to_prev_version(file_path):
     if os.path.exists(file_path):
@@ -53,3 +55,6 @@ def get_optimizer_checkpoint_path(ckpt_file_name, ckpt_dir):
 def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
     return os.path.exists(get_config_checkpoint_path(ckpt_file_name, ckpt_dir)) \
             and os.path.exists(get_model_checkpoint_path(ckpt_file_name, ckpt_dir))
+
+def get_model_config_field_names():
+    return [f.name for f in dataclasses.fields(AllamoTransformerConfig)]

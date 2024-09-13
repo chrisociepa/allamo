@@ -12,9 +12,6 @@ from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.torch_utils import TORCH_DTYPE_MAP
 from allamo.train_utils import (
-    rename_file_to_prev_version,
-    calculate_md5,
-    remove_unwanted_prefix_from_model_state_dict,
     get_model_checkpoint_path,
     get_config_checkpoint_path,
     get_optimizer_checkpoint_path,
@@ -36,24 +33,23 @@ class SimpleTrainer(BaseTrainer):
             torch.set_default_dtype(torch.bfloat16)
         
     def init_training(self):
-        self.init_checkpoint()
-        self.load_datasets()
+        super().init_training()
         
-        model = AllamoTransformer(self.create_model_config())
+        model = AllamoTransformer(self.model_config)
         self.model_num_params = model.model_num_params
-        if self.checkpoint_name is None:
-            logger.info("Initialized a new model from scratch")
+        if self.checkpoint_manager.is_checkpoint_available():
+            self.checkpoint_manager.load_regular_model_checkpoint(model)
         else:
-            self.load_model_checkpoint(model, os.path.join(self.checkpoint_dir, f'model_{self.checkpoint_name}.pt'), self.config)
+            logger.info("New model initialized from scratch")
         model.to(self.config.device)
 
         if self.config.compile:
-            logger.info("compiling the model... (takes a ~minute)")
+            logger.info("Compiling model")
             try:
                 model = torch.compile(model, mode=self.config.compile_mode)
                 logger.info("Model compiled and ready to use")
             except Exception as err:
-                logger.warn(f"Model compile not supported: {err}")
+                logger.warn(f"Unable to compile the model: {err}")
 
         self.raw_model = model # neeeded in DDP training
         self.model = model
@@ -66,27 +62,18 @@ class SimpleTrainer(BaseTrainer):
         
         # optimizer
         self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
-        if self.checkpoint_name is not None:
-            self.load_optimizer_checkpoint(self.optimizer, os.path.join(self.checkpoint_dir, f'optimizer_{self.checkpoint_name}.pt'))
+        if self.checkpoint_manager.is_checkpoint_available():
+            self.load_optimizer_checkpoint(self.optimizer)
         
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()
 
-    def load_model_checkpoint(self, model, ckpt_path, config):
-        state_dict = torch.load(ckpt_path, map_location='cpu')
-        remove_unwanted_prefix_from_model_state_dict(state_dict)
-        model.load_state_dict(state_dict)
-        if config.log_checkpoint_md5_on_load and self.train_ctx.master_process:
-            md5sum = calculate_md5(ckpt_path)
-            logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
-        else:
-            logger.info(f"Loaded model from checkpoint {ckpt_path}")
-        
-    def load_optimizer_checkpoint(self, optimizer, ckpt_path):
+    def load_optimizer_checkpoint(self, optimizer):
+        ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)
         if os.path.exists(ckpt_path):
             state_dict = torch.load(ckpt_path, map_location=self.config.device)
             optimizer.load_state_dict(state_dict)
-            logger.info("Optimizer state loaded.")
+            logger.info(f"Optimizer state loaded from checkpoint {ckpt_path}")
         else:
             logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
 
@@ -96,23 +83,14 @@ class SimpleTrainer(BaseTrainer):
             return
         
         model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
-        if not self.config.ignore_last_checkpoint_backup:
-            rename_file_to_prev_version(model_ckpt_file_path)
-        torch.save(self.raw_model.state_dict(), model_ckpt_file_path)
-        
-        md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
+        md5sum = self.checkpoint_manager.save_regular_model_checkpoint(self.raw_model.state_dict(), model_ckpt_file_path, epoch_ckpt)
+
         config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-        self.save_config_checkpoint(config_ckpt_file_path, md5sum)
+        self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, md5sum, self.model_config)
         
-        if self.config.save_optimizer_checkpoint and model_only == False and \
-            (self.config.optimizer_checkpoint_interval is None or \
-             self.train_ctx.iter_num % self.config.optimizer_checkpoint_interval == 0):
+        if model_only == False and self.checkpoint_manager.should_save_optimizer():
             optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
-            if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(optim_ckpt_file_path)
-            torch.save(self.optimizer.state_dict(), optim_ckpt_file_path)
+            self.checkpoint_manager.save_regular_optimizer_checkpoint(self.optimizer.state_dict(), optim_ckpt_file_path)
             
             if self.config.optimizer_checkpoint_interval is not None:
                 shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')

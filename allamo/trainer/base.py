@@ -1,31 +1,29 @@
 import gc
-import json
 import os
 import time
 import math
 import datetime
-import dataclasses
 import subprocess
 import wandb
 
 import torch
 import torch.distributed as dist
 
-from allamo.logging import configure_logger, logger
-from allamo.training_context import TrainingContext
-from allamo.model.attentions import attention_version
-from allamo.model.model import AllamoTransformerConfig
+from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
 from allamo.dataset.data_loader import AllamoDataLoader
+from allamo.logging import configure_logger, logger
+from allamo.model.attentions import attention_version
+from allamo.model.model import AllamoTransformerConfig
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
     estimate_mfu,
-    model_checkpoint_files_exist,
     get_model_checkpoint_path,
     get_config_checkpoint_path,
-    rename_file_to_prev_version,
+    get_model_config_field_names,
 )
+from allamo.training_context import TrainingContext
 
 class BaseTrainer:
     
@@ -40,107 +38,23 @@ class BaseTrainer:
         
         self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
         
-        attention_version.configure(config)
         self.init_training()
-        
+
     def distributed(self):
         raise NotImplementedError("Not implemented")
 
-    def init_training(self):
-        raise NotImplementedError("Not implemented")
-    
     def init_torch(self, config: AllamoConfiguration):
         self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
         init_torch(self.train_ctx, config, distributed=self.distributed())
-        
-    def init_checkpoint(self):
-        self.checkpoint_dir = self.config.checkpoint_path if self.config.checkpoint_path else self.config.out_dir
-        self.checkpoint_name = None
-        if self.config.init_from == 'resume':
-            self.checkpoint_name = 'ckpt'
-        elif self.config.init_from == 'resume_last':
-            self.checkpoint_name = 'last_eval_ckpt'
-        else:
-            if model_checkpoint_files_exist('ckpt', self.checkpoint_dir):
-                logger.info("Delete existing checkpoint files to start from scratch or use --init_from=resume to resume training")
-                exit()
-        
-        if self.checkpoint_name is not None:
-            if model_checkpoint_files_exist(self.checkpoint_name, self.checkpoint_dir):
-                logger.info(f"Resuming training from {self.checkpoint_dir} and start loading '{self.checkpoint_name}' checkpoint files")
-                self.load_config_checkpoint(os.path.join(self.checkpoint_dir, f'config_{self.checkpoint_name}.json'))
-            elif self.config.init_from == 'resume_last':
-                self.checkpoint_name = None
-                if self.train_ctx.master_process:
-                    logger.warning(f"'{self.checkpoint_name}' checkpoint files not found but allowing to start from scratch")
-            else:
-                raise Exception(f"'{self.checkpoint_name}' checkpoint files not found!")
-        
-    def load_config_checkpoint(self, ckpt_path):
-        with open(ckpt_path, "r", encoding="utf-8") as f:
-            config_checkpoint = json.load(f)
-        if 'training_uuid' in config_checkpoint:
-            self.train_ctx.training_uuid = config_checkpoint['training_uuid']
-        # force these config attributes to be equal otherwise we can't even resume training
-        # the rest of the attributes (e.g. dropout) can stay as desired from command line
-        for k in self.get_model_config_field_names():
-            if hasattr(self.config, k) and k in config_checkpoint['model_args']:
-                setattr(self.config, k, config_checkpoint['model_args'][k])
-        if 'iter_num' in config_checkpoint:
-            self.train_ctx.iter_num = config_checkpoint['iter_num']
-        if 'best_train_loss' in config_checkpoint:
-            self.train_ctx.best_train_loss = config_checkpoint['best_train_loss']
-        if 'best_val_loss' in config_checkpoint:
-            self.train_ctx.best_val_loss = config_checkpoint['best_val_loss']
-        if 'processed_tokens' in config_checkpoint:
-            self.train_ctx.processed_tokens = config_checkpoint['processed_tokens']
-        
-        if 'allamo_dataloader' in config_checkpoint:
-            if  'train_processed_files' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader']['train_processed_files']
-                if len(self.data_loader.train_dataset.processed_files) > 0:
-                    # Removing the last element from the list because it represents the file where processing was interrupted.
-                    # We will load this file and resume processing from there, indicated by the dataset_offset.
-                    self.data_loader.train_dataset.processed_files.pop()
-            if 'dataset_offset' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.train_ctx.world_size
-            if 'epoch' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.epoch = config_checkpoint['allamo_dataloader']['epoch']
-                
-    def save_config_checkpoint(self, config_ckpt_file_path, md5sum):
-        if not self.train_ctx.master_process:
-            return
-        
-        checkpoint = {
-            'model_args': dataclasses.asdict(self.model.config),
-            'run_uuid': self.train_ctx.run_uuid,
-            'training_uuid': self.train_ctx.training_uuid,
-            'iter_num': self.train_ctx.iter_num,
-            'best_train_loss': self.train_ctx.best_train_loss,
-            'best_val_loss': self.train_ctx.best_val_loss,
-            'processed_tokens': self.train_ctx.processed_tokens,
-            'config': dataclasses.asdict(self.config),
-            'allamo_dataloader': {
-                'train_processed_files': self.data_loader.train_dataset.processed_files,
-                'dataset_offset': self.data_loader.dataset_offset * self.train_ctx.world_size,
-                'epoch': self.data_loader.epoch
-            }
-        }
-        if md5sum is not None:
-            checkpoint['checkpoint_md5sum'] = md5sum
-            logger.info(f"model checkpoint saved - MD5: {md5sum}")
-        
-        logger.info(f"saving config checkpoint to {config_ckpt_file_path}")
-        if not self.config.ignore_last_checkpoint_backup:
-            rename_file_to_prev_version(config_ckpt_file_path)
-        with open(config_ckpt_file_path, "w", encoding="utf-8") as f:
-            json.dump(checkpoint, f, indent=4, ensure_ascii=False)
-    
-    def load_datasets(self):
+
+    def init_training(self):
+        attention_version.configure(self.config)
+        self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.data_loader)
         self.data_loader.load_datasets()
+        self.model_config = self.create_model_config()
     
     def create_model_config(self):
-        model_args = {k: getattr(self.config, k) for k in self.get_model_config_field_names() if hasattr(self.config, k)}
+        model_args = {k: getattr(self.config, k) for k in get_model_config_field_names() if hasattr(self.config, k)}
         return AllamoTransformerConfig(**model_args)
     
     def init_gradient_accumulation_scheduler(self):
@@ -163,9 +77,6 @@ class BaseTrainer:
         if self.config.wandb_log and self.train_ctx.master_process:
             wandb_run_name = self.config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             wandb.init(project=self.config.wandb_project, name=wandb_run_name, config=self.config)
-            
-    def get_model_config_field_names(self):
-        return [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
     
     def trigger_gc(self):
         gc.collect()

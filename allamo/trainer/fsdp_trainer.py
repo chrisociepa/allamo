@@ -14,9 +14,6 @@ from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.fsdp_utils import parallelize_with_fsdp
 from allamo.train_utils import (
-    rename_file_to_prev_version,
-    calculate_md5,
-    remove_unwanted_prefix_from_model_state_dict,
     get_model_checkpoint_path,
     get_config_checkpoint_path,
     get_optimizer_checkpoint_path,
@@ -47,19 +44,17 @@ class FSDPTrainer(BaseTrainer):
             self.fsdp_activation_checkpointing = False
             
     def init_training(self):
-        self.init_checkpoint()
-        self.load_datasets()
+        super().init_training()
         
-        modelConf = self.create_model_config()
         if self.fsdp_activation_checkpointing:
-            modelConf.gradient_checkpointing = False
+            self.model_config.gradient_checkpointing = False
         
-        model = AllamoTransformer(modelConf)
+        model = AllamoTransformer(self.model_config)
         self.model_num_params = model.model_num_params
-        if self.checkpoint_name is None:
+        if self.checkpoint_manager.checkpoint_name is None:
             logger.info("Initialized a new model from scratch")
         else:
-            self.load_model_checkpoint(model, os.path.join(self.checkpoint_dir, f'model_{self.checkpoint_name}.pt'), self.config)
+            self.checkpoint_manager.load_regular_model_checkpoint(model)
         
         logger.info("Configuring model with FSDP")
         self.model = parallelize_with_fsdp(model, self.config, self.fsdp_activation_checkpointing)
@@ -69,31 +64,22 @@ class FSDPTrainer(BaseTrainer):
         
         # optimizer
         self.optimizer = model.configure_optimizers(self.config, self.device_type)
-        if self.checkpoint_name is None:
+        if self.checkpoint_manager.checkpoint_name is None:
             logger.info("Initializing optimizer from scratch")
         else:
-            self.load_optimizer_checkpoint(model, self.optimizer, os.path.join(self.checkpoint_dir, f'optimizer_{self.checkpoint_name}.pt'))
+            self.load_optimizer_checkpoint(model, self.optimizer)
                 
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()
     
-    def load_model_checkpoint(self, model, ckpt_path, config):
-        state_dict = torch.load(ckpt_path, map_location='cpu')
-        remove_unwanted_prefix_from_model_state_dict(state_dict)
-        model.load_state_dict(state_dict)
-        if config.log_checkpoint_md5_on_load and self.train_ctx.master_process:
-            md5sum = calculate_md5(ckpt_path)
-            logger.info(f"Loaded model from checkpoint {ckpt_path} - MD5: {md5sum}")
-        else:
-            logger.info(f"Loaded model from checkpoint {ckpt_path}")
-        
-    def load_optimizer_checkpoint(self, model, optimizer, ckpt_path):
+    def load_optimizer_checkpoint(self, model, optimizer):
+        ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)
         if os.path.exists(ckpt_path):
             # requires each rank to have the full dict in CPU memory to reduce communication
             full_osd = torch.load(ckpt_path, map_location='cpu')
             sharded_osd = FSDP.optim_state_dict_to_load(model, optimizer, full_osd)
             optimizer.load_state_dict(sharded_osd)
-            logger.info("Shared optimizer state loaded.")
+            logger.info(f"Shared optimizer state loaded from checkpoint {ckpt_path}")
         else:
             if self.train_ctx.master_process:
                 logger.warning("Optimizer checkpoint file not found. Initializing optimizer from scratch")
@@ -104,28 +90,18 @@ class FSDPTrainer(BaseTrainer):
             full_msd = self.model.state_dict()
         if self.train_ctx.master_process:
             model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            logger.info(f"saving model checkpoint to {model_ckpt_file_path}")
-            if not self.config.ignore_last_checkpoint_backup:
-                rename_file_to_prev_version(model_ckpt_file_path)
-            torch.save(full_msd, model_ckpt_file_path)
+            md5sum = self.checkpoint_manager.save_regular_model_checkpoint(full_msd, model_ckpt_file_path, epoch_ckpt)
             del full_msd
             
-            md5sum = calculate_md5(model_ckpt_file_path) if epoch_ckpt and self.config.log_checkpoint_md5_on_epoch else None
             config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.save_config_checkpoint(config_ckpt_file_path, md5sum)
+            self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, md5sum, self.model_config)
         
-        if self.config.save_optimizer_checkpoint and model_only == False and \
-            (self.config.optimizer_checkpoint_interval is None or \
-             self.train_ctx.iter_num % self.config.optimizer_checkpoint_interval == 0):
+        if model_only == False and self.checkpoint_manager.should_save_optimizer():
             # pull all sharded optimizer states to rank0 cpu.
             full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
             if self.train_ctx.master_process:
                 optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-                logger.info(f"saving optimizer checkpoint to {optim_ckpt_file_path}")
-                if not self.config.ignore_last_checkpoint_backup:
-                    rename_file_to_prev_version(optim_ckpt_file_path)
-                torch.save(full_osd, optim_ckpt_file_path)
-                logger.info(f"checkpoint files saved in {self.config.out_dir}")
+                self.checkpoint_manager.save_regular_optimizer_checkpoint(full_osd, optim_ckpt_file_path)
                 del full_osd
                 
                 if self.config.optimizer_checkpoint_interval is not None:
