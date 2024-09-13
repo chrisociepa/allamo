@@ -2,7 +2,7 @@ import threading
 import time
 import torch
 from allamo.configuration import AllamoConfiguration
-from allamo.datasets.dataset import AllamoDataset
+from allamo.dataset.dataset import AllamoDataset
 from allamo.logging import logger
 
 class AllamoDataLoader:

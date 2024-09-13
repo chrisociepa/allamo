@@ -16,7 +16,7 @@ from allamo.training_context import TrainingContext
 from allamo.model.attentions import attention_version
 from allamo.model.model import AllamoTransformerConfig
 from allamo.configuration import AllamoConfiguration
-from allamo.datasets.data_loader import AllamoDataLoader
+from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
