@@ -2,6 +2,7 @@ import os
 import shutil
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     StateDictType,
@@ -12,7 +13,8 @@ from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
 from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
-from allamo.fsdp_utils import parallelize_with_fsdp
+from allamo.parallelisms.fsdp_utils import parallelize_model_with_fsdp1
+from allamo.parallelisms.fsdp2_utils import build_world_mesh, parallelize_model_with_fsdp2
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -42,33 +44,61 @@ class FSDPTrainer(BaseTrainer):
             )
         else:
             self.fsdp_activation_checkpointing = False
+        
+        # DCP activates FSDP2
+        if self.config.distributed_checkpoint:
+            assert self.config.dtype != 'float16', "GradScaler is not functioning properly with FSDP2"
+            self.world_mesh = build_world_mesh(self.train_ctx, self.device_type)
+        else:
+            self.world_mesh = None
             
     def init_training(self):
         super().init_training()
-        
-        if self.fsdp_activation_checkpointing:
-            self.model_config.gradient_checkpointing = False
-        
-        model = AllamoTransformer(self.model_config)
+        self.model_config.gradient_checkpointing = False # AC is handled by FSDP
+            
+        with torch.device('meta'):
+            model = AllamoTransformer(self.model_config)
         self.model_num_params = model.model_num_params
+            
         if self.checkpoint_manager.checkpoint_name is None:
+            if self.world_mesh is None:
+                self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)
+            else:
+                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.fsdp_activation_checkpointing)
+            self.model.to_empty(device=self.device_type)
+            self.model.init_model_weights()
             logger.info("Initialized a new model from scratch")
+            
+            self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+            logger.info("Initializing optimizer from scratch")
         else:
-            self.checkpoint_manager.load_regular_model_checkpoint(model)
-        
-        logger.info("Configuring model with FSDP")
-        self.model = parallelize_with_fsdp(model, self.config, self.fsdp_activation_checkpointing)
-        
+            if self.config.distributed_checkpoint:
+                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.fsdp_activation_checkpointing)
+                logger.info("model.to_empty")
+                self.model.to_empty(device=self.device_type)
+                logger.info("model.init_model_weights")
+                self.model.init_model_weights()
+                logger.info("checkpoint_manager.load_distributed_model_checkpoint")
+                self.checkpoint_manager.load_distributed_model_checkpoint(self.model)
+                
+                logger.info("model.configure_optimizers")
+                self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+                logger.info("checkpoint_manager.load_distributed_optimizer_checkpoint")
+                self.checkpoint_manager.load_distributed_optimizer_checkpoint(self.model, self.optimizer)
+                logger.info("ready")
+            else:
+                model.to_empty(device=self.device_type)
+                model.init_model_weights()
+                self.checkpoint_manager.load_regular_model_checkpoint(model)
+                
+                self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)
+                
+                self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+                self.load_optimizer_checkpoint(self.model, self.optimizer)
+                
         # initialize a GradScaler only for FSDP's built-in mixed precision with fp16
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16'))
         
-        # optimizer
-        self.optimizer = model.configure_optimizers(self.config, self.device_type)
-        if self.checkpoint_manager.checkpoint_name is None:
-            logger.info("Initializing optimizer from scratch")
-        else:
-            self.load_optimizer_checkpoint(model, self.optimizer)
-                
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()
     
@@ -86,30 +116,55 @@ class FSDPTrainer(BaseTrainer):
         
     # helps saving checkpoint to a file
     def save_checkpoint(self, ckpt_file_name, model_only=False, epoch_ckpt=False):
-        with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
-            full_msd = self.model.state_dict()
-        if self.train_ctx.master_process:
-            model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            md5sum = self.checkpoint_manager.save_regular_model_checkpoint(full_msd, model_ckpt_file_path, epoch_ckpt)
-            del full_msd
-            
+        if self.config.distributed_checkpoint:
             config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
-            self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, md5sum, self.model_config)
-        
-        if model_only == False and self.checkpoint_manager.should_save_optimizer():
-            # pull all sharded optimizer states to rank0 cpu.
-            full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
-            if self.train_ctx.master_process:
-                optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
-                self.checkpoint_manager.save_regular_optimizer_checkpoint(full_osd, optim_ckpt_file_path)
-                del full_osd
+            self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, None, self.model_config)
+            
+            if self.train_ctx.master_process and not self.config.ignore_last_checkpoint_backup:
+                logger.warning("Backing up a previous checkpoint is not supported for distributed checkpoints")
+            model_ckpt_dir_path = self.checkpoint_manager.save_distributed_model_checkpoint(self.model, ckpt_file_name)
+            
+            if model_only == False and self.checkpoint_manager.should_save_optimizer():
+                self.checkpoint_manager.save_distributed_optimizer_checkpoint(self.model, self.optimizer, ckpt_file_name)
                 
                 if self.config.optimizer_checkpoint_interval is not None:
-                    shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
+                    shutil.copytree(model_ckpt_dir_path, model_ckpt_dir_path + '-optim')
                     shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
+        else:
+            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
+                full_msd = self.model.state_dict()
+            if self.train_ctx.master_process:
+                model_ckpt_file_path = get_model_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                md5sum = self.checkpoint_manager.save_regular_model_checkpoint(full_msd, model_ckpt_file_path, epoch_ckpt)
+                del full_msd
+                
+                config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, md5sum, self.model_config)
+            
+            if model_only == False and self.checkpoint_manager.should_save_optimizer():
+                # pull all sharded optimizer states to rank0 cpu.
+                full_osd = FSDP.full_optim_state_dict(self.model, self.optimizer)
+                if self.train_ctx.master_process:
+                    optim_ckpt_file_path = get_optimizer_checkpoint_path(ckpt_file_name, self.config.out_dir)
+                    self.checkpoint_manager.save_regular_optimizer_checkpoint(full_osd, optim_ckpt_file_path)
+                    del full_osd
                     
+                    if self.config.optimizer_checkpoint_interval is not None:
+                        shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
+                        shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
+    
+    def dist_all_reduce(self, x: torch.Tensor, op: dist.ReduceOp):
+        if self.world_mesh is None:
+            dist.all_reduce(x, op=op)
+            return x
+        else:
+            return funcol.all_reduce(x, reduceOp=op.name, group=self.world_mesh["dp"])
+    
     def clip_grad_norm(self):
-        return self.model.clip_grad_norm_(self.config.grad_clip).item()
+        if self.world_mesh is None:
+            return self.model.clip_grad_norm_(self.config.grad_clip).item()
+        else:
+            return super().clip_grad_norm()
             
     def forward(self, batch, last_micro_step):
         logits, loss, _ = self.model(**batch)
@@ -120,7 +175,7 @@ class FSDPTrainer(BaseTrainer):
             if self.config.weighted_loss_method == 'openchat':
                 target_weights = batch["target_weights"].sum()
                 # sum loss weights over all processes
-                dist.all_reduce(target_weights, op=dist.ReduceOp.SUM)
+                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
                 loss = (self.train_ctx.world_size / target_weights) * loss
             else:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()

@@ -58,3 +58,7 @@ def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
 
 def get_model_config_field_names():
     return [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
+
+def create_model_config(config):
+    model_args = {k: getattr(config, k) for k in get_model_config_field_names() if hasattr(config, k)}
+    return AllamoTransformerConfig(**model_args)

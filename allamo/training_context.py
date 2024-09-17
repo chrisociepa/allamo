@@ -33,7 +33,7 @@ class TrainingContext:
             self.dp = self.world_size // (self.tp * self.pp)
         
         assert self.dp > 0
-        assert self.tp == 1, f"tp({self.tp}) > 1 is not supported"
+        assert self.tp > 0
         assert self.pp == 1, f"pp({self.pp}) > 1 is not supported"
         assert self.dp * self.tp * self.pp == self.world_size, f"dp({self.dp}) * tp({self.tp}) * pp({self.pp}) != world_size({self.world_size})"
 

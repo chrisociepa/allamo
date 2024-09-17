@@ -24,6 +24,7 @@ class AllamoConfiguration:
     optimizer_checkpoint_interval: int = None
     save_best_checkpoint: bool = True
     save_checkpoint_on_dataset_reload: bool = False
+    distributed_checkpoint: bool = False
     config_override_check_interval: int = None
     config_override_path: str = None
     eval_interval: int = 1000
@@ -102,6 +103,7 @@ class AllamoConfiguration:
     reference_checkpoint_name: str = 'ref_ckpt'
     training_type: str = 'pre'
     attention_implementation: str = 'sdpa'
+    tensor_parallel_degree: int = 1
     
     # inference params
     prompt: str = "\n" 
@@ -130,6 +132,7 @@ class AllamoConfiguration:
         parser.add_argument('--optimizer_checkpoint_interval', type=int, help='Number of iterations between checkpoints where the state of the optimizer is saved. The same as checkpoint_interval, if not specified')
         parser.add_argument('--save_best_checkpoint', type=bool, help='Enable saving the best checkpoint when evaluating model')
         parser.add_argument('--save_checkpoint_on_dataset_reload', type=bool, help='Enable model checkpoint saving on dataset reload')
+        parser.add_argument('--distributed_checkpoint', type=bool, help='Use PyTorch Distributed Checkpoint (DCP)')
         parser.add_argument('--config_override_check_interval', type=int, help='Number of iterations for checking override configuration. Feature disabled if not specified.')
         parser.add_argument('--config_override_path', type=str, help='Specifies the location of the configuration override file')
         parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
@@ -186,7 +189,7 @@ class AllamoConfiguration:
         parser.add_argument('--lr_decay_iters', type=int, help='Learning rate decay iterations. When exceeded, the min_lr is used')
         parser.add_argument('--lr_decay_reset_iters', type=int, help='Number of iterations for the learning rate decay restart')
         parser.add_argument('--min_lr', type=float, help='Minimum learning rate')
-        parser.add_argument('--backend', type=str, help='"nccl", "gloo", etc.')
+        parser.add_argument('--backend', type=str, help='Specifies one of three built-in backends: nccl, gloo, mpi')
         parser.add_argument('--device', type=str, help='"cpu", "cuda", "cuda:0", "cuda:1" etc., or try "mps" on macbooks')
         parser.add_argument('--dtype', type=str, choices=['float32', 'bfloat16', 'bfloat16-true', 'float16'], help='Type of tensor to be used in the model')
         parser.add_argument('--compile', type=bool, help='Whether to use PyTorch 2.0 to compile the model to be faster')
@@ -206,6 +209,7 @@ class AllamoConfiguration:
         parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
         parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
+        parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')

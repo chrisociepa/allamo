@@ -2,7 +2,7 @@ import dataclasses
 import gc
 import torch
 from allamo.logging import configure_logger, logger
-from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.model.model import AllamoTransformerConfig, AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 
 configure_logger()

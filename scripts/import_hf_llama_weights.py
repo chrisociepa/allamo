@@ -7,7 +7,7 @@ import os
 import torch
 from transformers import LlamaForCausalLM
 from allamo.logging import configure_logger, logger
-from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.model.model import AllamoTransformerConfig, AllamoTransformer
 
 def import_model(hf_model_path, output_model_path):
     logger.info(f"Importing Huggingface LlamaForCausalLM weights")

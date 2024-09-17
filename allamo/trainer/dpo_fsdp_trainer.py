@@ -116,7 +116,7 @@ class DPOTrainer(FSDPTrainer):
                 policy_chosen_logps.item(),
                 policy_rejected_logps.item()
             ]).to(self.config.device)
-            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            metrics = self.dist_all_reduce(metrics, op=dist.ReduceOp.SUM)
             
             if self.train_ctx.master_process:
                 cnt = metrics[0].item()
