@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import torch
 import torch.distributed as dist
 
@@ -53,6 +54,7 @@ def parallelize_dcp(args):
     model = parallelize_model_with_fsdp2(model, world_mesh, config, False)
     
     checkpoint_manager.save_distributed_model_checkpoint_to(model, args.dst, args.checkpoint_name)
+    shutil.copy(config_ckpt_file_path, get_config_checkpoint_path(args.checkpoint_name, args.dst))
     
     dist.barrier()
     dist.destroy_process_group()
