@@ -1,5 +1,5 @@
 """
-Use this file to export ALLaMo weights to Huggingface formats.   
+Use this file to export ALLaMo weights to HuggingFace formats 
 """
 import argparse
 import gc
@@ -9,7 +9,7 @@ import shutil
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
 from allamo.logging import configure_logger, logger
-from allamo.model import AllamoTransformerConfig
+from allamo.model.model import AllamoTransformerConfig
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,

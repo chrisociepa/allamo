@@ -7,7 +7,7 @@ import os
 import torch
 import shutil
 from allamo.logging import configure_logger, logger
-from allamo.model import AllamoTransformerConfig, AllamoTransformer
+from allamo.model.model import AllamoTransformerConfig, AllamoTransformer
 
 DEFAULT_BLOCK_SIZE = 4096
 

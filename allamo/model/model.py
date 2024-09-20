@@ -58,7 +58,7 @@ class RotaryEmbedding(torch.nn.Module):
         self._rope_init()
         
     # Define reset_parameters for FSDP initialization
-    def reset_buffers(self):
+    def reset_parameters(self):
         self._rope_init()
 
     def _rope_init(self):
@@ -321,7 +321,7 @@ class AllamoTransformer(nn.Module):
         
     def init_model_weights(self):
         with torch.device(self.rotary_emb.inv_freq.device):
-            self.rotary_emb.reset_buffers()
+            self.rotary_emb.reset_parameters()
         
         if self.tok_embeddings is not None:
             torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=1.0)

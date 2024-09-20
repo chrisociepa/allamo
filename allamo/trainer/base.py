@@ -14,21 +14,22 @@ from allamo.configuration import AllamoConfiguration
 from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
-from allamo.model.model import AllamoTransformerConfig
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
     estimate_mfu,
     get_model_checkpoint_path,
     get_config_checkpoint_path,
-    get_model_config_field_names,
+    create_model_config,
 )
 from allamo.training_context import TrainingContext
 
 class BaseTrainer:
     
     def __init__(self, config: AllamoConfiguration):
-        self.train_ctx = TrainingContext()
+        self.train_ctx = TrainingContext(
+            tp = config.tensor_parallel_degree,
+        )
         if self.train_ctx.master_process:
             configure_logger(config, True)
         
@@ -50,12 +51,9 @@ class BaseTrainer:
     def init_training(self):
         attention_version.configure(self.config)
         self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.data_loader)
+        self.checkpoint_manager.init_checkpoint()
         self.data_loader.load_datasets()
-        self.model_config = self.create_model_config()
-    
-    def create_model_config(self):
-        model_args = {k: getattr(self.config, k) for k in get_model_config_field_names() if hasattr(self.config, k)}
-        return AllamoTransformerConfig(**model_args)
+        self.model_config = create_model_config(self.config)
     
     def init_gradient_accumulation_scheduler(self):
         if self.config.grad_accum_schedule: 
@@ -148,6 +146,11 @@ class BaseTrainer:
         except Exception as err:
             return f"n/a - Error: {err}"
     
+    def dist_all_reduce(self, x: torch.Tensor, op: dist.ReduceOp):
+        if self.distributed():
+            dist.all_reduce(x, op=op)
+        return x
+    
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
     def estimate_loss(self):
@@ -164,8 +167,7 @@ class BaseTrainer:
                 validation_metrics[0] += loss.item()
                 validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
                 validation_metrics[2] += 1
-            if self.distributed():
-                dist.all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
+            validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
             losses_out[split] = validation_metrics[0] / (self.config.eval_iters * self.train_ctx.world_size)
             accuraces[split] = validation_metrics[1] / validation_metrics[2]
         self.model.train()
@@ -290,9 +292,8 @@ class BaseTrainer:
                 iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
-            if self.distributed():
-                # sync loss and acc over all processes
-                dist.all_reduce(iter_metrics, op=dist.ReduceOp.SUM)
+            # sync loss and acc over all processes
+            iter_metrics = self.dist_all_reduce(iter_metrics, op=dist.ReduceOp.SUM)
             
             # adjust learning rate
             if self.config.adaptive_learning_rate:

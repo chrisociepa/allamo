@@ -21,6 +21,9 @@ class SimpleTrainer(BaseTrainer):
 
     def __init__(self, config: AllamoConfiguration):
         super().__init__(config)
+        if config.distributed_checkpoint:
+            config.distributed_checkpoint = False
+            logger.warn("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
         
     def distributed(self):
         return self.train_ctx.world_size > 1
@@ -114,9 +117,8 @@ class SimpleTrainer(BaseTrainer):
         if batch["target_weights"] is not None:
             if self.config.weighted_loss_method == 'openchat':
                 target_weights = batch["target_weights"].sum()
-                if self.distributed():
-                    # sum loss weights over all processes
-                    dist.all_reduce(target_weights, op=dist.ReduceOp.SUM)
+                # sum loss weights over all processes
+                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
                 loss = (self.train_ctx.world_size / target_weights) * loss
             else:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()

@@ -47,18 +47,20 @@ def override_numa_affinity(local_rank: int, verbose: Optional[bool] = None) -> N
 
 def configure_torch(config: AllamoConfiguration, rank: int = 0):
     torch.manual_seed(config.seed + rank)
-    torch.cuda.manual_seed(config.seed + rank)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if 'cuda' in config.device:
+        torch.cuda.manual_seed(config.seed + rank)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     
-    # Use for setting the internal precision of float32 matrix multiplications    
-    # torch.set_float32_matmul_precision("highest")
+        # Use for setting the internal precision of float32 matrix multiplications    
+        # torch.set_float32_matmul_precision("highest")
 
 def init_torch(train_ctx: TrainingContext, config: AllamoConfiguration, distributed=True):
     if distributed:
         dist.init_process_group(backend=config.backend)
-        config.device = f'cuda:{train_ctx.local_rank}'
-        torch.cuda.set_device(config.device)
+        if 'cuda' in config.device:
+            config.device = f'cuda:{train_ctx.local_rank}'
+            torch.cuda.set_device(config.device)
 
     if train_ctx.master_process:
         logger.info(
