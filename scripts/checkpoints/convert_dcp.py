@@ -17,7 +17,7 @@ def add_prefix_to_model_state_dict(state_dict, prefix):
     for k, _ in list(state_dict.items()):
         state_dict[prefix + k] = state_dict.pop(k)
     
-def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_path: Union[str, os.PathLike], state_key: str, tp_size: int, world_size: int):
+def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_path: Union[str, os.PathLike], state_key: str):
     state_dict: STATE_DICT_TYPE = {}
 
     _load_state_dict(
@@ -34,9 +34,9 @@ def dcp_to_torch_save(dcp_checkpoint_dir: Union[str, os.PathLike], torch_save_pa
             logger.warning(f"Key '{state_key}' not found. Using full state dict with the following keys: {', '.join(state_dict.keys())}")
             
     torch.save(state_dict, torch_save_path)
-    logger.info(f"Converting completed. New model saved in {torch_save_path}")
+    logger.info(f"Conversion completed. New model saved in {torch_save_path}")
 
-def torch_save_to_dcp(torch_save_path: Union[str, os.PathLike], dcp_checkpoint_dir: Union[str, os.PathLike], state_key: str, tp_size: int, world_size: int):
+def torch_save_to_dcp(torch_save_path: Union[str, os.PathLike], dcp_checkpoint_dir: Union[str, os.PathLike], state_key: str):
     state_dict = torch.load(torch_save_path)
     remove_unwanted_prefix_from_model_state_dict(state_dict)
     
@@ -49,7 +49,7 @@ def torch_save_to_dcp(torch_save_path: Union[str, os.PathLike], dcp_checkpoint_d
     _save_state_dict(
         state_dict, storage_writer=FileSystemWriter(dcp_checkpoint_dir), no_dist=True
     )
-    logger.info(f"Converting completed. New model saved in {dcp_checkpoint_dir}")
+    logger.info(f"Conversion completed. New model saved in {dcp_checkpoint_dir}")
 
 if __name__ == "__main__":
     
@@ -60,10 +60,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--mode', type=str, required=True, choices=[m.value for m in FormatMode], help="Conversion mode")
     parser.add_argument('-s', '--src', type=str, required=True, help="Path to the source model")
-    parser.add_argument('-d', '--dst', type=str, required=True, help="Path to the destination model")
+    parser.add_argument('-d', '--dst', type=str, required=True, help="Path to the target model")
     parser.add_argument('-k', '--state_key', type=str, help="Dictionary key with desired state")
-    parser.add_argument('--tp_size', type=int, required=True, help="Tensor parallelism size")
-    parser.add_argument('--world_size', type=int, required=True, help="World size")
     args = parser.parse_args()
     
     configure_logger()
@@ -75,11 +73,11 @@ if __name__ == "__main__":
     if args.mode == FormatMode.TORCH_TO_DCP.value:
         if os.path.isfile(args.src):
             os.makedirs(args.dst, exist_ok=True)
-            torch_save_to_dcp(args.src, args.dst, args.state_key, args.tp_size, args.world_size)
+            torch_save_to_dcp(args.src, args.dst, args.state_key)
         else:
             logger.warning(checkpoint_missing_warning)
     elif args.mode == FormatMode.DCP_TO_TORCH.value:
         if os.path.isdir(args.src):
-            dcp_to_torch_save(args.src, args.dst, args.state_key, args.tp_size, args.world_size)
+            dcp_to_torch_save(args.src, args.dst, args.state_key)
         else:
             logger.warning(checkpoint_missing_warning)
