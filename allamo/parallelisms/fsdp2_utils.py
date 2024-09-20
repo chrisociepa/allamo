@@ -54,8 +54,9 @@ def parallelize_model_with_fsdp2(model, world_mesh, config, with_activation_chec
 
 def apply_tensor_parallelism(model: nn.Module, world_mesh: DeviceMesh):
     logger.warning(
+        "Tensor parallelism is in an early experimental stage. "
         "Strided sharding is required for 2D/3D DCP, but it is only available in nightly builds "
-        "newer than 20240809 and in PyTorch version 2.5 or later"
+        "newer than 20240809 and in PyTorch version 2.5 or later."
     )    
     parallelize_module(
         model,
