@@ -123,8 +123,8 @@ class LinearKAN(nn.Module):
         return x
     
     def init_weights(self, init_std: float):
-        self.grkan1.init_weights()
-        self.grkan2.init_weights()
+        self.grkan1.reset_parameters()
+        self.grkan2.reset_parameters()
         torch.nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=init_std)
 
 class FeedForward(nn.Module):

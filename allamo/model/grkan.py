@@ -97,9 +97,9 @@ class GRKAN(torch.nn.Module):
         
         self.num_groups = num_groups
         self.default_fn = default_fn
-        self.init_weights()
-        
-    def init_weights(self):
+        self.reset_parameters()
+    
+    def reset_parameters(self):
         numerator = sum((get_fn_init_data(self.default_fn)["init_numerator"] for _ in range(self.num_groups)), [])
         denominator = sum((get_fn_init_data(self.default_fn)["init_denominator"] for _ in range(self.num_groups)), [])
         
