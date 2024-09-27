@@ -11,6 +11,12 @@ from torch.utils.checkpoint import checkpoint
 from allamo.logging import logger
 from allamo.model.attentions import attention_version
 
+try:
+    from allamo.model.grkan import GRKAN
+    _grkan_available = True
+except ImportError:
+    _grkan_available = False
+
 @dataclass
 class AllamoTransformerConfig:
     block_size: int = 1024
@@ -29,6 +35,7 @@ class AllamoTransformerConfig:
     norm_eps: float = 1e-5
     sliding_window: int = None
     gradient_checkpointing: bool = False
+    feed_forward_kan: bool = False
 
 class RMSNorm(torch.nn.Module):
     """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
@@ -98,6 +105,27 @@ class RotaryEmbedding(torch.nn.Module):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
+    
+class LinearKAN(nn.Module):
+    
+    def __init__(self, in_features: int, out_features: int, gr_kat_num_groups: int = 8, bias: bool = False, dropout_p: float = None):
+        super().__init__()
+        
+        self.grkan1 = GRKAN(num_groups=gr_kat_num_groups, default_fn="identity")
+        self.grkan2 = GRKAN(num_groups=gr_kat_num_groups, default_fn=None)
+        self.proj = nn.Linear(in_features, out_features, bias=bias)
+        self.dropout = nn.Dropout(dropout_p) if dropout_p is not None and dropout_p != 0 else None
+
+    def forward(self, x):
+        x = self.grkan2(self.proj(self.grkan1(x)))
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return x
+    
+    def init_weights(self, init_std: float):
+        self.grkan1.init_weights()
+        self.grkan2.init_weights()
+        torch.nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=init_std)
 
 class FeedForward(nn.Module):
 
@@ -106,30 +134,40 @@ class FeedForward(nn.Module):
         if config.intermediate_size is None:
             config.intermediate_size = int(2 * (4 * config.n_embd) / 3)
             config.intermediate_size = config.multiple_of * ((config.intermediate_size + config.multiple_of - 1) // config.multiple_of)
+        self.feed_forward_kan = config.feed_forward_kan
         
-        self.gate_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        if self.feed_forward_kan:
+            self.gate_proj = LinearKAN(config.n_embd, config.intermediate_size, gr_kat_num_groups=16, bias=config.bias)
+        else:
+            self.gate_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+            self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+            self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.down_proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
-        self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.act_fn  = nn.SiLU() # SwiGLU activation function
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         self.gradient_checkpointing = config.gradient_checkpointing
         
     def init_weights(self, init_std: float):
-        torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
-        for module in (self.down_proj, self.up_proj):
-            torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
+        if self.feed_forward_kan:
+            self.gate_proj.init_weights(0.02)
+        else:
+            torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
+            torch.nn.init.trunc_normal_(self.up_proj.weight, mean=0.0, std=init_std)
+        torch.nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
 
     def forward(self, x):
         if self.training and self.gradient_checkpointing:
-            x = checkpoint(self.mlp, x, use_reentrant=False, preserve_rng_state=False)
+            x = checkpoint(self.fwd, x, use_reentrant=False, preserve_rng_state=False)
         else:
-            x = self.mlp(x)
+            x = self.fwd(x)
         if self.dropout is not None:
             x = self.dropout(x)
         return x
         
-    def mlp(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    def fwd(self, x):
+        if self.feed_forward_kan:
+            return self.down_proj(self.gate_proj(x))
+        else:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class Attention(nn.Module):
 
@@ -300,6 +338,9 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         logger.info(f"AllamoTransformerConfig: {config}")
+        
+        if config.feed_forward_kan:
+            assert _grkan_available, "GRKAN module is not available"
         
         self.init_attention()
         attention_version.log_version(self.config.sliding_window)

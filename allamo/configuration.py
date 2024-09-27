@@ -42,6 +42,7 @@ class AllamoConfiguration:
     batch_size: int = 64
     block_size: int = 1024
     sliding_window: int = None
+    feed_forward_kan: bool = False
     dataset: str = None
     dataset_train_files: str = None
     dataset_validation_files: str = None
@@ -149,6 +150,7 @@ class AllamoConfiguration:
         parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
+        parser.add_argument('--feed_forward_kan', type=bool, help='Whether to use GRKAN in FeedForward module')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')
         parser.add_argument('--dataset', type=str, help='The name of the dataset directory within the data_dir')
         parser.add_argument('--dataset_train_files', type=str, help='Comma-separated list of training dataset files to use')
