@@ -93,20 +93,36 @@ class grkan_cuda_op(torch.autograd.Function):
 class GRKAN(torch.nn.Module):
     
     def __init__(self, num_groups=8, default_fn="swish"):
-        super(GRKAN, self).__init__()
+        super().__init__()
         
         self.num_groups = num_groups
         self.default_fn = default_fn
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        numerator = sum((get_fn_init_data(self.default_fn)["init_numerator"] for _ in range(self.num_groups)), [])
-        denominator = sum((get_fn_init_data(self.default_fn)["init_denominator"] for _ in range(self.num_groups)), [])
         
-        self.numerator = torch.nn.Parameter(torch.tensor(numerator).view(self.num_groups, -1).float(), requires_grad=True)
-        self.denominator = torch.nn.Parameter(torch.tensor(denominator).view(self.num_groups, -1).float(), requires_grad=True)
+        self.numerator = torch.nn.Parameter(torch.empty(num_groups * 6))
+        self.denominator = torch.nn.Parameter(torch.empty(num_groups * 4))
+        
+        self.initialize_weights()
+    
+    def initialize_weights(self):
+        # Workaround for FSDP that ensures correct handling of param initialization
+        if self.numerator.size()[0] == self.num_groups * 6:
+            init_numerator = torch.tensor(sum((get_fn_init_data(self.default_fn)["init_numerator"] for _ in range(self.num_groups)), [])).float()
+            with torch.no_grad():
+                self.numerator.data.copy_(init_numerator)
+        else:
+            torch.nn.init.trunc_normal_(self.numerator, mean=0.0, std=0.02)
+        
+        if self.denominator.size()[0] == self.num_groups * 4:
+            init_denominator = torch.tensor(sum((get_fn_init_data(self.default_fn)["init_denominator"] for _ in range(self.num_groups)), [])).float()
+            with torch.no_grad():
+                self.denominator.data.copy_(init_denominator)
+        else:
+            torch.nn.init.trunc_normal_(self.denominator, mean=0.0, std=0.02)
+            
+    def reset_parameters(self):
+        self.initialize_weights()
         
     def forward(self, x):
         assert x.dim() == 3, "Input tensor must be 3D (batch, length, channels)"
         assert x.device.type == "cuda", "Only 'cuda' device is supported"
-        return grkan_cuda_op.apply(x, self.numerator, self.denominator, self.num_groups)
+        return grkan_cuda_op.apply(x, self.numerator.view(self.num_groups, 6), self.denominator.view(self.num_groups, 4), self.num_groups)
