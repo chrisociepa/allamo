@@ -76,8 +76,13 @@ namespace grkan {
         int D = x.size(2);
 
         int num_blocks = (x_size + threads_per_block - 1) / threads_per_block;
-
-        AT_DISPATCH_FLOATING_TYPES_AND_HALF(x.scalar_type(), "grkan_forward_cuda", ([&] {
+        
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x.scalar_type(),
+        "grkan_forward_cuda",
+        ([&] {
         grkan_forward_cuda_kernel<scalar_t>
             <<<num_blocks, threads_per_block>>>(
                 x.data_ptr<scalar_t>(),
@@ -253,7 +258,12 @@ namespace grkan {
 
         int num_blocks = (x_size + block_size - 1) / block_size;
 
-        AT_DISPATCH_FLOATING_TYPES_AND_HALF(x.scalar_type(), "grkan_backward_cuda", ([&] {
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half,
+        at::ScalarType::BFloat16,
+        x.scalar_type(),
+        "grkan_backward_cuda",
+        ([&] {
         grkan_backward_cuda_kernel<scalar_t>
             <<<num_blocks, block_size>>>(
                 grad_output.data_ptr<scalar_t>(),
