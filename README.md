@@ -4,7 +4,7 @@
   <img src="./assets/allamo_logo.jpg" width=512>
 </p>
 
-This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference LLaMA-based models.
+This repository is intended as a simple, hackable and fast implementation for training/finetuning/inference LLMs.
 
 If you're interested in seeing how we trained a 1B model for the Polish language using a single RTX 4090, with 60B tokens over 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
 
@@ -243,11 +243,10 @@ With [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/) and `torch.comp
 Please cite this repo if you use it.
 ```
 @misc{allamo,
-  author = {Krzysztof Ociepa},
-  title = {ALLaMo: Simple, hackable and fast implementation for medium-sized LLaMA-based models},
+  author = {Ociepa, Krzysztof},
+  title = {ALLaMo: A Simple, Hackable, and Fast Framework for Training Medium-Sized LLMs},
   year = {2023},
   publisher = {GitHub},
-  journal = {GitHub repository},
   howpublished = {\url{https://github.com/chrisociepa/allamo}},
 }
 ```
