@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Ociepa"
+  given-names: "Krzysztof"
+  orcid: "https://orcid.org/0009-0006-4858-6460"
+title: "ALLaMo: A Simple, Hackable, and Fast Framework for Training Medium-Sized LLMs"
+version: 5.0.0
+date-released: 2024-08-18
+url: "https://github.com/chrisociepa/allamo"
