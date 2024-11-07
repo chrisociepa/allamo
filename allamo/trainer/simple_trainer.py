@@ -64,7 +64,7 @@ class SimpleTrainer(BaseTrainer):
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
         
         # optimizer
-        self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+        self.optimizer = self.raw_model.configure_optimizers(self.config, self.device_type)
         if self.checkpoint_manager.is_checkpoint_available():
             self.load_optimizer_checkpoint(self.optimizer)
         
