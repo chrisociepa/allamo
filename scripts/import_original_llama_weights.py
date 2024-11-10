@@ -2,6 +2,7 @@
 Use this file to import original LLaMA weights to ALLaMo format.   
 """
 import argparse
+import dataclasses
 import json
 import os
 import torch
@@ -92,7 +93,7 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
         
     ckpt_file_name = 'import_ckpt'
     config_checkpoint = {
-        'model_args': config
+        'model_args': dataclasses.asdict(config)
     }
     ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
     logger.info(f"saving config checkpoint to {ckpt_file_path}")

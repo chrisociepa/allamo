@@ -2,6 +2,7 @@
 Use this file to import Huggingface LlamaForCausalLM weights to ALLaMo format.   
 """
 import argparse
+import dataclasses
 import json
 import os
 import torch
@@ -77,7 +78,7 @@ def import_model(hf_model_path, output_model_path):
     
     ckpt_file_name = 'import_ckpt'
     config_checkpoint = {
-        'model_args': config
+        'model_args': dataclasses.asdict(config)
     }
     ckpt_file_path = os.path.join(output_model_path, f'config_{ckpt_file_name}.json')
     logger.info(f"saving config checkpoint to {ckpt_file_path}")
