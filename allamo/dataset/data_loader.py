@@ -50,7 +50,7 @@ class AllamoDataLoader:
         self.train_dataset.load_next_dataset()
         logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
         
-        if self.val_dataset is not None:
+        if self.val_dataset.dataset_files:
             self.val_dataset.load_next_dataset()
             logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
         dt = time.time() - timer
