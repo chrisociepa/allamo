@@ -37,7 +37,7 @@ class AllamoDataLoader:
         logger.info(f"Training dataset initialized with files: {','.join(self.train_dataset.dataset_files)}")
         
         self.val_dataset = AllamoDataset(self.config, False, self.rank, self.world_size)
-        if self.val_dataset.has_data():
+        if self.val_dataset.dataset_files:
             self.splits.append('val')
             logger.info(f"Validation dataset initialized with files: {','.join(self.val_dataset.dataset_files)}")
         else:
@@ -50,7 +50,7 @@ class AllamoDataLoader:
         self.train_dataset.load_next_dataset()
         logger.info(f"Training samples loaded: {(len(self.train_dataset)*self.world_size):,}")
         
-        if self.val_dataset.dataset_files:
+        if self.val_dataset is not None:
             self.val_dataset.load_next_dataset()
             logger.info(f"Validation samples loaded: {(len(self.val_dataset)*self.world_size):,}")
         dt = time.time() - timer
