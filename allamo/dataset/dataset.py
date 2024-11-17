@@ -73,8 +73,7 @@ class AllamoDataset:
                     f"Expected at least {step_size} tokens but found only {len(new_data)}"
                 )
                 return False
-            new_data = self.align_data_to_step_size(new_data, step_size)
-            new_data = self.transform_continuous_data_to_samples(new_data)
+            new_data = self.align_and_transform_continuous_data_to_samples(new_data, step_size)
             new_data = self.limit_samples_to_rank(new_data)
         elif load_dataset_file.endswith('.pt'):
             assert self.training_type != 'dpo', 'DPO training only supports the ALM format'
@@ -87,8 +86,7 @@ class AllamoDataset:
                         f"Expected at least {step_size} tokens but found only {len(new_data)}"
                     )
                     return False
-                new_data = self.align_data_to_step_size(new_data, step_size)
-                new_data = self.transform_continuous_data_to_samples(new_data)
+                new_data = self.align_and_transform_continuous_data_to_samples(new_data, step_size)
                 new_data = self.limit_samples_to_rank(new_data)
             else:
                 new_data = self.align_and_limit_to_rank(new_data, load_dataset_file)
@@ -130,14 +128,28 @@ class AllamoDataset:
             if isinstance(data, list):
                 data.extend(data[:padding_length])
             else:
+                # FIXME: this operation is highly inefficient - it duplicates data in memory
                 data = torch.concat((data, data[:padding_length]))
             logger.info(f"Data aligned. Pre-alignment size: {pre_size}, "
                              f"post-alignment size: {len(data)}, "
                              f"padding added: {padding_length}")
         return data
         
-    def transform_continuous_data_to_samples(self, data):
-        return [data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)]
+    def align_and_transform_continuous_data_to_samples(self, data, step_size):
+        target_length = ((len(data) + step_size - 1) // step_size) * step_size
+        padding_length = target_length - len(data)
+        if padding_length > 0:
+            pre_size = len(data)
+            result = [data[i:i + self.sample_size] for i in range(0, (target_length - step_size), self.sample_size)]
+            data = torch.concat((data[(target_length - step_size):], data[:padding_length]))
+            result.extend([data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)])
+            logger.info(f"Continuous data aligned and transformed to {len(result)} samples. "
+                        f"Pre-alignment size: {pre_size}, "
+                        f"post-alignment size: {target_length}, "
+                        f"padding added: {padding_length}")
+            return result
+        else:
+            return [data[i:i + self.sample_size] for i in range(0, len(data), self.sample_size)]
         
     def pad_or_truncate_to_block_size(self, data):
         """
