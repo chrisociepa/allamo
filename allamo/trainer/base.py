@@ -131,7 +131,7 @@ class BaseTrainer:
         else:
             return self.config.learning_rate
         
-    def run_checkpoint_hook_program(self, current_epoch, ckpt_file_name): 
+    def run_checkpoint_hook_program(self, hook_program, current_epoch, ckpt_file_name): 
         env_variables = {
             "ALLAMO_EPOCH_HOOK_RUN_UUID": self.train_ctx.run_uuid,
             "ALLAMO_EPOCH_HOOK_TRAINING_UUID": self.train_ctx.training_uuid,
@@ -141,7 +141,7 @@ class BaseTrainer:
             "ALLAMO_EPOCH_HOOK_CONFIG_CKPT_PATH": str(os.path.abspath(get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)))
         }
         try:
-            process = subprocess.Popen(self.config.epoch_completion_hook_program, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_variables)
+            process = subprocess.Popen(hook_program, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_variables)
             return process.pid
         except Exception as err:
             return f"n/a - Error: {err}"
@@ -232,7 +232,7 @@ class BaseTrainer:
                 ckpt_file_name = f'epoch_{current_epoch}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
                 if self.config.epoch_completion_hook_program and self.train_ctx.master_process:
-                    pid = self.run_checkpoint_hook_program(current_epoch, ckpt_file_name)
+                    pid = self.run_checkpoint_hook_program(self.config.epoch_completion_hook_program, current_epoch, ckpt_file_name)
                     logger.info(f"Epoch completion hook program started with pid {pid}")
                 current_epoch = self.data_loader.epoch
                 current_num_loaded_files = self.data_loader.get_num_loaded_files()
@@ -262,7 +262,7 @@ class BaseTrainer:
                 ckpt_file_name = 'last_eval_ckpt'
                 self.save_checkpoint(ckpt_file_name)
                 if self.config.regular_checkpoint_hook_program and self.train_ctx.master_process:
-                    pid = self.run_checkpoint_hook_program(current_epoch, ckpt_file_name)
+                    pid = self.run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, current_epoch, ckpt_file_name)
                     logger.info(f"Regular checkpoint hook program started with pid {pid}")
             
             accuracy = 0
@@ -362,5 +362,5 @@ class BaseTrainer:
         ckpt_file_name = 'final_ckpt'
         self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
         if self.config.epoch_completion_hook_program and self.train_ctx.master_process:
-            pid = self.run_checkpoint_hook_program(current_epoch, ckpt_file_name)
+            pid = self.run_checkpoint_hook_program(self.config.epoch_completion_hook_program, current_epoch, ckpt_file_name)
             logger.info(f"Epoch completion hook program started with pid {pid}")
