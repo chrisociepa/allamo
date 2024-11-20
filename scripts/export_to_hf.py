@@ -58,13 +58,20 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
             f"model.layers.{layer_i}.self_attn.k_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.k_proj.weight"],
             f"model.layers.{layer_i}.self_attn.v_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.v_proj.weight"],
             f"model.layers.{layer_i}.self_attn.o_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.c_proj.weight"],
-            #f"model.layers.{layer_i}.self_attn.rotary_emb.inv_freq": model_checkpoint[f"layers.{layer_i}.attention.rotary_emb.inv_freq"],
             f"model.layers.{layer_i}.mlp.gate_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.weight"],
             f"model.layers.{layer_i}.mlp.down_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.weight"],
             f"model.layers.{layer_i}.mlp.up_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.weight"],
             f"model.layers.{layer_i}.input_layernorm.weight": model_checkpoint[f"layers.{layer_i}.attention_norm.weight"],
             f"model.layers.{layer_i}.post_attention_layernorm.weight": model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
         }
+        if  allamo_transformer_config.bias:
+                state_dict[f"model.layers.{layer_i}.self_attn.q_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.q_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.self_attn.k_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.k_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.self_attn.v_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.v_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.self_attn.o_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.c_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.mlp.gate_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.mlp.down_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.bias"]
+                state_dict[f"model.layers.{layer_i}.mlp.up_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.bias"]
         for k, v in state_dict.items():
             index_dict["weight_map"][k] = filename
             param_count += v.numel()
@@ -105,8 +112,11 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
             num_hidden_layers=n_layers,
             rms_norm_eps=allamo_transformer_config.norm_eps,
             rope_theta=allamo_transformer_config.rope_freq_base,
+            attention_bias=allamo_transformer_config.bias,
+            mlp_bias=allamo_transformer_config.bias,
         )
     elif hf_model_type == "mistral":
+        assert not allamo_transformer_config.bias, "Mistral models don't support bias"
         config = MistralConfig(
             vocab_size=allamo_transformer_config.vocab_size,
             max_position_embeddings=max_position_embeddings,
