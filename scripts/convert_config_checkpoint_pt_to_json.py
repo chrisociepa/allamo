@@ -8,7 +8,7 @@ import torch
 from allamo.logging import configure_logger, logger
 
 def convert_ckpt(config_ckpt):
-    config_checkpoint = torch.load(config_ckpt, map_location='cpu')
+    config_checkpoint = torch.load(config_ckpt, map_location='cpu', weights_only=True)
     json_checkpoint = {}
     if 'model_args' in config_checkpoint:
         json_checkpoint['model_args'] = dataclasses.asdict(config_checkpoint['model_args'])

@@ -118,7 +118,7 @@ class CheckpointManager:
 
     def load_regular_model_checkpoint(self, model):
         model_ckpt_file_path = get_model_checkpoint_path(self.checkpoint_name, self.checkpoint_dir)
-        state_dict = torch.load(model_ckpt_file_path, map_location='cpu')
+        state_dict = torch.load(model_ckpt_file_path, map_location='cpu', weights_only=True)
         remove_unwanted_prefix_from_model_state_dict(state_dict)
         model.load_state_dict(state_dict)
         if self.config.log_checkpoint_md5_on_load and self.train_ctx.master_process:

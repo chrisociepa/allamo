@@ -48,7 +48,7 @@ def import_model(input_base_path, output_model_path, max_num_layers, max_block_s
     
     logger.info(f"loading llama weights")
     # Sharded models are not supported!
-    loaded = torch.load(os.path.join(input_base_path, "consolidated.00.pth"), map_location="cpu")
+    loaded = torch.load(os.path.join(input_base_path, "consolidated.00.pth"), map_location="cpu", weights_only=True)
 
     logger.info(f"copying llama weights to the model")
     theta = 10000.0

@@ -35,7 +35,7 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
     logger.info(f"loading checkpoint from {checkpoint_dir_path}...")
     with open(get_config_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), "r", encoding="utf-8") as f:
         config_checkpoint = json.load(f)
-    model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), map_location='cpu')
+    model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), map_location='cpu', weights_only=True)
 
     allamo_transformer_config = AllamoTransformerConfig(**config_checkpoint['model_args'])
     n_layers = allamo_transformer_config.n_layer

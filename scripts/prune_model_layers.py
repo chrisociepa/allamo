@@ -32,7 +32,7 @@ def prune_model(input_dir_path, input_checkpoint_name_base, output_dir_path, out
     logger.info(f"loading checkpoint from {input_dir_path}...")
     with open(get_config_checkpoint_path(input_checkpoint_name_base, input_dir_path), "r", encoding="utf-8") as f:
         config_checkpoint = json.load(f)
-    model_checkpoint = torch.load(get_model_checkpoint_path(input_checkpoint_name_base, input_dir_path), map_location='cpu')
+    model_checkpoint = torch.load(get_model_checkpoint_path(input_checkpoint_name_base, input_dir_path), map_location='cpu', weights_only=True)
     
     unwanted_prefix = '_orig_mod.'
     for k,v in list(model_checkpoint.items()):

@@ -77,7 +77,7 @@ class SimpleTrainer(BaseTrainer):
     def load_optimizer_checkpoint(self, optimizer):
         ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)
         if os.path.exists(ckpt_path):
-            state_dict = torch.load(ckpt_path, map_location=self.config.device)
+            state_dict = torch.load(ckpt_path, map_location=self.config.device, weights_only=True)
             optimizer.load_state_dict(state_dict)
             logger.info(f"Optimizer state loaded from checkpoint {ckpt_path}")
         else:

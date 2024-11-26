@@ -77,7 +77,7 @@ class AllamoDataset:
             new_data = self.limit_samples_to_rank(new_data)
         elif load_dataset_file.endswith('.pt'):
             assert self.training_type != 'dpo', 'DPO training only supports the ALM format'
-            new_data = torch.load(load_dataset_file, map_location='cpu')
+            new_data = torch.load(load_dataset_file, map_location='cpu', weights_only=True)
             if isinstance(new_data, torch.Tensor):
                 step_size = self.world_size * self.sample_size
                 if step_size > len(new_data):
