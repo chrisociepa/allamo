@@ -11,6 +11,7 @@ import torch.distributed as dist
 
 from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
+from allamo.model.model import AllamoTransformer
 from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
@@ -54,7 +55,21 @@ class BaseTrainer:
         self.checkpoint_manager.init_checkpoint()
         self.data_loader.load_datasets()
         self.model_config = create_model_config(self.config)
-    
+
+    def freeze_model_params(self, model: AllamoTransformer):
+        if self.config.freeze_embeddings:
+            model.freeze_params(model.tok_embeddings)
+            logger.info("Embeddings frozen")
+        if self.config.freeze_lm_head:
+            model.freeze_params(model.norm)
+            model.freeze_params(model.lm_head)
+            logger.info("LM head frozen")
+        if self.config.freeze_layers:
+            for layer_id in range(self.model_config.n_layer):
+                if layer_id not in self.config.keep_layers_trainable:
+                    model.freeze_params(model.layers[layer_id])
+            logger.info(f"Layers frozen except layers {self.config.keep_layers_trainable}")
+            
     def init_gradient_accumulation_scheduler(self):
         if self.config.grad_accum_schedule: 
             self.config.grad_accum_max = self.config.gradient_accumulation_steps

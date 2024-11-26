@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 logger = logging.getLogger("AllamoConfiguration")
 
@@ -97,13 +98,21 @@ class AllamoConfiguration:
     fsdp_sharding_strategy: str = 'FULL_SHARD'
     epoch_completion_hook_program: str = None
     regular_checkpoint_hook_program: str = None
+    training_type: str = 'pre'
+    attention_implementation: str = 'sdpa'
+    tensor_parallel_degree: int = 1
+
+    # freezing params
+    freeze_embeddings: bool = False
+    freeze_lm_head: bool = False
+    freeze_layers: bool = False
+    keep_layers_trainable: List[int] = field(default_factory=list)
+
+    # DPO params
     dpo_chosen_beta: float = 0.5
     dpo_rejected_beta: float = 0.1
     dpo_penalty_lambda: float = 50.0
     reference_checkpoint_name: str = 'ref_ckpt'
-    training_type: str = 'pre'
-    attention_implementation: str = 'sdpa'
-    tensor_parallel_degree: int = 1
     
     # inference params
     prompt: str = "\n" 
@@ -203,13 +212,20 @@ class AllamoConfiguration:
         parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
+        parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
+        parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
+        parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
+
+        parser.add_argument('--freeze_embeddings', action='store_true', help='Freeze embeddings')
+        parser.add_argument('--freeze_lm_head', action='store_true', help='Freeze lm_head')
+        parser.add_argument('--freeze_layers', action='store_true', help='Freeze all layers')
+        parser.add_argument('--keep_layers_trainable', type=int, nargs='*', default=[], help='List of layer indices to keep trainable (e.g., --keep_layers_trainable 0 31)')
+
         parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_rejected_beta', type=float, help='Temperature parameter for the rejected part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_penalty_lambda', type=float, help='Temperature parameter for penalty-positive in the DPO loss, typically in the range of 1 to 100')
         parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
-        parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
-        parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
-        parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
+
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')
         parser.add_argument('--max_new_tokens', type=int, help='Number of tokens to generate in each sample')

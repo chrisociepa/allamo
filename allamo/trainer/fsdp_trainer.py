@@ -59,7 +59,9 @@ class FSDPTrainer(BaseTrainer):
         with torch.device('meta'):
             model = AllamoTransformer(self.model_config)
         self.model_num_params = model.model_num_params
-            
+
+        self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration
+
         if self.checkpoint_manager.checkpoint_name is None:
             if self.world_mesh is None:
                 self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)

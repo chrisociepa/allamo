@@ -40,6 +40,9 @@ class SimpleTrainer(BaseTrainer):
         
         model = AllamoTransformer(self.model_config)
         self.model_num_params = model.model_num_params
+
+        self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration
+
         if self.checkpoint_manager.is_checkpoint_available():
             self.checkpoint_manager.load_regular_model_checkpoint(model)
         else:
