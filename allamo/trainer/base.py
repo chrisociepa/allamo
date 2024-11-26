@@ -68,7 +68,9 @@ class BaseTrainer:
             for layer_id in range(self.model_config.n_layer):
                 if layer_id not in self.config.keep_layers_trainable:
                     model.freeze_params(model.layers[layer_id])
-            logger.info(f"Layers frozen except layers {self.config.keep_layers_trainable}")
+                    logger.info(f"Layer {layer_id} frozen")
+                else:
+                    logger.info(f"Layer {layer_id} kept trainable")
             
     def init_gradient_accumulation_scheduler(self):
         if self.config.grad_accum_schedule: 
