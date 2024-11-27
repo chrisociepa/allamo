@@ -216,9 +216,9 @@ class AllamoConfiguration:
         parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
 
-        parser.add_argument('--freeze_embeddings', action='store_true', help='Freeze embeddings')
-        parser.add_argument('--freeze_lm_head', action='store_true', help='Freeze lm_head')
-        parser.add_argument('--freeze_layers', action='store_true', help='Freeze all layers')
+        parser.add_argument('--freeze_embeddings', type=bool, help='Freeze embeddings')
+        parser.add_argument('--freeze_lm_head', type=bool, help='Freeze lm_head')
+        parser.add_argument('--freeze_layers', type=bool, help='Freeze all layers')
         parser.add_argument('--keep_layers_trainable', type=int, nargs='*', default=[], help='List of layer indices to keep trainable (e.g., --keep_layers_trainable 0 31)')
 
         parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
