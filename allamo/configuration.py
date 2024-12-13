@@ -224,7 +224,6 @@ class AllamoConfiguration:
         parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_rejected_beta', type=float, help='Temperature parameter for the rejected part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_penalty_lambda', type=float, help='Temperature parameter for penalty-positive in the DPO loss, typically in the range of 1 to 100')
-        parser.add_argument('--reference_checkpoint_name', type=str, help='Checkpoint name for the reference model')
 
         parser.add_argument('--prompt', type=str, help='Prompt for generating text. Can also specify a file, use as: "FILE:prompt.txt"')
         parser.add_argument('--num_samples', type=int, help='Number of samples to generate')

@@ -3,13 +3,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import wandb
-from copy import deepcopy
 from allamo.logging import logger
 from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
-from allamo.train_utils import model_checkpoint_files_exist
 from allamo.trainer.fsdp_trainer import FSDPTrainer
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 def get_log_prob(logits, target_ids, ignore_index):
     """
@@ -35,28 +32,6 @@ class DPOTrainer(FSDPTrainer):
         
     def init_training(self):
         super().init_training()
-        if model_checkpoint_files_exist(self.config.reference_checkpoint_name, self.checkpoint_dir):
-            ref_model_conf = deepcopy(self.model.config)
-            ref_model = AllamoTransformer(ref_model_conf)
-            self.load_model_checkpoint(ref_model, os.path.join(self.checkpoint_dir, f'model_{self.config.reference_checkpoint_name}.pt'), self.config)
-            
-            logger.info("Configuring reference model with FSDP")
-            ref_model = FSDP(ref_model, **self.fsdp_config)
-            logger.info(f"Reference model configured with FSDP and sharding strategy {self.sharding_strategy}")
-            
-            # compile the model - requires PyTorch 2.0
-            if self.config.compile:
-                logger.info("Compiling reference model")
-                try:
-                    ref_model = torch.compile(ref_model, mode=self.config.compile_mode)
-                    logger.info("Reference model compiled and ready to use")
-                except Exception as err:
-                    logger.warning(f"Unable to compile the reference model: {err}")
-            self.ref_model = ref_model
-            self.ref_model.eval()
-        else:
-            self.ref_model = None
-            logger.warning("Reference model checkpoint not provided. Reference log probabilities must be supplied via DataLoader")
     
     def forward(self, batch, last_micro_step):
         policy_chosen_logits, _, _ = self.model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
@@ -64,16 +39,9 @@ class DPOTrainer(FSDPTrainer):
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
         policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
         
-        if "reference_chosen_logps" in batch and batch["reference_chosen_logps"] is not None:
-            reference_chosen_logps = batch["reference_chosen_logps"]
-            reference_rejected_logps = batch["reference_rejected_logps"]
-        else:
-            assert self.ref_model is not None
-            with torch.no_grad():
-                reference_chosen_logits, _, _ = self.ref_model(input_ids=batch["chosen_input_ids"], target_ids=batch["chosen_target_ids"])
-                reference_rejected_logits, _, _ = self.ref_model(input_ids=batch["rejected_input_ids"], target_ids=batch["rejected_target_ids"])
-                reference_chosen_logps = get_log_prob(reference_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
-                reference_rejected_logps = get_log_prob(reference_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+        assert "reference_chosen_logps" in batch and batch["reference_chosen_logps"] is not None
+        reference_chosen_logps = batch["reference_chosen_logps"]
+        reference_rejected_logps = batch["reference_rejected_logps"]
         
         # calculate DPO loss
         chosen_rewards = self.config.dpo_chosen_beta * (policy_chosen_logps - reference_chosen_logps)
