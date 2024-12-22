@@ -261,11 +261,7 @@ class BaseTrainer:
                 self.config.override_config_properties()
             
             timer = time.time()
-            
-            lr = self.get_lr()
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-                
+                            
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.train_ctx.iter_num)
             total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.train_ctx.world_size
@@ -313,10 +309,11 @@ class BaseTrainer:
             iter_metrics = self.dist_all_reduce(iter_metrics, op=dist.ReduceOp.SUM)
             
             # adjust learning rate
+            lr = self.get_lr()
             if self.config.adaptive_learning_rate:
                 lr = lr * math.sqrt(iter_metrics[1].item() / total_batch_size)
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
             
             if self.train_ctx.master_process:
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
