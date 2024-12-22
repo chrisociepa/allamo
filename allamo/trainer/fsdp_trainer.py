@@ -13,6 +13,7 @@ from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
 from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
+from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.parallelisms.fsdp_utils import parallelize_model_with_fsdp1
 from allamo.parallelisms.fsdp2_utils import build_world_mesh, parallelize_model_with_fsdp2
 from allamo.train_utils import (
@@ -71,7 +72,7 @@ class FSDPTrainer(BaseTrainer):
             self.model.init_model_weights()
             logger.info("Initialized a new model from scratch")
             
-            self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+            self.optimizer = configure_optimizer(self.model, self.config, self.device_type)            
             logger.info("Initializing optimizer from scratch")
         else:
             if self.config.distributed_checkpoint:
@@ -84,7 +85,7 @@ class FSDPTrainer(BaseTrainer):
                 self.checkpoint_manager.load_distributed_model_checkpoint(self.model)
                 
                 logger.info("model.configure_optimizers")
-                self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+                self.optimizer = configure_optimizer(self.model, self.config, self.device_type)
                 logger.info("checkpoint_manager.load_distributed_optimizer_checkpoint")
                 self.checkpoint_manager.load_distributed_optimizer_checkpoint(self.model, self.optimizer)
                 logger.info("ready")
@@ -95,7 +96,7 @@ class FSDPTrainer(BaseTrainer):
                 
                 self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)
                 
-                self.optimizer = self.model.configure_optimizers(self.config, self.device_type)
+                self.optimizer = configure_optimizer(self.model, self.config, self.device_type)
                 self.load_optimizer_checkpoint(self.model, self.optimizer)
                 
         # initialize a GradScaler only for FSDP's built-in mixed precision with fp16

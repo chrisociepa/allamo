@@ -15,6 +15,7 @@ from allamo.model.model import AllamoTransformer
 from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
+from allamo.optimizer.optimizer_utils import calculate_learning_rate
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
@@ -84,7 +85,8 @@ class BaseTrainer:
         
     def log_init_learning_rate(self):
         if self.config.decay_lr:
-            logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {self.get_lr()}")
+            lr = calculate_learning_rate(self.train_ctx, self.config)
+            logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {lr}")
         else:
             logger.info(f"Using constant learning rate: {self.config.learning_rate}")
     
@@ -129,24 +131,6 @@ class BaseTrainer:
             return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
         else:
             return self.gradient_accumulation_steps
-        
-    def get_lr(self):
-        """ learning rate decay scheduler (cosine with warmup) """
-        if self.train_ctx.iter_num < self.config.warmup_iters:
-            return self.config.learning_rate * self.train_ctx.iter_num / self.config.warmup_iters
-            
-        if self.config.decay_lr:   
-            if self.train_ctx.iter_num >= self.config.lr_decay_iters:
-                return self.config.min_lr
-            if self.config.lr_decay_reset_iters is not None:
-                decay_ratio = (self.train_ctx.iter_num % self.config.lr_decay_reset_iters) / self.config.lr_decay_reset_iters
-            else:
-                decay_ratio = (self.train_ctx.iter_num - self.config.warmup_iters) / (self.config.lr_decay_iters - self.config.warmup_iters)
-            assert 0 <= decay_ratio <= 1
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-            return self.config.min_lr + coeff * (self.config.learning_rate - self.config.min_lr)
-        else:
-            return self.config.learning_rate
         
     def run_checkpoint_hook_program(self, hook_program, current_epoch, ckpt_file_name): 
         env_variables = {
@@ -309,7 +293,7 @@ class BaseTrainer:
             iter_metrics = self.dist_all_reduce(iter_metrics, op=dist.ReduceOp.SUM)
             
             # adjust learning rate
-            lr = self.get_lr()
+            lr = calculate_learning_rate(self.train_ctx, self.config)
             if self.config.adaptive_learning_rate:
                 lr = lr * math.sqrt(iter_metrics[1].item() / total_batch_size)
             for param_group in self.optimizer.param_groups:

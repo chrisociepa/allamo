@@ -10,6 +10,7 @@ from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
 from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
+from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.torch_utils import TORCH_DTYPE_MAP
 from allamo.train_utils import (
     get_model_checkpoint_path,
@@ -67,7 +68,7 @@ class SimpleTrainer(BaseTrainer):
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
         
         # optimizer
-        self.optimizer = self.raw_model.configure_optimizers(self.config, self.device_type)
+        self.optimizer = configure_optimizer(self.raw_model, self.config, self.device_type)
         if self.checkpoint_manager.is_checkpoint_available():
             self.load_optimizer_checkpoint(self.optimizer)
         
