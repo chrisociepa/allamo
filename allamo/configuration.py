@@ -108,6 +108,13 @@ class AllamoConfiguration:
     freeze_layers: bool = False
     keep_layers_trainable: List[int] = field(default_factory=list)
 
+    # HTSR
+    htsr_analysis: bool = False
+    htsr_analysis_interval: int = 1000
+    htsr_analysis_warmup_iters: int = 0
+    htsr_smin: float = 0.5
+    htsr_smax: float = 1.5
+
     # DPO params
     dpo_chosen_beta: float = 0.5
     dpo_rejected_beta: float = 0.1
@@ -220,6 +227,12 @@ class AllamoConfiguration:
         parser.add_argument('--freeze_lm_head', type=bool, help='Freeze lm_head')
         parser.add_argument('--freeze_layers', type=bool, help='Freeze all layers')
         parser.add_argument('--keep_layers_trainable', type=int, nargs='*', default=[], help='List of layer indices to keep trainable (e.g., --keep_layers_trainable 0 31)')
+
+        parser.add_argument('--htsr_analysis', type=bool, help='Enable HTSR analysis and scale learning rate')
+        parser.add_argument('--htsr_analysis_interval', type=int, help='Number of iterations between HTSR analysis')
+        parser.add_argument('--htsr_analysis_warmup_iters', type=int, help='Number of warmup iterations before HTSR analysis begins')
+        parser.add_argument('--htsr_smin', type=float, help='Temperature parameter for scaling the minimum learning rate factor, typically something in the range of 0.3 to 0.7')
+        parser.add_argument('--htsr_smax', type=float, help='Temperature parameter for scaling the maximum learning rate factor, typically something in the range of 1.4 to 1.7')
 
         parser.add_argument('--dpo_chosen_beta', type=float, help='Temperature parameter for the chosen part of the DPO loss, typically something in the range of 0.1 to 0.5')
         parser.add_argument('--dpo_rejected_beta', type=float, help='Temperature parameter for the rejected part of the DPO loss, typically something in the range of 0.1 to 0.5')

@@ -9,13 +9,14 @@ from torch.distributed.fsdp import (
     FullStateDictConfig, # general model non-sharded, non-flattened params
 )
 
-from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
-from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
+from allamo.model.htsr_analyzer import HTSRAnalyzer
+from allamo.model.model import AllamoTransformer
 from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.parallelisms.fsdp_utils import parallelize_model_with_fsdp1
 from allamo.parallelisms.fsdp2_utils import build_world_mesh, parallelize_model_with_fsdp2
+from allamo.trainer.base import BaseTrainer
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -101,6 +102,9 @@ class FSDPTrainer(BaseTrainer):
                 
         # initialize a GradScaler only for FSDP's built-in mixed precision with fp16
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16'))
+
+        # FIXME: HTSR analysis doesn't work in FSDP because WeightWatcher doesn't support wrapped models.
+        self.htsr_analyzer = HTSRAnalyzer(self.config, None, None)
         
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()

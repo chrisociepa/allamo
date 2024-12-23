@@ -6,12 +6,13 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from allamo.trainer.base import BaseTrainer
-from allamo.logging import logger
-from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
+from allamo.logging import logger
+from allamo.model.htsr_analyzer import HTSRAnalyzer
+from allamo.model.model import AllamoTransformer
 from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.torch_utils import TORCH_DTYPE_MAP
+from allamo.trainer.base import BaseTrainer
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -63,14 +64,16 @@ class SimpleTrainer(BaseTrainer):
         # wrap model into DDP container
         if self.distributed():
             self.model = DDP(self.model, device_ids=[self.train_ctx.local_rank])
-            
-        # initialize a GradScaler. If enabled=False scaler is a no-op
-        self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
         
         # optimizer
         self.optimizer = configure_optimizer(self.raw_model, self.config, self.device_type)
         if self.checkpoint_manager.is_checkpoint_available():
             self.load_optimizer_checkpoint(self.optimizer)
+        
+        # initialize a GradScaler. If enabled=False scaler is a no-op
+        self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
+
+        self.htsr_analyzer = HTSRAnalyzer(self.config, self.raw_model, self.optimizer)
         
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()

@@ -105,6 +105,15 @@ class BaseTrainer:
     def should_save_last_checkpoint(self):
         return self.config.checkpoint_interval > 0 and self.train_ctx.iter_num > self.start_iter and self.train_ctx.iter_num % self.config.checkpoint_interval == 0
     
+    def should_run_htsr_analysis(self):
+        return (
+            self.config.htsr_analysis
+            and self.config.htsr_analysis_interval > 0
+            and self.train_ctx.iter_num > self.start_iter
+            and self.train_ctx.iter_num > self.config.htsr_analysis_warmup_iters
+            and self.train_ctx.iter_num % self.config.htsr_analysis_interval == 0
+        )
+    
     def should_log_metrics(self):
         return self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0 and self.train_ctx.master_process
     
@@ -254,13 +263,16 @@ class BaseTrainer:
             # evaluate the loss on train/val sets and write best checkpoint
             if self.should_evaluate():
                 self.evaluate()
-                
+            
             if self.should_save_last_checkpoint():
                 ckpt_file_name = 'last_eval_ckpt'
                 self.save_checkpoint(ckpt_file_name)
                 if self.config.regular_checkpoint_hook_program and self.train_ctx.master_process:
                     pid = self.run_checkpoint_hook_program(self.config.regular_checkpoint_hook_program, current_epoch, ckpt_file_name)
                     logger.info(f"Regular checkpoint hook program started with pid {pid}")
+
+            if self.should_run_htsr_analysis():
+                self.htsr_analyzer.analyze()
             
             accuracy = 0
             iter_metrics.zero_()
@@ -298,6 +310,8 @@ class BaseTrainer:
                 lr = lr * math.sqrt(iter_metrics[1].item() / total_batch_size)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
+            if self.config.htsr_analysis:
+                self.htsr_analyzer.adjust_learning_rate()
             
             if self.train_ctx.master_process:
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
