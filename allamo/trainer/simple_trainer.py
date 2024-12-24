@@ -39,6 +39,13 @@ class SimpleTrainer(BaseTrainer):
         
     def init_training(self):
         super().init_training()
+
+        if self.config.compile and self.distributed():
+            # Workaround for https://github.com/pytorch/pytorch/issues/104674
+            torch._dynamo.config.optimize_ddp = False
+            logger.warning("Activation checkpointing enabled with higher-order operators. "
+               "Disabling DDP optimizer via 'torch._dynamo.config.optimize_ddp = False' to ensure compatibility. "
+               "Note: This may degrade performance due to a single bucket for the entire Dynamo graph.")
         
         model = AllamoTransformer(self.model_config, self.config.gradient_checkpointing)
         self.model_num_params = model.model_num_params
