@@ -24,14 +24,13 @@ class AllamoTransformerConfig:
     n_embd: int = 768
     intermediate_size: int = None
     dropout: float = 0.0
-    bias: bool = True # True: bias in Linears. False: a bit better and faster
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    bias: bool = True
+    multiple_of: int = 256
     norm_eps: float = 1e-5
     sliding_window: int = None
-    gradient_checkpointing: bool = False
 
 class RMSNorm(torch.nn.Module):
-    """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
@@ -103,16 +102,15 @@ class FeedForward(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
         super().__init__()
-        if config.intermediate_size is None:
+        if config.intermediate_size is None or config.intermediate_size < 1:
             config.intermediate_size = int(2 * (4 * config.n_embd) / 3)
             config.intermediate_size = config.multiple_of * ((config.intermediate_size + config.multiple_of - 1) // config.multiple_of)
         
         self.gate_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
         self.down_proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
         self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.act_fn  = nn.SiLU() # SwiGLU activation function
+        self.act_fn  = nn.SiLU()
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
-        self.gradient_checkpointing = config.gradient_checkpointing
         
     def init_weights(self, init_std: float):
         torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
@@ -120,16 +118,10 @@ class FeedForward(nn.Module):
             torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
 
     def forward(self, x):
-        if self.training and self.gradient_checkpointing:
-            x = checkpoint(self.mlp, x, use_reentrant=False, preserve_rng_state=False)
-        else:
-            x = self.mlp(x)
+        x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         if self.dropout is not None:
             x = self.dropout(x)
         return x
-        
-    def mlp(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 class Attention(nn.Module):
 
@@ -141,7 +133,6 @@ class Attention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
         self.sliding_window = config.sliding_window if attention_version.flash_attn_2_supports_window_size else None
-        self.gradient_checkpointing = config.gradient_checkpointing
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
@@ -183,11 +174,7 @@ class Attention(nn.Module):
         # nh | number of heads
         B, T, C = q_x.size()
         
-        if self.training and self.gradient_checkpointing:
-            q, k, v = checkpoint(self.project_qkv, q_x, kv_x, use_reentrant=False, preserve_rng_state=False)
-        else:
-            q, k, v = self.project_qkv(q_x, kv_x)
-        
+        q, k, v = self.project_qkv(q_x, kv_x)
         q = q.view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
@@ -236,10 +223,7 @@ class Attention(nn.Module):
 
         # output projection
         y = y.contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
-        if self.training and self.gradient_checkpointing:
-            y = checkpoint(self.c_proj, y, use_reentrant=False, preserve_rng_state=False)
-        else:
-            y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
+        y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
         return y
@@ -288,11 +272,12 @@ class SelfAttentionBlock(nn.Module):
 
 class AllamoTransformer(nn.Module):
 
-    def __init__(self, config: AllamoTransformerConfig):
+    def __init__(self, config: AllamoTransformerConfig, gradient_checkpointing: bool = False):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.gradient_checkpointing = gradient_checkpointing
         if config.head_size is None:
             assert config.n_embd % config.n_head == 0
             config.head_size = config.n_embd // config.n_head
@@ -300,6 +285,8 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         logger.info(f"AllamoTransformerConfig: {config}")
+        if self.gradient_checkpointing:
+            logger.info(f"Gradient checkpointing enabled")
         
         self.init_attention()
         attention_version.log_version(self.config.sliding_window)
@@ -400,7 +387,10 @@ class AllamoTransformer(nn.Module):
         input_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(layer, x, self.rotary_emb, attn_mask, input_pos, use_reentrant=False, preserve_rng_state=False)
+            else:
+                x = layer(x, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
         return x
 
     def forward(self,

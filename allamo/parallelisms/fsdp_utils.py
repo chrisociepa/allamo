@@ -40,7 +40,7 @@ def enable_activation_checkpointing(model):
     apply_activation_checkpointing(model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn)
     logger.info(f"Activation checkpointing applied to the model")
 
-def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activation_checkpointing: bool = False):
+def parallelize_model_with_fsdp1(model, config: AllamoConfiguration):
     logger.info("Configuring model with FSDP1")
     ptdtype = TORCH_DTYPE_MAP[config.dtype]
     auto_wrap_policy = functools.partial(
@@ -67,7 +67,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
     model = FSDP(model, **fsdp_config)
     logger.info(f"Model configured with FSDP1 and {sharding_strategy=}")
     
-    if with_activation_checkpointing:
+    if config.gradient_checkpointing:
         enable_activation_checkpointing(model)
         
     logger.info(f"Model after parallelization {model=}\n")

@@ -40,7 +40,7 @@ class SimpleTrainer(BaseTrainer):
     def init_training(self):
         super().init_training()
         
-        model = AllamoTransformer(self.model_config)
+        model = AllamoTransformer(self.model_config, self.config.gradient_checkpointing)
         self.model_num_params = model.model_num_params
 
         self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration

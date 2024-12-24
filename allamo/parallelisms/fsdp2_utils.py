@@ -34,11 +34,11 @@ def build_world_mesh(train_ctx: TrainingContext, device_type: str = "cuda"):
     logger.info(f"{len(dims)}-D device mesh built: {dim_names} = {dims}")
     return device_mesh
 
-def parallelize_model_with_fsdp2(model, world_mesh, config, with_activation_checkpointing):
+def parallelize_model_with_fsdp2(model: nn.Module, world_mesh: DeviceMesh, config: AllamoConfiguration):
     if world_mesh['tp'].size() > 1:
         apply_tensor_parallelism(model, world_mesh)
     
-    if with_activation_checkpointing:
+    if config.gradient_checkpointing:
         apply_activation_checkpointing(model)
     
     apply_fsdp(model, world_mesh, config)
