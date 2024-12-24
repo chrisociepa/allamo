@@ -106,9 +106,6 @@ class SimpleTrainer(BaseTrainer):
                 shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
                 shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
         logger.info(f"checkpoint files saved in {self.config.out_dir}")
-
-    def should_evaluate(self):
-        return super().should_evaluate() and self.train_ctx.master_process
     
     def forward(self, batch, last_micro_step):
         if self.distributed():
