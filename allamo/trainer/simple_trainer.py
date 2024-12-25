@@ -80,7 +80,7 @@ class SimpleTrainer(BaseTrainer):
         # initialize a GradScaler. If enabled=False scaler is a no-op
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16' or self.config.dtype == 'bfloat16'))
 
-        self.htsr_analyzer = HTSRAnalyzer(self.config, self.raw_model, self.optimizer)
+        self.htsr_analyzer = HTSRAnalyzer(self.config, self.train_ctx, self.raw_model, self.optimizer)
         
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()

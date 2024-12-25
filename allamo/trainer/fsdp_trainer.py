@@ -94,7 +94,7 @@ class FSDPTrainer(BaseTrainer):
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16'))
 
         # FIXME: HTSR analysis doesn't work in FSDP because WeightWatcher doesn't support wrapped models.
-        self.htsr_analyzer = HTSRAnalyzer(self.config, None, None)
+        self.htsr_analyzer = HTSRAnalyzer(self.config, self.train_ctx, None, None)
         
         self.init_gradient_accumulation_scheduler()
         self.log_init_learning_rate()
