@@ -109,9 +109,8 @@ class BaseTrainer:
         return (
             self.config.htsr_analysis
             and self.config.htsr_analysis_interval > 0
-            and self.train_ctx.iter_num > self.start_iter
             and self.train_ctx.iter_num > self.config.htsr_analysis_warmup_iters
-            and self.train_ctx.iter_num % self.config.htsr_analysis_interval == 0
+            and (self.train_ctx.iter_num == self.start_iter or self.train_ctx.iter_num % self.config.htsr_analysis_interval == 0)
         )
     
     def should_log_metrics(self):
