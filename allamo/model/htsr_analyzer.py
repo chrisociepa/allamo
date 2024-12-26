@@ -48,14 +48,10 @@ class HTSRAnalyzer:
                     stable_groups += 1
             
             if self.train_ctx.master_process:
-                total_alpha_sum = sum(alpha for alpha in self.report.values())
-                total_alpha_avg = total_alpha_sum / len(self.report)
-                overfit_alpha_sum = sum(alpha for alpha in self.report.values() if alpha < 2.0)
-                overfit_alpha_avg = overfit_alpha_sum / len(self.report)
-                underfit_alpha_sum = sum(alpha for alpha in self.report.values() if alpha > 6.0)
-                underfit_alpha_avg = underfit_alpha_sum / len(self.report)
-                stable_alpha_sum = sum(alpha for alpha in self.report.values() if alpha >= 2.0 and alpha <= 6.0)
-                stable_alpha_avg = stable_alpha_sum / len(self.report)
+                total_alpha_avg = sum(alpha for alpha in self.report.values()) / len(self.report)
+                overfit_alpha_avg = sum(alpha for alpha in self.report.values() if alpha < 2.0) / overfit_groups
+                underfit_alpha_avg = sum(alpha for alpha in self.report.values() if alpha > 6.0) / underfit_groups
+                stable_alpha_avg = sum(alpha for alpha in self.report.values() if alpha >= 2.0 and alpha <= 6.0) / stable_groups
                 logger.info("Groups: overfit=%d, underfit=%d, stable=%d. Alphas: total=%.2f, overfit=%.2f, underfit=%.2f, stable=%.2f. Log_spectral_norm=%.2f, log_alpha_norm=%.2f, stable_rank=%.2f",
                             overfit_groups, underfit_groups, stable_groups, total_alpha_avg, overfit_alpha_avg, underfit_alpha_avg, stable_alpha_avg, log_spectral_norm_avg, log_alpha_norm_avg, stable_rank_avg)
                 
