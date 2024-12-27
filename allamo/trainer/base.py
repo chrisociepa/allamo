@@ -33,6 +33,7 @@ class BaseTrainer:
             tp = config.tensor_parallel_degree,
         )
         if self.train_ctx.master_process:
+            os.makedirs(config.out_dir, exist_ok=True)
             configure_logger(config, True)
         
         self.config = config

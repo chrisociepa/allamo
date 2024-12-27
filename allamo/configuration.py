@@ -112,6 +112,7 @@ class AllamoConfiguration:
     htsr_analysis: bool = False
     htsr_analysis_interval: int = 1000
     htsr_analysis_warmup_iters: int = 0
+    htsr_save_results: bool = False
     htsr_smin: float = 0.5
     htsr_smax: float = 1.5
 
@@ -231,6 +232,7 @@ class AllamoConfiguration:
         parser.add_argument('--htsr_analysis', type=bool, help='Enable HTSR analysis and scale learning rate')
         parser.add_argument('--htsr_analysis_interval', type=int, help='Number of iterations between HTSR analysis')
         parser.add_argument('--htsr_analysis_warmup_iters', type=int, help='Number of warmup iterations before HTSR analysis begins')
+        parser.add_argument('--htsr_save_results', type=bool, help='Enables saving the results of the HTSR analysis')
         parser.add_argument('--htsr_smin', type=float, help='Temperature parameter for scaling the minimum learning rate factor, typically something in the range of 0.3 to 0.7')
         parser.add_argument('--htsr_smax', type=float, help='Temperature parameter for scaling the maximum learning rate factor, typically something in the range of 1.4 to 1.7')
 
