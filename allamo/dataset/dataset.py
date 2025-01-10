@@ -243,13 +243,17 @@ class AllamoDataset:
     
     def prepare_alm_sample(self, sample):
         """
-        Assumes input sample contains at least 'input_ids' and 'target_ids' fields. 
+        Assumes input sample for the SFT training contains at least 'input_ids' and 'target_ids' fields. 
         When the weighted loss is active, 'target_weights' field is required.
         When samples are packed, it is assumed that a list of sequence lengths will be available
         in the "seq_lens" field. This information will be used to create the attention mask.
         If pad_token_id is set in the configuration, it is assumed that the sample list
         did not have padding and samples are of length up to block_size.
         """
+        if isinstance(sample, np.ndarray):
+            assert len(sample) == self.sample_size, "Invalid sample size"
+            return torch.from_numpy(sample)
+
         if self.training_type == 'dpo':
             return self.prepare_alm_dpo_sample(sample)
         
