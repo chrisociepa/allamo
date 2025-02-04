@@ -19,6 +19,8 @@ class AllamoDataset:
         self.sample_size = config.block_size + 1 
         self.ignore_index = config.ignore_index
         self.pad_token_id = config.pad_token_id
+        self.eos_token_id = config.eos_token_id
+        self.dynamic_attention_mask = config.dynamic_attention_mask and config.eos_token_id > -1
         self.weighted_loss = config.weighted_loss
         self.training_type = config.training_type
         self.data = None
@@ -27,6 +29,9 @@ class AllamoDataset:
         self.processed_files = []
         if config.dataset_train_processed_files_count > 0:
             self.processed_files = self.dataset_files[:config.dataset_train_processed_files_count]
+        
+        if self.dynamic_attention_mask:
+            logger.info(f"Dynamic attention masks are enabled with eos_token_id={self.eos_token_id}")
         
     def get_dataset_files(self, config, train_split):
         dataset_files = []
@@ -241,6 +246,43 @@ class AllamoDataset:
         
         return result
     
+    def get_sequence_lengths(self, sample):
+        eos_positions = torch.where(sample == self.eos_token_id)[0].tolist()    
+        if len(eos_positions) == 0:
+            return [sample.numel()]
+        
+        seq_lens = []
+        start = 0
+        for end in eos_positions:
+            seq_lens.append(end - start + 1)
+            start = end + 1
+        
+        if start < sample.numel():
+            seq_lens.append(sample.numel() - start)
+        
+        return seq_lens
+    
+    def generate_attention_mask(self, seq_lens, input_ids_length):
+        total_seq_len = 0
+        block_attn_masks = []
+        sample_input_pos = []
+        for seq_len in seq_lens:
+            sample_input_pos.extend(list(range(seq_len)))
+            total_seq_len += seq_len
+            
+            # append lower triangular matrix for causal mask
+            block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
+            
+        if total_seq_len < input_ids_length:
+            new_pos = sample_input_pos[-1] + 1
+            num_pad = input_ids_length - total_seq_len
+            sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
+            block_attn_masks.append(torch.eye(num_pad, num_pad, dtype=torch.bool))
+        
+        input_pos = torch.tensor(sample_input_pos)
+        attn_mask = torch.block_diag(*block_attn_masks)
+        return input_pos, attn_mask
+    
     def prepare_alm_sample(self, sample):
         """
         Assumes input sample for the SFT training contains at least 'input_ids' and 'target_ids' fields. 
@@ -249,18 +291,28 @@ class AllamoDataset:
         in the "seq_lens" field. This information will be used to create the attention mask.
         If pad_token_id is set in the configuration, it is assumed that the sample list
         did not have padding and samples are of length up to block_size.
-        """
+        """       
         if isinstance(sample, np.ndarray):
             assert len(sample) == self.sample_size, "Invalid sample size"
-            return torch.from_numpy(sample)
+            if self.dynamic_attention_mask:
+                result = {
+                    'input_ids': torch.from_numpy(sample[:-1]),
+                    'target_ids': torch.from_numpy(sample[1:])
+                }
+                seq_lens = self.get_sequence_lengths(result['input_ids'])
+                result['input_pos'], result['attn_mask'] = self.generate_attention_mask(seq_lens, len(result['input_ids']))
+                return result
+            else:
+                return torch.from_numpy(sample)
 
         if self.training_type == 'dpo':
             return self.prepare_alm_dpo_sample(sample)
-        
+
         result = {
             'input_ids': torch.from_numpy(sample['input_ids']),
             'target_ids': torch.from_numpy(sample['target_ids'])
         }
+
         if self.weighted_loss:
             if 'target_weights' in sample:
                 result['target_weights'] = torch.from_numpy(sample['target_weights'])
@@ -276,23 +328,7 @@ class AllamoDataset:
                 result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
-            total_seq_len = 0
-            block_attn_masks = []
-            sample_input_pos = []
-            for seq_len in sample["seq_lens"]:
-                sample_input_pos.extend(list(range(seq_len)))
-                total_seq_len += seq_len
-                
-                # append lower triangular matrix for causal mask
-                block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
-                
-            if total_seq_len < len(result['input_ids']):
-                new_pos = sample_input_pos[-1] + 1
-                num_pad = len(result['input_ids']) - total_seq_len
-                sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
-                block_attn_masks.append(torch.eye(num_pad, num_pad, dtype=torch.bool))
-            result['input_pos'] = torch.tensor(sample_input_pos)
-            result['attn_mask'] = torch.block_diag(*block_attn_masks)
+            result['input_pos'], result['attn_mask'] = self.generate_attention_mask(sample["seq_lens"], len(result['input_ids']))
         return result
     
     def __len__(self):

@@ -92,6 +92,8 @@ class AllamoConfiguration:
     mfu_flops_peak: float = -1.0
     ignore_index: int = -100
     pad_token_id: int = -1
+    eos_token_id: int = -1
+    dynamic_attention_mask: bool = False
     weighted_loss: bool = False
     weighted_loss_method: str = 'allamo'
     adaptive_learning_rate: bool = False
@@ -205,7 +207,9 @@ class AllamoConfiguration:
         parser.add_argument('--compile_mode', type=str, choices=['default', 'reduce-overhead', 'max-autotune'], help='Specifies what the PyTorch compiler should be optimizing while compiling')
         parser.add_argument('--mfu_flops_peak', type=float, help="Specifies the MFU's peak performance in FLOPs. A default value of -1 disables MFU estimation")
         parser.add_argument('--ignore_index', type=int, help="Specifies a target value that is ignored and does not contribute to the input gradient")
-        parser.add_argument('--pad_token_id', type=float, help="Enables padding and specifies the token id used for padding in sequences")
+        parser.add_argument('--pad_token_id', type=int, help="Enables padding and specifies the token id used for padding in sequences")
+        parser.add_argument('--eos_token_id', type=int, help="Specifies the token id used for generating attention masks")
+        parser.add_argument('--dynamic_attention_mask', action='store_true', help='Whether to generate attention mask based on provided eos token id')
         parser.add_argument('--weighted_loss', action='store_true', help='Whether to use weighted loss if available')
         parser.add_argument('--weighted_loss_method', type=str, choices=['allamo', 'openchat'], help='How weighted loss is calculated')
         parser.add_argument('--adaptive_learning_rate', action='store_true', help='Whether to use adaptive learning rate')
