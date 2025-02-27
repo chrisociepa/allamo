@@ -30,15 +30,15 @@ class FSDPTrainer(BaseTrainer):
     def distributed(self):
         return True
                     
-    def init_torch(self, config: AllamoConfiguration):
+    def init_torch(self):
         super().init_torch()
-        if config.dtype == 'bfloat16-true':
+        if self.config.dtype == 'bfloat16-true':
             raise Exception('Full bfloat16 training is not supported with FSDP')
         
         self.fullstate_save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if config.gradient_checkpointing:
+        if self.config.gradient_checkpointing:
             self.fsdp_activation_checkpointing = True
-            config.gradient_checkpointing = False # control gradient checkpointing with FSDP 
+            self.config.gradient_checkpointing = False # control gradient checkpointing with FSDP 
             logger.info(
                 "Deactivated gradient checkpointing at the model configuration level. "
                 "Activated gradient checkpointing at the FSDP level."
