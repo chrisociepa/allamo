@@ -16,6 +16,7 @@ from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
 from allamo.optimizer.optimizer_utils import calculate_learning_rate
+from allamo.parallelisms.fsdp2_utils import build_world_mesh
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
@@ -36,19 +37,37 @@ class BaseTrainer:
             configure_logger(config, True)
         
         self.config = config
-        self.init_torch(config)
+        self.init_torch()
         logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
         
-        self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
+        # DCP activates FSDP2
+        if self.distributed() and self.config.distributed_checkpoint:
+            assert self.config.dtype != 'float16', "GradScaler is not functioning properly with FSDP2"
+            self.world_mesh = build_world_mesh(self.train_ctx, self.device_type)
+        else:
+            self.world_mesh = None
+        
+        self.data_loader = self.init_dataloader()
         
         self.init_training()
 
     def distributed(self):
         raise NotImplementedError("Not implemented")
 
-    def init_torch(self, config: AllamoConfiguration):
-        self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
-        init_torch(self.train_ctx, config, distributed=self.distributed())
+    def init_torch(self):
+        self.device_type = 'cuda' if 'cuda' in self.config.device else 'cpu'
+        init_torch(self.train_ctx, self.config, distributed=self.distributed())
+
+    def init_dataloader(self):
+        if self.world_mesh is None:
+            dp_world_size = self.train_ctx.world_size
+            dp_rank = self.train_ctx.rank
+        else:
+            dp_mesh = self.world_mesh["dp"]
+            dp_world_size = dp_mesh.size()
+            dp_rank = dp_mesh.get_local_rank()
+        
+        return AllamoDataLoader(self.config, dp_rank, dp_world_size)
 
     def init_training(self):
         attention_version.configure(self.config)

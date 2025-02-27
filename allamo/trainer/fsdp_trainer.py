@@ -15,7 +15,7 @@ from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.parallelisms.fsdp_utils import parallelize_model_with_fsdp1
-from allamo.parallelisms.fsdp2_utils import build_world_mesh, parallelize_model_with_fsdp2
+from allamo.parallelisms.fsdp2_utils import parallelize_model_with_fsdp2
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -45,13 +45,6 @@ class FSDPTrainer(BaseTrainer):
             )
         else:
             self.fsdp_activation_checkpointing = False
-        
-        # DCP activates FSDP2
-        if self.config.distributed_checkpoint:
-            assert self.config.dtype != 'float16', "GradScaler is not functioning properly with FSDP2"
-            self.world_mesh = build_world_mesh(self.train_ctx, self.device_type)
-        else:
-            self.world_mesh = None
             
     def init_training(self):
         super().init_training()
