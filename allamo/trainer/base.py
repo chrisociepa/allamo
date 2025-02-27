@@ -182,13 +182,14 @@ class BaseTrainer:
             for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(**batch)
-                if batch["target_weights"] is not None:
-                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                validation_metrics[0] += loss.item()
-                validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                validation_metrics[2] += 1
+                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                    if batch["target_weights"] is not None:
+                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
+                    validation_metrics[0] += loss.item()
+                    validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                    validation_metrics[2] += 1
             validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
-            losses_out[split] = validation_metrics[0] / (self.config.eval_iters * self.train_ctx.world_size)
+            losses_out[split] = validation_metrics[0] / validation_metrics[2]
             accuraces[split] = validation_metrics[1] / validation_metrics[2]
         self.model.train()
         if 'val' not in losses_out:
@@ -290,10 +291,11 @@ class BaseTrainer:
                 loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
-                iter_metrics[0] += loss.item()
-                iter_metrics[1] += unmasked_labels
-                iter_metrics[2] += accuracy
-                iter_metrics[3] += 1
+                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                    iter_metrics[0] += loss.item()
+                    iter_metrics[1] += unmasked_labels
+                    iter_metrics[2] += accuracy
+                    iter_metrics[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.data_loader.get_batch('train')
@@ -305,7 +307,8 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                iter_metrics[4] += self.clip_grad_norm()
+                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                    iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
@@ -332,10 +335,10 @@ class BaseTrainer:
             if self.should_log_metrics():
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
-                lossf = iter_metrics[0].item() / self.train_ctx.world_size
+                lossf = iter_metrics[0].item() / iter_metrics[3].item()
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = iter_metrics[2].item() / iter_metrics[3].item()
-                grad_norm = iter_metrics[4].item() / self.train_ctx.world_size
+                grad_norm = iter_metrics[4].item() / iter_metrics[3].item()
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
