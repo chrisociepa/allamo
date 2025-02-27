@@ -30,7 +30,7 @@ class SimpleTrainer(BaseTrainer):
         return self.train_ctx.world_size > 1
         
     def init_torch(self, config: AllamoConfiguration):
-        super().init_torch(config)
+        super().init_torch()
         self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=TORCH_DTYPE_MAP[config.dtype])
         if config.dtype == 'bfloat16-true':
             # torch.set_float32_matmul_precision("high")

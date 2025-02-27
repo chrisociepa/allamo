@@ -31,7 +31,7 @@ class FSDPTrainer(BaseTrainer):
         return True
                     
     def init_torch(self, config: AllamoConfiguration):
-        super().init_torch(config)
+        super().init_torch()
         if config.dtype == 'bfloat16-true':
             raise Exception('Full bfloat16 training is not supported with FSDP')
         
