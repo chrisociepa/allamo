@@ -310,8 +310,9 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
+                total_norm = self.clip_grad_norm()
                 if self.tp_rank == 0:
-                    iter_metrics[4] += self.clip_grad_norm()
+                    iter_metrics[4] += total_norm
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
