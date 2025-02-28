@@ -169,10 +169,10 @@ class FSDPTrainer(BaseTrainer):
         
         if batch["target_weights"] is not None:
             if self.config.weighted_loss_method == 'openchat':
-                target_weights = batch["target_weights"].sum()
+                target_weights = batch["target_weights"].sum() if self.tp_rank == 0 else torch.tensor(0.0, device=batch["target_weights"].device)
                 # sum loss weights over all processes
                 target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
-                loss = (self.train_ctx.world_size / target_weights) * loss
+                loss = (self.dp_world_size / target_weights) * loss
             else:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()
         

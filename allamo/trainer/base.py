@@ -60,14 +60,17 @@ class BaseTrainer:
 
     def init_dataloader(self):
         if self.world_mesh is None:
-            dp_world_size = self.train_ctx.world_size
-            dp_rank = self.train_ctx.rank
+            self.dp_world_size = self.train_ctx.world_size
+            self.dp_rank = self.train_ctx.rank
+            self.tp_rank = 0
         else:
             dp_mesh = self.world_mesh["dp"]
-            dp_world_size = dp_mesh.size()
-            dp_rank = dp_mesh.get_local_rank()
+            tp_mesh = self.world_mesh["tp"]
+            self.dp_world_size = dp_mesh.size()
+            self.dp_rank = dp_mesh.get_local_rank()
+            self.tp_rank = tp_mesh.get_local_rank()
         
-        return AllamoDataLoader(self.config, dp_rank, dp_world_size)
+        return AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
 
     def init_training(self):
         attention_version.configure(self.config)
@@ -182,7 +185,7 @@ class BaseTrainer:
             for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(**batch)
-                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                if self.tp_rank == 0:
                     if batch["target_weights"] is not None:
                         loss = loss / torch.sum(batch["target_weights"] > 0).item()
                     validation_metrics[0] += loss.item()
@@ -268,7 +271,7 @@ class BaseTrainer:
                             
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.train_ctx.iter_num)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.train_ctx.world_size
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.dp_world_size
             self.gradient_accumulation_steps = self.get_grad_accum()
 
             # evaluate the loss on train/val sets and write best checkpoint
@@ -291,7 +294,7 @@ class BaseTrainer:
                 loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
-                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                if self.tp_rank == 0:
                     iter_metrics[0] += loss.item()
                     iter_metrics[1] += unmasked_labels
                     iter_metrics[2] += accuracy
@@ -307,7 +310,7 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                if self.world_mesh is None or self.world_mesh['tp'].get_local_rank() == 0:
+                if self.tp_rank == 0:
                     iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
@@ -335,10 +338,10 @@ class BaseTrainer:
             if self.should_log_metrics():
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
-                lossf = iter_metrics[0].item() / iter_metrics[3].item()
+                lossf = iter_metrics[0].item() / self.dp_world_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = iter_metrics[2].item() / iter_metrics[3].item()
-                grad_norm = iter_metrics[4].item() / iter_metrics[3].item()
+                grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
@@ -363,7 +366,7 @@ class BaseTrainer:
                         "train/lr": lr,
                         "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
-                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.dp_world_size/iter_time),
                         "train/tokens": self.train_ctx.processed_tokens,
                         "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
