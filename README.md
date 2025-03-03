@@ -35,7 +35,7 @@ Dependencies:
 
 Before you start training a new model, you need to create training and testing datasets. By default, training scripts expect two files: `train.bin` and `val.bin`. You can create both files using `prepare_datasets.py` or by implementing a simple script like the one below:
 
-```
+```python
 import numpy as np
 import tiktoken
 
@@ -63,7 +63,7 @@ The training script can be run on both a single node with one or more GPUs, as w
 
 To run on a single node with 1 GPU, example:
 
-```
+```bash
 $ python train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
@@ -71,7 +71,7 @@ $ python train.py \
 
 To run on a single node with 8 GPUs with DDP, example:
 
-```
+```bash
 $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
@@ -80,7 +80,7 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
 To run on 2+ nodes (with 8 GPUs each) with DDP, example:
 - Run on the first (master) node with example IP 123.456.123.456:
 
-```
+```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
@@ -88,7 +88,7 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123
 
 - Run on the worker node(s):
 
-```
+```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
@@ -97,7 +97,7 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123
 To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
 - Run the same command on all nodes (master node IP: 123.456.123.456):
 
-```
+```bash
 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
     --config="./config/train_1B.json" \
     --wandb_log=True
@@ -109,6 +109,40 @@ Note: in case your cluster does not have Infiniband interconnect prepend `NCCL_I
 
 During training, it is possible to calculate indicators such as Model Flops Utilization ([MFU](https://arxiv.org/abs/2204.02311)) and Model Time Utilization (MTU). To calculate MFU, you must specify the maximum declared number of FLOPs for the used GPU in the parameter `mfu_flops_peak`. For example, for the A100 40GB GPU with bfloat16/float16 precision, this value is `312e12`, or `165.2e12` for the RTX 4090. 
 The MTU indicator describes the percentage of time during an iteration that the model spends on actual training versus the time spent on other tasks such as data loading, hyperparameter updates, etc. The closer to 100%, the more efficiently the training is in terms of resource utilization.
+
+### Tensor/Sequence Parallelism
+
+To enable training with Tensor Parallelism (TP) or Sequence Parallelism (SP), you need to use FSDP2 with [Distributed Checkpoint (DCP)](https://pytorch.org/docs/stable/distributed.checkpoint.html). If you have a standard checkpoint, you must first convert it to a Distributed Checkpoint (DCP). This can be done by modifying the state_dict key prefixes and then performing the actual conversion, as shown below:
+
+```bash
+python scripts/update_state_dict_prefixes.py \
+    -s ../out_dir/model_ckpt.pt \
+    -d ../out_dir/model_ckpt_fixedprefixes.pt \
+    -a "model."
+
+mkdir -p ../out_dir/dcp/model_last_eval_ckpt/
+python -m torch.distributed.checkpoint.format_utils torch_to_dcp ../out_dir/model_ckpt_fixedprefixes.pt ../out_dir/dcp/model_last_eval_ckpt/
+```
+
+Once the checkpoint is converted, you can start training with the desired TP degree, for example:
+
+```bash
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+    --config="./config/train_1B.json" \
+    --distributed_checkpoint \
+    --tensor_parallel_degree=2
+```
+
+If you need to convert a distributed checkpoint back to a standard format (e.g., for exporting to HuggingFace format), you can do so by reversing the conversion and updating the state_dict key prefixes:
+
+```bash
+python -m torch.distributed.checkpoint.format_utils dcp_to_torch ../out_dir/dcp/model_last_eval_ckpt/ ../out_dir/model_ckpt_fromdcp.pt
+
+python scripts/update_state_dict_prefixes.py \
+    -s ../out_dir/model_ckpt_fromdcp.pt \
+    -d ../out_dir/model_ckpt_converted.pt \
+    -r "model"
+```
 
 ## Finetuning
 
@@ -131,7 +165,7 @@ Below are some empirically derived example values for extending the context wind
 
 Go to `scripts/` and use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
 
-```
+```bash
 python import_llama_weights.py \
     --input_data_dir="../llama/7B/" \
     --input_tokenizer_path="../llama/tokenizer.model" \
@@ -148,7 +182,7 @@ Notes:
 
 When you have trained your model, you may want to run it in the Hugging Face ecosystem. Using the `export_to_hf.py` script, you can easily convert your model to an HF-compatible LLaMA format. Here's an example of how to run it:
 
-```
+```bash
 $ python export_to_hf.py \
     --input_dir="../data/my-llama/" \
     --output_dir="../data/my-llama-hf/"
@@ -158,7 +192,7 @@ $ python export_to_hf.py \
 
 Use the script `sample.py` to sample from a model you trained. For example:
 
-```
+```bash
 $ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
@@ -170,7 +204,7 @@ $ python inference/sample.py \
 
 You can also prompt the model with some text from a file prefixing its path with `FILE:`, example:
 
-```
+```bash
 $ python inference/sample.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=100 \
@@ -186,7 +220,7 @@ Use the script `sample_api.py` to expose 3 API endpoints. Then you will be able 
 
 To run the API with a pretrained model, example:
 
-```
+```bash
 $ python inference/sample_api.py \
     --config="./config/train_1B.json" \
     --max_new_tokens=10 \
@@ -197,25 +231,25 @@ $ python inference/sample_api.py \
 
 - Query for text embeddings, example:
 
-```
+```bash
 $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddings -d '{"prompt": "Long long time ago"}'
 ```
 
 - Query for text completions, example:
 
-```
+```bash
 $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"prompt": "Long long time ago", "num_samples": 3}'
 ```
 
 - Query for tokens to see how your prompt is tokenized, example:
 
-```
+```bash
 $ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens -d '{"prompt": "Long long time ago"}'
 ```
 
 To run the UI at top of the API, example:
 
-```
+```bash
 $ python inference/sample_ui.py
 ```
 
@@ -225,7 +259,7 @@ $ python inference/sample_ui.py
 
 You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
 
-```
+```bash
 $ python inference/sample_api.py \
     --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
     --llama_tokenizer_path="../data/llama-7b/" \
