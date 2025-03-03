@@ -16,6 +16,7 @@ from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
 from allamo.optimizer.optimizer_utils import calculate_learning_rate
+from allamo.parallelisms.fsdp2_utils import build_world_mesh
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
     format_seconds_as_time,
@@ -36,19 +37,40 @@ class BaseTrainer:
             configure_logger(config, True)
         
         self.config = config
-        self.init_torch(config)
+        self.init_torch()
         logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
         
-        self.data_loader = AllamoDataLoader(config, self.train_ctx.rank, self.train_ctx.world_size)
+        # DCP activates FSDP2
+        if self.distributed() and self.config.distributed_checkpoint:
+            assert self.config.dtype != 'float16', "GradScaler is not functioning properly with FSDP2"
+            self.world_mesh = build_world_mesh(self.train_ctx, self.device_type)
+        else:
+            self.world_mesh = None
+        
+        self.data_loader = self.init_dataloader()
         
         self.init_training()
 
     def distributed(self):
         raise NotImplementedError("Not implemented")
 
-    def init_torch(self, config: AllamoConfiguration):
-        self.device_type = 'cuda' if 'cuda' in config.device else 'cpu'
-        init_torch(self.train_ctx, config, distributed=self.distributed())
+    def init_torch(self):
+        self.device_type = 'cuda' if 'cuda' in self.config.device else 'cpu'
+        init_torch(self.train_ctx, self.config, distributed=self.distributed())
+
+    def init_dataloader(self):
+        if self.world_mesh is None:
+            self.dp_world_size = self.train_ctx.world_size
+            self.dp_rank = self.train_ctx.rank
+            self.tp_rank = 0
+        else:
+            dp_mesh = self.world_mesh["dp"]
+            tp_mesh = self.world_mesh["tp"]
+            self.dp_world_size = dp_mesh.size()
+            self.dp_rank = dp_mesh.get_local_rank()
+            self.tp_rank = tp_mesh.get_local_rank()
+        
+        return AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
 
     def init_training(self):
         attention_version.configure(self.config)
@@ -163,13 +185,14 @@ class BaseTrainer:
             for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(**batch)
-                if batch["target_weights"] is not None:
-                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                validation_metrics[0] += loss.item()
-                validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                validation_metrics[2] += 1
+                if self.tp_rank == 0:
+                    if batch["target_weights"] is not None:
+                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
+                    validation_metrics[0] += loss.item()
+                    validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                    validation_metrics[2] += 1
             validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
-            losses_out[split] = validation_metrics[0] / (self.config.eval_iters * self.train_ctx.world_size)
+            losses_out[split] = validation_metrics[0] / validation_metrics[2]
             accuraces[split] = validation_metrics[1] / validation_metrics[2]
         self.model.train()
         if 'val' not in losses_out:
@@ -248,7 +271,7 @@ class BaseTrainer:
                             
             # determine and set batch_size and gradient_accumulation_steps for this iteration 
             micro_batch_size = self.data_loader.update_batch_size(self.train_ctx.iter_num)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.train_ctx.world_size
+            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.dp_world_size
             self.gradient_accumulation_steps = self.get_grad_accum()
 
             # evaluate the loss on train/val sets and write best checkpoint
@@ -271,10 +294,11 @@ class BaseTrainer:
                 loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
-                iter_metrics[0] += loss.item()
-                iter_metrics[1] += unmasked_labels
-                iter_metrics[2] += accuracy
-                iter_metrics[3] += 1
+                if self.tp_rank == 0:
+                    iter_metrics[0] += loss.item()
+                    iter_metrics[1] += unmasked_labels
+                    iter_metrics[2] += accuracy
+                    iter_metrics[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.data_loader.get_batch('train')
@@ -286,7 +310,9 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                iter_metrics[4] += self.clip_grad_norm()
+                total_norm = self.clip_grad_norm()
+                if self.tp_rank == 0:
+                    iter_metrics[4] += total_norm
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
@@ -313,10 +339,10 @@ class BaseTrainer:
             if self.should_log_metrics():
                 iter_time = time.time() - timer
                 # get loss as float. note: this is a CPU-GPU sync point
-                lossf = iter_metrics[0].item() / self.train_ctx.world_size
+                lossf = iter_metrics[0].item() / self.dp_world_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
                 accuracy = iter_metrics[2].item() / iter_metrics[3].item()
-                grad_norm = iter_metrics[4].item() / self.train_ctx.world_size
+                grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
@@ -341,7 +367,7 @@ class BaseTrainer:
                         "train/lr": lr,
                         "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
-                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.dp_world_size/iter_time),
                         "train/tokens": self.train_ctx.processed_tokens,
                         "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
