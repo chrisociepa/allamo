@@ -1,5 +1,4 @@
 import os
-import shutil
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
@@ -20,6 +19,8 @@ from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
     get_optimizer_checkpoint_path,
+    copy_file_to_prev_version,
+    copy_dir_to_prev_version,
 )
 
 class FSDPTrainer(BaseTrainer):
@@ -116,16 +117,14 @@ class FSDPTrainer(BaseTrainer):
             config_ckpt_file_path = get_config_checkpoint_path(ckpt_file_name, self.config.out_dir)
             self.checkpoint_manager.save_config_checkpoint(config_ckpt_file_path, None, self.model_config)
             
-            if self.train_ctx.master_process and not self.config.ignore_last_checkpoint_backup:
-                logger.warning("Backing up a previous checkpoint is not supported for distributed checkpoints")
             model_ckpt_dir_path = self.checkpoint_manager.save_distributed_model_checkpoint(self.model, ckpt_file_name)
             
             if model_only == False and self.checkpoint_manager.should_save_optimizer():
                 self.checkpoint_manager.save_distributed_optimizer_checkpoint(self.model, self.optimizer, ckpt_file_name)
                 
                 if self.config.optimizer_checkpoint_interval is not None:
-                    shutil.copytree(model_ckpt_dir_path, model_ckpt_dir_path + '-optim')
-                    shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
+                    copy_dir_to_prev_version(model_ckpt_dir_path, '-optim')
+                    copy_file_to_prev_version(config_ckpt_file_path, '.optim')
         else:
             with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, self.fullstate_save_policy):
                 full_msd = self.model.state_dict()
@@ -146,8 +145,8 @@ class FSDPTrainer(BaseTrainer):
                     del full_osd
                     
                     if self.config.optimizer_checkpoint_interval is not None:
-                        shutil.copy(model_ckpt_file_path, model_ckpt_file_path + '.optim')
-                        shutil.copy(config_ckpt_file_path, config_ckpt_file_path + '.optim')
+                        copy_file_to_prev_version(model_ckpt_file_path, '.optim')
+                        copy_file_to_prev_version(config_ckpt_file_path, '.optim')
     
     def dist_all_reduce(self, x: torch.Tensor, op: dist.ReduceOp):
         if self.world_mesh is None:

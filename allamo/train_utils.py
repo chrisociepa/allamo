@@ -1,11 +1,23 @@
 import dataclasses
 import hashlib
 import os
+import shutil
 from allamo.model.model import AllamoTransformerConfig
 
 def rename_file_to_prev_version(file_path):
     if os.path.exists(file_path):
         os.rename(file_path, file_path + '.prev')
+
+def copy_file_to_prev_version(file_path, postfix='.prev'):
+    if os.path.exists(file_path):
+        shutil.copy(file_path, file_path + postfix)
+
+def copy_dir_to_prev_version(dir_path, postfix='-prev'):
+    if os.path.exists(dir_path):
+        new_path = dir_path + postfix
+        if os.path.exists(new_path):
+            shutil.rmtree(new_path)
+        shutil.copytree(dir_path, new_path)
         
 def calculate_md5(file_path, chunk_size=1024*1024):
     md5 = hashlib.md5()

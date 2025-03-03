@@ -5,6 +5,7 @@ from typing import Any, Dict
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.checkpoint.state_dict import (
@@ -21,6 +22,7 @@ from allamo.train_utils import (
     calculate_md5,
     get_config_checkpoint_path,
     get_model_checkpoint_path,
+    copy_dir_to_prev_version,
     rename_file_to_prev_version,
     get_model_config_field_names,
     remove_unwanted_prefix_from_model_state_dict,
@@ -205,6 +207,10 @@ class CheckpointManager:
     def save_distributed_model_checkpoint_to(self, model, checkpoint_dir, checkpoint_name):
         model_ckpt_dir_path = os.path.join(checkpoint_dir, f'model_{checkpoint_name}')
         logger.info(f"Saving model distributed checkpoint to {model_ckpt_dir_path}")
+        if not self.config.ignore_last_checkpoint_backup:
+            if self.train_ctx.master_process:
+                copy_dir_to_prev_version(model_ckpt_dir_path)
+            dist.barrier()
         model_state = {"model": ModelWrapper(model)}
         dcp.save(model_state, checkpoint_id=model_ckpt_dir_path)
         logger.info(f"Model distributed checkpoint saved in {model_ckpt_dir_path}")
@@ -216,10 +222,14 @@ class CheckpointManager:
     def save_distributed_optimizer_checkpoint_to(self, model, optimizer, checkpoint_dir, checkpoint_name):
         optimizer_ckpt_dir_path = os.path.join(checkpoint_dir, f'optimizer_{checkpoint_name}')
         logger.info(f"Saving optimizer distributed checkpoint to {optimizer_ckpt_dir_path}")
+        if not self.config.ignore_last_checkpoint_backup:
+            if self.train_ctx.master_process:
+                copy_dir_to_prev_version(optimizer_ckpt_dir_path)
+            dist.barrier()
         optimizer_state = {"optimizer": OptimizerWrapper(model, optimizer)}
         dcp.save(optimizer_state, checkpoint_id=optimizer_ckpt_dir_path)
         logger.info(f"Optimizer distributed checkpoint saved in {optimizer_ckpt_dir_path}")
     
     def save_distributed_optimizer_checkpoint(self, model, optimizer, checkpoint_name):
-        self.save_distributed_optimizer_checkpoint(model, optimizer, self.config.out_dir, checkpoint_name)
+        self.save_distributed_optimizer_checkpoint_to(model, optimizer, self.config.out_dir, checkpoint_name)
     
