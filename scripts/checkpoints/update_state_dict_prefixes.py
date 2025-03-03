@@ -20,11 +20,11 @@ if __name__ == "__main__":
     state_dict = torch.load(args.src, weights_only=True)
     logger.info(f"Loaded checkpoint {args.src}")
 
-    if args.remove_prefix.strip():
+    if args.remove_prefix and args.remove_prefix.strip():
         logger.info(f"Removing '{args.remove_prefix}' prefix from state dict keys")
         remove_unwanted_prefix_from_model_state_dict(state_dict, args.remove_prefix)
     
-    if args.add_prefix.strip():
+    if args.add_prefix and args.add_prefix.strip():
         logger.info(f"Adding '{args.add_prefix}' prefix into state dict keys")
         add_prefix_to_model_state_dict(state_dict, args.add_prefix)
 
