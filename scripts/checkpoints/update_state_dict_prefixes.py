@@ -22,7 +22,10 @@ if __name__ == "__main__":
 
     if args.remove_prefix and args.remove_prefix.strip():
         logger.info(f"Removing '{args.remove_prefix}' prefix from state dict keys")
-        remove_unwanted_prefix_from_model_state_dict(state_dict, args.remove_prefix)
+        if args.remove_prefix in state_dict:
+            state_dict = state_dict.pop(args.remove_prefix)
+        else:
+            remove_unwanted_prefix_from_model_state_dict(state_dict, args.remove_prefix)
     
     if args.add_prefix and args.add_prefix.strip():
         logger.info(f"Adding '{args.add_prefix}' prefix into state dict keys")
