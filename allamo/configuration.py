@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Dict
 
 logger = logging.getLogger("AllamoConfiguration")
 
@@ -72,6 +72,8 @@ class AllamoConfiguration:
     bias: bool = False 
     multiple_of: int = 256
     norm_eps: float = 1e-5
+    act_fn: str = "silu"
+    act_fn_params: Dict = field(default_factory=dict)
     learning_rate: float = 6e-4
     num_train_epochs: int = None
     max_iters: int = 600000

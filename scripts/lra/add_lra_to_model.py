@@ -3,7 +3,7 @@ import json
 import os
 import torch
 from allamo.logging import configure_logger, logger
-from allamo.model.lra import LRA, INIT_DATA
+from allamo.model.lra import LRA, get_supported_base_functions
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--base_fn",
-        choices=list(INIT_DATA.keys()),
+        choices=get_supported_base_functions(),
         default='swishglu',
         help="Base activation function",
     )

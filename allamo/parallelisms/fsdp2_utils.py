@@ -98,6 +98,9 @@ def apply_tensor_parallelism(model: nn.Module, world_mesh: DeviceMesh):
         
         layer.attention.num_heads //= world_mesh["tp"].size()
         layer.attention.num_kv_heads //= world_mesh["tp"].size()
+        if hasattr(layer.feed_forward.act_fn, 'num_groups'):
+            assert layer.feed_forward.act_fn.num_groups > 1
+            layer.feed_forward.act_fn.num_groups //= world_mesh["tp"].size()
         
         parallelize_module(
             module=layer,

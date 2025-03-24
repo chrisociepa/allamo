@@ -1,7 +1,7 @@
 import math
 import inspect
-from typing import Optional, Tuple, Union
-from dataclasses import dataclass
+from typing import Optional, Tuple, Union, Dict
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from allamo.logging import logger
 from allamo.model.attentions import attention_version
+from allamo.model.activations import get_activation
 
 @dataclass
 class AllamoTransformerConfig:
@@ -29,6 +30,8 @@ class AllamoTransformerConfig:
     norm_eps: float = 1e-5
     sliding_window: int = None
     gradient_checkpointing: bool = False
+    act_fn: str = "silu"
+    act_fn_params: Dict = field(default_factory=dict)
 
 class RMSNorm(torch.nn.Module):
     """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
@@ -110,7 +113,7 @@ class FeedForward(nn.Module):
         self.gate_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
         self.down_proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
         self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.act_fn  = nn.SiLU() # SwiGLU activation function
+        self.act_fn  = get_activation(act_fn_name=config.act_fn, **config.act_fn_params)
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
         self.gradient_checkpointing = config.gradient_checkpointing
         
@@ -118,6 +121,8 @@ class FeedForward(nn.Module):
         torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
         for module in (self.down_proj, self.up_proj):
             torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
+        if hasattr(self.act_fn, 'reset_params'):
+            self.act_fn.reset_params()
 
     def forward(self, x):
         if self.training and self.gradient_checkpointing:
