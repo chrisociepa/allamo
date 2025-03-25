@@ -33,8 +33,6 @@ def import_model(hf_model_path, output_model_path, output_checkpoint_name_base):
     hf_model = AutoModelForCausalLM.from_pretrained(hf_model_path, torch_dtype=torch.float32, low_cpu_mem_usage=True)
     sd_hf_model = hf_model.state_dict()
     logger.info(f"Huggingface model model loaded")
-
-    assert hf_model.config.hidden_act in get_supported_base_functions(), f"Unsupported activation function {hf_model.config.hidden_act}"
     
     config = AllamoTransformerConfig()
     config.block_size = hf_model.config.max_position_embeddings
