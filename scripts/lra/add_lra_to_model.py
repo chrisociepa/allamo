@@ -97,7 +97,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base_fn",
         choices=get_supported_base_functions(),
-        default='swishglu',
+        default='swish', # replaces SiLU
         help="Base activation function",
     )
     args = parser.parse_args()
