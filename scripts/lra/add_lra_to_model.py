@@ -24,7 +24,7 @@ def inject_lra(model_checkpoint, layer_i, lra_sd):
     model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_4"] = lra_sd["q_coeff_4"].clone()
     logger.info(f"LRA injected to layer {layer_i}")
 
-def adjust_model(input_dir_path, input_checkpoint_name_base, output_dir_path, output_checkpoint_name_base, group_size, base_fn):
+def adjust_model(input_dir_path, input_checkpoint_name_base, output_dir_path, output_checkpoint_name_base, num_groups, base_fn):
     os.makedirs(output_dir_path, exist_ok=True)
     
     logger.info(f"loading checkpoint from {input_dir_path}...")
@@ -35,15 +35,15 @@ def adjust_model(input_dir_path, input_checkpoint_name_base, output_dir_path, ou
     remove_unwanted_prefix_from_model_state_dict(model_checkpoint)
 
     model_intermediate_size = config_checkpoint["model_args"]["intermediate_size"]
-    if group_size is None or group_size < 1 or group_size > model_intermediate_size:
-        group_size = config_checkpoint["model_args"]["head_size"]
-        logger.info(f"Setting default group_size to head_size: {group_size}")
+    if num_groups < 1 or model_intermediate_size % num_groups != 0:
+        raise Exception("Invalid number of LRA groups")
+    else:
+        group_size = model_intermediate_size // num_groups
 
-    lra = LRA(base_fn=base_fn, dim=model_intermediate_size, group_size=group_size)
-    logger.info(f"Start injecting {lra}")
-    lra_sd = lra.state_dict()
-    
+    logger.info(f"Start injecting LRA(base_fn={base_fn}, num_groups={num_groups}, group_size={group_size})")
     for layer_i in range(config_checkpoint['model_args']['n_layer']):
+        lra = LRA(base_fn=base_fn, dim=model_intermediate_size, group_size=group_size)
+        lra_sd = lra.state_dict()
         inject_lra(model_checkpoint, layer_i, lra_sd)
     
     config_checkpoint["model_args"]["act_fn"] = "lra"
@@ -91,8 +91,10 @@ if __name__ == "__main__":
         help="Output checkpoint file name base",
     )
     parser.add_argument(
-        "--group_size",
-        help="Custom group size (defaults to head size if not specified)",
+        "--num_groups",
+        type=int,
+        default=4,
+        help="Number of LRA groups. Defaults to 4",
     )
     parser.add_argument(
         "--base_fn",
@@ -106,6 +108,6 @@ if __name__ == "__main__":
         input_checkpoint_name_base=args.input_checkpoint_name_base,
         output_dir_path=args.output_dir,
         output_checkpoint_name_base=args.output_checkpoint_name_base,
-        group_size=args.group_size,
+        num_groups=args.num_groups,
         base_fn=args.base_fn
     )
