@@ -96,6 +96,9 @@ def apply_tensor_parallelism(model: nn.Module, world_mesh: DeviceMesh):
             "feed_forward.up_proj": ColwiseParallel(),
         }
         
+        assert layer.attention.num_heads % world_mesh["tp"].size() == 0, "Number of heads must be a multiple of the number of TP ranks"
+        assert layer.attention.num_kv_heads % world_mesh["tp"].size() == 0, "Number of key-value heads must be a multiple of the number of TP ranks"
+
         layer.attention.num_heads //= world_mesh["tp"].size()
         layer.attention.num_kv_heads //= world_mesh["tp"].size()
         if hasattr(layer.feed_forward.act_fn, 'num_groups'):
