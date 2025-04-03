@@ -7,13 +7,14 @@ import json
 import os
 import shutil
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM
 from allamo.logging import configure_logger, logger
 from allamo.model.model import AllamoTransformerConfig
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
 )
+
+SUPPORTED_MODEL_ARCHS = ['llama', 'mistral', 'llama_lra']
 
 def compute_intermediate_size(config):
     return config.multiple_of * ((int(config.n_embd * 8 / 3) + config.multiple_of - 1) // config.multiple_of)
@@ -27,7 +28,7 @@ def write_json(text, path):
         json.dump(text, f)
 
 def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_model_type, hf_model_dtype=None, hf_model_max_position_embeddings=None):
-    assert hf_model_type == "llama" or hf_model_type == "mistral", "Only llama and mistral architectures are supported"
+    assert hf_model_type in SUPPORTED_MODEL_ARCHS, f"{hf_model_type} architecture is not supported"
     os.makedirs(hf_model_path, exist_ok=True)
     tmp_model_path = os.path.join(hf_model_path, "tmp")
     os.makedirs(tmp_model_path, exist_ok=True)
@@ -72,6 +73,17 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
                 state_dict[f"model.layers.{layer_i}.mlp.gate_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.down_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.up_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.bias"]
+        if allamo_transformer_config.act_fn == "lra":
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_0"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_0"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_1"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_1"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_2"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_2"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_3"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_3"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_4"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_4"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_5"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_5"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_1"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_1"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_2"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_2"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_3"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_3"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_4"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_4"]
         for k, v in state_dict.items():
             index_dict["weight_map"][k] = filename
             param_count += v.numel()
@@ -102,6 +114,7 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
     write_json(index_dict, os.path.join(tmp_model_path, "pytorch_model.bin.index.json"))
 
     if hf_model_type == "llama":
+        from transformers import LlamaConfig
         config = LlamaConfig(
             vocab_size=allamo_transformer_config.vocab_size,
             max_position_embeddings=max_position_embeddings,
@@ -114,8 +127,10 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
             rope_theta=allamo_transformer_config.rope_freq_base,
             attention_bias=allamo_transformer_config.bias,
             mlp_bias=allamo_transformer_config.bias,
+            hidden_act=allamo_transformer_config.act_fn,
         )
     elif hf_model_type == "mistral":
+        from transformers import MistralConfig
         assert not allamo_transformer_config.bias, "Mistral models don't support bias"
         config = MistralConfig(
             vocab_size=allamo_transformer_config.vocab_size,
@@ -128,6 +143,23 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
             rms_norm_eps=allamo_transformer_config.norm_eps,
             rope_theta=allamo_transformer_config.rope_freq_base,
             sliding_window=allamo_transformer_config.sliding_window,
+            hidden_act=allamo_transformer_config.act_fn,
+        )
+    elif hf_model_type == "llama_lra":
+        from lra.modeling_lra import LlamaLRAConfig
+        config = LlamaLRAConfig(
+            vocab_size=allamo_transformer_config.vocab_size,
+            max_position_embeddings=max_position_embeddings,
+            hidden_size=allamo_transformer_config.n_embd,
+            intermediate_size=intermediate_size,
+            num_attention_heads=allamo_transformer_config.n_head,
+            num_key_value_heads=allamo_transformer_config.num_kv_heads,
+            num_hidden_layers=n_layers,
+            rms_norm_eps=allamo_transformer_config.norm_eps,
+            rope_theta=allamo_transformer_config.rope_freq_base,
+            attention_bias=allamo_transformer_config.bias,
+            mlp_bias=allamo_transformer_config.bias,
+            lra_group_size=allamo_transformer_config.act_fn_params["group_size"]
         )
     config.save_pretrained(tmp_model_path)
     logger.info(f"configuration for the HF LLaMA model saved")
@@ -140,9 +172,14 @@ def write_model(checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_mod
 
     logger.info(f"loading the checkpoint in a LLaMA model with {torch_dtype} dtype")
     if hf_model_type == "llama":
+        from transformers import LlamaForCausalLM
         model = LlamaForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
     elif hf_model_type == "mistral":
+        from transformers import MistralForCausalLM
         model = MistralForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+    elif hf_model_type == "llama_lra":
+        from lra.modeling_lra import LlamaLRAForCausalLM
+        model = LlamaLRAForCausalLM.from_pretrained(tmp_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
     # Avoid saving this as part of the config.
     del model.config._name_or_path
 
@@ -170,7 +207,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_type",
-        choices=['llama', 'mistral'],
+        choices=SUPPORTED_MODEL_ARCHS,
         default='llama',
         help="Determine model type",
     )
