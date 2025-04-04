@@ -145,7 +145,7 @@ class Attention(nn.Module):
         self.num_kv_heads = config.num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
-        self.sliding_window = config.sliding_window if attention_version.flash_attn_2_supports_window_size else None
+        self.sliding_window = config.sliding_window if attention_version.flash_attn_supports_window_size else None
         self.gradient_checkpointing = config.gradient_checkpointing
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
@@ -179,6 +179,7 @@ class Attention(nn.Module):
                 rotary_emb: RotaryEmbedding,
                 attn_mask: Optional[torch.Tensor] = None,
                 input_pos: Optional[torch.Tensor] = None,
+                seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # notation:
         # B  | batch
@@ -203,20 +204,8 @@ class Attention(nn.Module):
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
         
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if attention_version.version == 2:
-            if attn_mask is not None:
-                raise ValueError(f"Custom attention mask is not supported for FlashAttention2")
-            # Flash Attention 2 requires (B, T, nh, hs)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            if self.sliding_window:            
-                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
-            else:
-                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
-        elif attention_version.version == 1:
-            # efficient attention using Flash Attention CUDA kernels
+        if attention_version.version == 1:
+            # efficient attention using Flash Attention CUDA kernels: (B, nh, T, hs) -> (B, nh, T, hs)
             y = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
@@ -226,9 +215,64 @@ class Attention(nn.Module):
                 is_causal=attn_mask is None,
             )
             y = y.transpose(1, 2)
+        elif attention_version.version == 2:
+            if attn_mask is not None:
+                raise ValueError(f"Custom attention mask is not supported for Flash Attention 2")
+            # Flash Attention 2: (B, T, nh, hs) -> (B, T, nh, hs)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            if self.sliding_window:            
+                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
+            else:
+                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
+        elif attention_version.version == 3:
+            if attn_mask is not None:
+                raise ValueError(f"Custom attention mask is not supported for Flash Attention 3")
+            # Flash Attention 3: (B, T, nh, hs) -> (B, T, nh, hs)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            if self.sliding_window:
+                y = flash_attn_func(q, k, v, causal=True, window_size=(self.sliding_window, self.sliding_window))
+            else:
+                y = flash_attn_func(q, k, v, causal=True)
+        elif attention_version.version == 4:
+            # efficient attention using xformers: (B, nh, T, hs) -> (B, nh, T, hs)
+            if attn_mask is None:
+                if seq_lens is None:
+                    attn_mask = xops.LowerTriangularMask()
+                else:
+                    # FIXME: this is not correct
+                    # attn_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(seq_lens)
+                    raise ValueError("Custom attention mask is not supported for xformer memory_efficient_attention")
+            y = xops.memory_efficient_attention(
+                q,
+                k,
+                v,
+                attn_bias=attn_mask,
+                p=self.dropout if self.training else 0 # dropout
+            )
+            y = y.transpose(1, 2)
+        elif attention_version.version == 5:
+            if attn_mask is None:
+                raise ValueError("Custom attention mask is required for Flash Attention 2 with custom masks")
+            
+            # attn_mask: (B, 1, T, T) 
+            attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T)) # TODO: validate if this is needed
+            # Flash Attention 2 with custom masks: (B, nh, T, hs) -> (B, nh, T, hs)
+            y = flash_attention_custom_mask(
+                q,
+                k,
+                v,
+                mask=attn_mask,
+                sm_scale=1.0 / math.sqrt(q.size(-1))
+            )
+            y = y.transpose(1, 2)
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            # eager implementation of attention
+            scale_factor = 1.0 / math.sqrt(q.size(-1))
+            att = (q @ k.transpose(-2, -1)) * scale_factor
             if attn_mask is None:
                 att = att.masked_fill(self.temp_mask[:,:,:T,:T] == 0, float('-inf'))
             else:
@@ -285,9 +329,10 @@ class SelfAttentionBlock(nn.Module):
         rotary_emb: RotaryEmbedding,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        x = x + self.attention(self.attention_norm(x), None, rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
+        x = x + self.attention(self.attention_norm(x), None, rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -350,10 +395,29 @@ class AllamoTransformer(nn.Module):
         if attention_version.version == 2:
             try:
                 from flash_attn import flash_attn_func
-                attention_version.flash_attn_2_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+                attention_version.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
             except ImportError:
-                attention_version.disable_flash_attn_2()
-                logger.warning("Flash Attention 2 is not available!")
+                attention_version.enable_sdpa()
+                logger.warning("Flash Attention 2 is not available, falling back to scaled_dot_product_attention!")
+        if attention_version.version == 3:
+            try:
+                from flash_attn_interface import flash_attn_func
+                attention_version.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            except ImportError:
+                attention_version.enable_sdpa()
+                logger.warning("Flash Attention 3 is not available, falling back to scaled_dot_product_attention!")
+        if attention_version.version == 4:
+            try:
+                import xformers.ops as xops
+            except ImportError:
+                attention_version.enable_sdpa()
+                logger.warning("xformers is not available, falling back to scaled_dot_product_attention!")
+        if attention_version.version == 5:
+            try:
+                from fa2_custom_mask import flash_attention_custom_mask
+            except ImportError:
+                attention_version.enable_sdpa()
+                logger.warning("Flash Attention 2 with custom masks is not available, falling back to scaled_dot_product_attention!")
                 
     def calculate_weight_init_std(self, num_layers):
         return 0.02 / math.sqrt(2 * num_layers)
@@ -403,9 +467,10 @@ class AllamoTransformer(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos)
+            x = layer(x, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
         return x
 
     def forward(self,
@@ -414,6 +479,7 @@ class AllamoTransformer(nn.Module):
         target_weights: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        seq_lens: Optional[torch.Tensor] = None,
         ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
@@ -429,7 +495,7 @@ class AllamoTransformer(nn.Module):
             elif attn_mask.ndim != 4:
                 raise ValueError(f"Unsupport attn_mask shape {attn_mask.shape}")
         
-        hidden_states = self.apply_layers(inputs_embeds, attn_mask=attn_mask, input_pos=input_pos)
+        hidden_states = self.apply_layers(inputs_embeds, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
         final_embeddings = self.norm(hidden_states)
         if target_ids is not None:
             # if we are given some desired targets also calculate the loss

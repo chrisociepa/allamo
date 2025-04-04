@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from allamo.configuration import AllamoConfiguration
 from allamo.logging import logger
+from allamo.model.attentions import attention_version
 
 class AllamoDataset:
     """ In-Memory map-style dataset """
@@ -276,23 +277,35 @@ class AllamoDataset:
                 result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
-            total_seq_len = 0
-            block_attn_masks = []
-            sample_input_pos = []
-            for seq_len in sample["seq_lens"]:
-                sample_input_pos.extend(list(range(seq_len)))
-                total_seq_len += seq_len
-                
-                # append lower triangular matrix for causal mask
-                block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
-                
-            if total_seq_len < len(result['input_ids']):
-                new_pos = sample_input_pos[-1] + 1
-                num_pad = len(result['input_ids']) - total_seq_len
-                sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
-                block_attn_masks.append(torch.eye(num_pad, num_pad, dtype=torch.bool))
-            result['input_pos'] = torch.tensor(sample_input_pos)
-            result['attn_mask'] = torch.block_diag(*block_attn_masks)
+            if attention_version.version == 4 and False: # FIXME: first we need to fix the implementation in the model
+                seq_lens = [sl for sl in sample["seq_lens"]]
+                sample_input_pos = []
+                for seq_len in sample["seq_lens"]:
+                    sample_input_pos.extend(list(range(seq_len)))
+                padding_seq_len = len(result['input_ids']) - sum(seq_lens)
+                if padding_seq_len > 0:
+                    seq_lens.append(padding_seq_len)
+                    sample_input_pos.extend(list(range(padding_seq_len)))
+                result["input_pos"] = torch.tensor(sample_input_pos)
+                result["seq_lens"] = seq_lens
+            else:
+                total_seq_len = 0
+                block_attn_masks = []
+                sample_input_pos = []
+                for seq_len in sample["seq_lens"]:
+                    sample_input_pos.extend(list(range(seq_len)))
+                    total_seq_len += seq_len
+                    
+                    # append lower triangular matrix for causal mask
+                    block_attn_masks.append(torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
+                    
+                if total_seq_len < len(result['input_ids']):
+                    new_pos = sample_input_pos[-1] + 1
+                    num_pad = len(result['input_ids']) - total_seq_len
+                    sample_input_pos.extend(list(range(new_pos, new_pos + num_pad)))
+                    block_attn_masks.append(torch.eye(num_pad, num_pad, dtype=torch.bool))
+                result['input_pos'] = torch.tensor(sample_input_pos)
+                result['attn_mask'] = torch.block_diag(*block_attn_masks)
         return result
     
     def __len__(self):

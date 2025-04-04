@@ -1,3 +1,4 @@
+import itertools
 import threading
 import time
 import torch
@@ -104,35 +105,40 @@ class AllamoDataLoader:
             target_weights = torch.stack([sample['target_weights'] for sample in samples]).to(torch.float32) if 'target_weights' in samples[0] else None
             attn_mask = torch.stack([sample['attn_mask'] for sample in samples]) if 'attn_mask' in samples[0] else None
             input_pos = torch.stack([sample['input_pos'] for sample in samples]) if 'input_pos' in samples[0] else None
+            seq_lens = list(itertools.chain(*(sample['seq_lens'] for sample in samples))) if 'seq_lens' in samples[0] else None
         else:
             input_ids = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
             target_ids = torch.stack([sample[1:] for sample in samples]).to(torch.int64)
             target_weights = None
             attn_mask = None
             input_pos = None
+            seq_lens = None
         
         if 'cuda' in self.config.device and self.pin_memory:
             input_ids = input_ids.pin_memory().to(self.config.device, non_blocking=True)
             target_ids = target_ids.pin_memory().to(self.config.device, non_blocking=True)
             if target_weights is not None:
                 target_weights = target_weights.pin_memory().to(self.config.device, non_blocking=True)
-            if attn_mask is not None and input_pos is not None:
+            if attn_mask is not None:
                 attn_mask = attn_mask.pin_memory().to(self.config.device, non_blocking=True)
+            if input_pos is not None:
                 input_pos = input_pos.pin_memory().to(self.config.device, non_blocking=True)
         else:
             input_ids = input_ids.to(self.config.device)
             target_ids = target_ids.to(self.config.device)
             if target_weights is not None:
                 target_weights = target_weights.to(self.config.device)
-            if attn_mask is not None and input_pos is not None:
+            if attn_mask is not None:
                 attn_mask = attn_mask.to(self.config.device)
+            if input_pos is not None:
                 input_pos = input_pos.to(self.config.device)
         return {
             "input_ids": input_ids,
             "target_ids": target_ids,
             "target_weights": target_weights,
             "attn_mask": attn_mask,
-            "input_pos": input_pos
+            "input_pos": input_pos,
+            "seq_lens": seq_lens
         }
         
     def update_buffer(self, dataset):
