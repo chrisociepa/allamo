@@ -271,16 +271,7 @@ class Attention(nn.Module):
             y = y.transpose(1, 2)
         else:
             # eager implementation of attention
-            scale_factor = 1.0 / math.sqrt(q.size(-1))
-            att = (q @ k.transpose(-2, -1)) * scale_factor
-            if attn_mask is None:
-                att = att.masked_fill(self.temp_mask[:,:,:T,:T] == 0, float('-inf'))
-            else:
-                att = att.masked_fill(attn_mask.logical_not(), float('-inf'))
-            att = F.softmax(att, dim=-1)
-            if self.attn_dropout is not None:
-                att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = self._eager_attention(q, k, v, attn_mask)
             y = y.transpose(1, 2)
 
         # output projection
@@ -308,7 +299,21 @@ class Attention(nn.Module):
         B, num_kv_heads, T, hs = x.shape
         x = x[:, :, None, :, :].expand(B, num_kv_heads, num_key_value_groups, T, hs)
         return x.reshape(B, num_kv_heads * num_key_value_groups, T, hs)
-        
+    
+    def _eager_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor]):
+        scale_factor = 1.0 / math.sqrt(q.size(-1))
+        seq_len = q.size(2)
+        att = (q @ k.transpose(-2, -1)) * scale_factor
+        if attn_mask is None:
+            att = att.masked_fill(self.temp_mask[:,:,:seq_len,:seq_len] == 0, float('-inf'))
+        else:
+            att = att.masked_fill(attn_mask.logical_not(), float('-inf'))
+        att = F.softmax(att, dim=-1)
+        if self.attn_dropout is not None:
+            att = self.attn_dropout(att)
+        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        return y
+
 class SelfAttentionBlock(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
