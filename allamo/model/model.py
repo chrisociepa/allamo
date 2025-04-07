@@ -223,9 +223,9 @@ class Attention(nn.Module):
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
             if self.sliding_window:            
-                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
+                y = attention_version.attn_impl_module.flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
             else:
-                y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
+                y = attention_version.attn_impl_module.flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
         elif attention_version.version == 3:
             if attn_mask is not None:
                 raise ValueError(f"Custom attention mask is not supported for Flash Attention 3")
@@ -234,19 +234,19 @@ class Attention(nn.Module):
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
             if self.sliding_window:
-                y = flash_attn_func(q, k, v, causal=True, window_size=(self.sliding_window, self.sliding_window))
+                y = attention_version.attn_impl_module.flash_attn_func(q, k, v, causal=True, window_size=(self.sliding_window, self.sliding_window))
             else:
-                y = flash_attn_func(q, k, v, causal=True)
+                y = attention_version.attn_impl_module.flash_attn_func(q, k, v, causal=True)
         elif attention_version.version == 4:
             # efficient attention using xformers: (B, nh, T, hs) -> (B, nh, T, hs)
             if attn_mask is None:
                 if seq_lens is None:
-                    attn_mask = xops.LowerTriangularMask()
+                    attn_mask = attention_version.attn_impl_module.LowerTriangularMask()
                 else:
                     # FIXME: this is not correct
                     # attn_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(seq_lens)
                     raise ValueError("Custom attention mask is not supported for xformer memory_efficient_attention")
-            y = xops.memory_efficient_attention(
+            y = attention_version.attn_impl_module.memory_efficient_attention(
                 q,
                 k,
                 v,
@@ -261,7 +261,7 @@ class Attention(nn.Module):
             # attn_mask: (B, 1, T, T) 
             attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T)) # TODO: validate if this is needed
             # Flash Attention 2 with custom masks: (B, nh, T, hs) -> (B, nh, T, hs)
-            y = flash_attention_custom_mask(
+            y = attention_version.attn_impl_module.flash_attention_custom_mask(
                 q,
                 k,
                 v,
@@ -355,8 +355,7 @@ class AllamoTransformer(nn.Module):
         if config.num_kv_heads is None:
             config.num_kv_heads = config.n_head
         logger.info(f"AllamoTransformerConfig: {config}")
-        
-        self.init_attention()
+
         attention_version.log_version(self.config.sliding_window)
         
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
@@ -396,34 +395,6 @@ class AllamoTransformer(nn.Module):
             upper = cutoff_factor * weight_init_std
             torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
 
-    def init_attention(self):
-        if attention_version.version == 2:
-            try:
-                from flash_attn import flash_attn_func
-                attention_version.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-            except ImportError:
-                attention_version.enable_sdpa()
-                logger.warning("Flash Attention 2 is not available, falling back to scaled_dot_product_attention!")
-        if attention_version.version == 3:
-            try:
-                from flash_attn_interface import flash_attn_func
-                attention_version.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-            except ImportError:
-                attention_version.enable_sdpa()
-                logger.warning("Flash Attention 3 is not available, falling back to scaled_dot_product_attention!")
-        if attention_version.version == 4:
-            try:
-                import xformers.ops as xops
-            except ImportError:
-                attention_version.enable_sdpa()
-                logger.warning("xformers is not available, falling back to scaled_dot_product_attention!")
-        if attention_version.version == 5:
-            try:
-                from fa2_custom_mask import flash_attention_custom_mask
-            except ImportError:
-                attention_version.enable_sdpa()
-                logger.warning("Flash Attention 2 with custom masks is not available, falling back to scaled_dot_product_attention!")
-                
     def calculate_weight_init_std(self, num_layers):
         return 0.02 / math.sqrt(2 * num_layers)
 

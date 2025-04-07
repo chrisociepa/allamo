@@ -14,6 +14,7 @@ class AttentionVersion:
     """
     
     def __init__(self):
+        self.attn_impl_module = None
         self.enable_sdpa()
         
     def configure(self, config: AllamoConfiguration):
@@ -41,18 +42,42 @@ class AttentionVersion:
     
     def enable_flash_attn_2(self):
         self.version = 2
-        self.flash_attn_supports_window_size = True
+        try:            
+            import flash_attn
+            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            self.attn_impl_module = flash_attn
+        except ImportError:
+            self.enable_sdpa()
+            logger.warning("Flash Attention 2 is not available, falling back to scaled_dot_product_attention!")
         
     def enable_flash_attn_3(self):
         self.version = 3
-        self.flash_attn_supports_window_size = True
+        try:
+            import flash_attn_interface
+            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            self.attn_impl_module = flash_attn_interface
+        except ImportError:
+            self.enable_sdpa()
+            logger.warning("Flash Attention 3 is not available, falling back to scaled_dot_product_attention!")
         
     def enable_xformers(self):
         self.version = 4
+        try:
+            import xformers.ops as xops
+            self.attn_impl_module = xops
+        except ImportError:
+            self.enable_sdpa()
+            logger.warning("xformers is not available, falling back to scaled_dot_product_attention!")
         self.flash_attn_supports_window_size = False # TODO: check xops.fmha.attn_bias.LowerTriangularFromBottomRightLocalAttentionMask
 
     def enable_flash_attn_2_custom_mask(self):
         self.version = 5
+        try:
+            import fa2_custom_mask
+            self.attn_impl_module = fa2_custom_mask
+        except ImportError:
+            self.enable_sdpa()
+            logger.warning("Flash Attention 2 with custom masks is not available, falling back to scaled_dot_product_attention!")
         self.flash_attn_supports_window_size = False
         
     def force_eager(self):
