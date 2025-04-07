@@ -215,30 +215,33 @@ class Attention(nn.Module):
                 is_causal=attn_mask is None,
             )
             y = y.transpose(1, 2)
+        
         elif attention_version.version == 2:
             if attn_mask is not None:
                 raise ValueError(f"Custom attention mask is not supported for Flash Attention 2")
             # Flash Attention 2: (B, T, nh, hs) -> (B, T, nh, hs)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
             if self.sliding_window:            
                 y = attention_version.attn_impl_module.flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True, window_size=(self.sliding_window, self.sliding_window))
             else:
                 y = attention_version.attn_impl_module.flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, causal=True)
+        
         elif attention_version.version == 3:
             if attn_mask is not None:
                 raise ValueError(f"Custom attention mask is not supported for Flash Attention 3")
             # Flash Attention 3: (B, T, nh, hs) -> (B, T, nh, hs)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
             if self.sliding_window:
                 y = attention_version.attn_impl_module.flash_attn_func(q, k, v, causal=True, window_size=(self.sliding_window, self.sliding_window))
             else:
                 y = attention_version.attn_impl_module.flash_attn_func(q, k, v, causal=True)
+        
         elif attention_version.version == 4:
-            # efficient attention using xformers: (B, nh, T, hs) -> (B, nh, T, hs)
+            # efficient attention using xformers: (B, T, nh, hs) -> (B, T, nh, hs)
             if attn_mask is None:
                 if seq_lens is None:
                     attn_mask = attention_version.attn_impl_module.LowerTriangularMask()
@@ -246,6 +249,14 @@ class Attention(nn.Module):
                     # FIXME: this is not correct
                     # attn_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(seq_lens)
                     raise ValueError("Custom attention mask is not supported for xformer memory_efficient_attention")
+            else:
+                if attn_mask.dtype == torch.bool:
+                    attn_mask = torch.where(attn_mask, 0.0, -torch.inf)
+                attn_mask = attn_mask.to(device=q.device, dtype=q.dtype)
+                attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T))
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
             y = attention_version.attn_impl_module.memory_efficient_attention(
                 q,
                 k,
@@ -253,13 +264,11 @@ class Attention(nn.Module):
                 attn_bias=attn_mask,
                 p=self.dropout if self.training else 0 # dropout
             )
-            y = y.transpose(1, 2)
+        
         elif attention_version.version == 5:
             if attn_mask is None:
                 raise ValueError("Custom attention mask is required for Flash Attention 2 with custom masks")
-            
-            # attn_mask: (B, 1, T, T) 
-            attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T)) # TODO: validate if this is needed
+            attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T))
             # Flash Attention 2 with custom masks: (B, nh, T, hs) -> (B, nh, T, hs)
             y = attention_version.attn_impl_module.flash_attention_custom_mask(
                 q,
@@ -269,6 +278,7 @@ class Attention(nn.Module):
                 sm_scale=1.0 / math.sqrt(q.size(-1))
             )
             y = y.transpose(1, 2)
+
         else:
             # eager implementation of attention
             y = self._eager_attention(q, k, v, attn_mask)
