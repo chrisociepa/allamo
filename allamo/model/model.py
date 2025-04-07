@@ -242,21 +242,26 @@ class Attention(nn.Module):
         
         elif attention_version.version == 4:
             # efficient attention using xformers: (B, T, nh, hs) -> (B, T, nh, hs)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
             if attn_mask is None:
                 if seq_lens is None:
                     attn_mask = attention_version.attn_impl_module.LowerTriangularMask()
                 else:
-                    # FIXME: this is not correct
-                    # attn_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(seq_lens)
-                    raise ValueError("Custom attention mask is not supported for xformer memory_efficient_attention")
+                    # FIXME: it is not working with torch.compile!
+                    q = q.view(1, B * T, self.num_heads, self.head_size)
+                    k = k.view(1, B * T, self.num_heads, self.head_size)
+                    v = v.view(1, B * T, self.num_heads, self.head_size)
+                    attn_mask = attention_version.attn_impl_module.fmha.attn_bias.BlockDiagonalCausalMask.from_seqlens(seq_lens, device=q.device)
             else:
+                # FIXME: it is not working with torch.compile!
                 if attn_mask.dtype == torch.bool:
                     attn_mask = torch.where(attn_mask, 0.0, -torch.inf)
                 attn_mask = attn_mask.to(device=q.device, dtype=q.dtype)
                 attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T))
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-            v = v.transpose(1, 2).contiguous()
+                attn_mask.requires_grad_(False)
+            
             y = attention_version.attn_impl_module.memory_efficient_attention(
                 q,
                 k,
@@ -264,6 +269,8 @@ class Attention(nn.Module):
                 attn_bias=attn_mask,
                 p=self.dropout if self.training else 0 # dropout
             )
+            if attn_mask is not None:
+                y = y.view(B, T, self.num_heads, self.head_size)
         
         elif attention_version.version == 5:
             if attn_mask is None:

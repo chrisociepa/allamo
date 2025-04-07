@@ -277,7 +277,7 @@ class AllamoDataset:
                 result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
-            if attention_version.version == 4 and False: # FIXME: first we need to fix the implementation in the model
+            if attention_version.version == 4: # xformers does not need materialized masks, so we can save some memory
                 seq_lens = [sl for sl in sample["seq_lens"]]
                 sample_input_pos = []
                 for seq_len in sample["seq_lens"]:
