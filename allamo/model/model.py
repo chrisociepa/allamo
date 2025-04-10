@@ -1,3 +1,4 @@
+import itertools
 import math
 from typing import Optional, Tuple, Union, Dict
 from dataclasses import dataclass, field
