@@ -100,6 +100,8 @@ class AttentionVersion:
             logger.info("Using xformers memory_efficient_attention")
         elif self.version == 5:
             logger.info("Using FlexAttention")
+            if sliding_window:
+                logger.info("Using sliding window")
         else:
             raise Exception('Unsupported attention version!')
     

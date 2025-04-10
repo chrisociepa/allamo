@@ -277,7 +277,7 @@ class AllamoDataset:
                 result['target_weights'] = F.pad(result['target_weights'], (0, self.block_size - len(result['target_weights'])), value=0)
         
         if "seq_lens" in sample:
-            if attention_version.version == 4 or attention_version.version == 5: # xformers does not need materialized masks, so we can save some memory
+            if attention_version.version == 4: # xformers does not need materialized masks
                 seq_lens = [sl for sl in sample["seq_lens"]]
                 sample_input_pos = []
                 for seq_len in sample["seq_lens"]:
@@ -288,6 +288,17 @@ class AllamoDataset:
                     sample_input_pos.extend(list(range(padding_seq_len)))
                 result["input_pos"] = torch.tensor(sample_input_pos)
                 result["seq_lens"] = seq_lens
+            elif attention_version.version == 5: # FlexAttention does not need materialized masks
+                document_ids = [torch.full((length,), doc_id, dtype=torch.int) for doc_id, length in enumerate(sample["seq_lens"])]
+                sample_input_pos = []
+                for seq_len in sample["seq_lens"]:
+                    sample_input_pos.extend(list(range(seq_len)))
+                padding_seq_len = len(result['input_ids']) - sum(sample["seq_lens"])
+                if padding_seq_len > 0:
+                    document_ids.append(torch.full((padding_seq_len,), len(sample["seq_lens"]), dtype=torch.int))
+                    sample_input_pos.extend(list(range(padding_seq_len)))
+                result["input_pos"] = torch.tensor(sample_input_pos)
+                result["attn_mask"] = torch.cat(document_ids)
             else:
                 total_seq_len = 0
                 block_attn_masks = []

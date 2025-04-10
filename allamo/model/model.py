@@ -275,30 +275,31 @@ class Attention(nn.Module):
                 y = y.view(B, T, self.num_heads, self.head_size)
         
         elif attention_version.version == 5:
-            # FIXME: make me more efficient
             def causal_mask(b, h, q_idx, kv_idx):
                 return q_idx >= kv_idx
+
+            def sliding_window_mask(window_size: int):
+                half_window_size = window_size // 2
+                def mask_fn(b, h, q_idx, kv_idx):
+                    return (q_idx - kv_idx <= half_window_size) & (kv_idx - q_idx <= half_window_size)
+                return mask_fn
             
+            def document_mask(b, h, q_idx, kv_idx):
+                return attn_mask[b, q_idx] == attn_mask[b, kv_idx]
+                        
             @lru_cache
-            def create_block_mask_cached(mask, B, H, M, N, device="cuda"):
-                block_mask = attention_version.attn_impl_module.create_block_mask(mask, B, H, M, N, device=device)
-                return block_mask
+            def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
+                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device)
             
             block_mask = None
             if attn_mask is None:
-                if seq_lens is None:
-                    block_mask = create_block_mask_cached(causal_mask, 1, 1, T, T, device=q.device)
-                else:
-                    document_id = []
-                    for batch in seq_lens:
-                        batch_tensors = [torch.full((length,), doc_id, dtype=torch.int, device=q.device) for doc_id, length in enumerate(batch)]
-                        document_id.append(torch.cat(batch_tensors))
-
-                    def document_causal_mask(b, h, q_idx, kv_idx):
-                        document_mask = document_id[0][q_idx] == document_id[0][kv_idx]
-                        return causal_mask(b, h, q_idx, kv_idx) & document_mask
-                    
-                    block_mask = create_block_mask_cached(document_causal_mask, B, 1, T, T, device=q.device)
+                mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, sliding_window_mask(self.sliding_window)) if self.sliding_window else causal_mask
+                block_mask = create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=q.device)                    
+            else:
+                mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, document_mask)
+                if self.sliding_window:
+                    mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask(self.sliding_window))
+                block_mask = create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
 
             y =  attention_version.attn_impl_module.flex_attention(q, k, v, block_mask=block_mask)
             y = y.transpose(1,2)
@@ -499,7 +500,7 @@ class AllamoTransformer(nn.Module):
         else:
             inputs_embeds = self.token_embeddings(input_ids)
         
-        if attn_mask is not None:
+        if attn_mask is not None and attention_version.version != 5: # FlexAttention use document ids instead of mask
             if attn_mask.ndim == 3:
                 attn_mask = attn_mask.unsqueeze(1) # (B, T, T) -> (B, 1, T, T)
             elif attn_mask.ndim != 4:
