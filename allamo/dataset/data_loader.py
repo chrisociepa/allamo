@@ -105,7 +105,7 @@ class AllamoDataLoader:
             target_weights = torch.stack([sample['target_weights'] for sample in samples]).to(torch.float32) if 'target_weights' in samples[0] else None
             attn_mask = torch.stack([sample['attn_mask'] for sample in samples]) if 'attn_mask' in samples[0] else None
             input_pos = torch.stack([sample['input_pos'] for sample in samples]) if 'input_pos' in samples[0] else None
-            seq_lens = list(itertools.chain(*(sample['seq_lens'] for sample in samples))) if 'seq_lens' in samples[0] else None
+            seq_lens = [sample["seq_lens"] for sample in samples] if 'seq_lens' in samples[0] else None
         else:
             input_ids = torch.stack([sample[:-1] for sample in samples]).to(torch.int64)
             target_ids = torch.stack([sample[1:] for sample in samples]).to(torch.int64)

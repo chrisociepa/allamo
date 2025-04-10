@@ -214,7 +214,7 @@ class AllamoConfiguration:
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
-        parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'fa2', 'fa3', 'xformers', 'eager', 'fa2_custom_mask'], help='Specifies attention implementation')
+        parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
         parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
 

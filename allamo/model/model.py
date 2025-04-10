@@ -1,6 +1,7 @@
 import math
 from typing import Optional, Tuple, Union, Dict
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import torch
 import torch.nn as nn
@@ -249,6 +250,7 @@ class Attention(nn.Module):
                     attn_mask = attention_version.attn_impl_module.LowerTriangularMask()
                 else:
                     # FIXME: it is not working with torch.compile!
+                    seq_lens = list(itertools.chain(*seq_lens)) if seq_lens else None
                     q = q.view(1, B * T, self.num_heads, self.head_size)
                     k = k.view(1, B * T, self.num_heads, self.head_size)
                     v = v.view(1, B * T, self.num_heads, self.head_size)
@@ -272,18 +274,33 @@ class Attention(nn.Module):
                 y = y.view(B, T, self.num_heads, self.head_size)
         
         elif attention_version.version == 5:
+            # FIXME: make me more efficient
+            def causal_mask(b, h, q_idx, kv_idx):
+                return q_idx >= kv_idx
+            
+            @lru_cache
+            def create_block_mask_cached(mask, B, H, M, N, device="cuda"):
+                block_mask = attention_version.attn_impl_module.create_block_mask(mask, B, H, M, N, device=device)
+                return block_mask
+            
+            block_mask = None
             if attn_mask is None:
-                raise ValueError("Custom attention mask is required for Flash Attention 2 with custom masks")
-            attn_mask = torch.broadcast_to(attn_mask, (B, self.num_heads, T, T))
-            # Flash Attention 2 with custom masks: (B, nh, T, hs) -> (B, nh, T, hs)
-            y = attention_version.attn_impl_module.flash_attention_custom_mask(
-                q,
-                k,
-                v,
-                mask=attn_mask,
-                sm_scale=1.0 / math.sqrt(q.size(-1))
-            )
-            y = y.transpose(1, 2)
+                if seq_lens is None:
+                    block_mask = create_block_mask_cached(causal_mask, 1, 1, T, T, device=q.device)
+                else:
+                    document_id = []
+                    for batch in seq_lens:
+                        batch_tensors = [torch.full((length,), doc_id, dtype=torch.int, device=q.device) for doc_id, length in enumerate(batch)]
+                        document_id.append(torch.cat(batch_tensors))
+
+                    def document_causal_mask(b, h, q_idx, kv_idx):
+                        document_mask = document_id[0][q_idx] == document_id[0][kv_idx]
+                        return causal_mask(b, h, q_idx, kv_idx) & document_mask
+                    
+                    block_mask = create_block_mask_cached(document_causal_mask, B, 1, T, T, device=q.device)
+
+            y =  attention_version.attn_impl_module.flex_attention(q, k, v, block_mask=block_mask)
+            y = y.transpose(1,2)
 
         else:
             # eager implementation of attention
