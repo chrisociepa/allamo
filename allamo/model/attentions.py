@@ -45,7 +45,7 @@ class AttentionVersion:
         self.version = 2
         try:            
             import flash_attn
-            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn.flash_attn_func).parameters)
             self.attn_impl_module = flash_attn
         except ImportError:
             self.enable_sdpa()
@@ -55,7 +55,7 @@ class AttentionVersion:
         self.version = 3
         try:
             import flash_attn_interface
-            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
+            self.flash_attn_supports_window_size = "window_size" in list(inspect.signature(flash_attn_interface.flash_attn_func).parameters)
             self.attn_impl_module = flash_attn_interface
         except ImportError:
             self.enable_sdpa()
