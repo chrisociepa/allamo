@@ -159,7 +159,6 @@ class AllamoConfiguration:
         parser.add_argument('--gradient_checkpointing', action='store_true', default=None, help='Enable gradient checkpointing')
         parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
-        parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')
         parser.add_argument('--dataset', type=str, help='The name of the dataset directory within the data_dir')
         parser.add_argument('--dataset_train_files', type=str, help='Comma-separated list of training dataset files to use')
@@ -215,7 +214,8 @@ class AllamoConfiguration:
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
-        parser.add_argument('--attention_implementation', type=str, choices=['sdpa', 'flash_attention_2', 'eager'], help='Specifies attention implementation')
+        parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
+        parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
 
         parser.add_argument('--freeze_embeddings', action='store_true', default=None, help='Freeze embeddings')
