@@ -279,9 +279,8 @@ class Attention(nn.Module):
                 return q_idx >= kv_idx
 
             def sliding_window_mask(window_size: int):
-                half_window_size = window_size // 2
                 def mask_fn(b, h, q_idx, kv_idx):
-                    return (q_idx - kv_idx <= half_window_size) & (kv_idx - q_idx <= half_window_size)
+                    return (q_idx - kv_idx <= window_size) & (kv_idx - q_idx <= window_size)
                 return mask_fn
             
             def document_mask(b, h, q_idx, kv_idx):

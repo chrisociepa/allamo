@@ -215,7 +215,7 @@ class AllamoConfiguration:
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')
         parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
-        parser.add_argument('--sliding_window', type=int, help='Sliding window attention window size')
+        parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
 
         parser.add_argument('--freeze_embeddings', action='store_true', default=None, help='Freeze embeddings')
