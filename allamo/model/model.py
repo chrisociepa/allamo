@@ -350,8 +350,9 @@ class Attention(nn.Module):
 
 class SelfAttentionBlock(nn.Module):
 
-    def __init__(self, config: AllamoTransformerConfig):
+    def __init__(self, layer_id: int, config: AllamoTransformerConfig):
         super().__init__()
+        self.layer_id = layer_id
         self.attention = Attention(config)
         self.feed_forward = FeedForward(config)
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
@@ -399,7 +400,7 @@ class AllamoTransformer(nn.Module):
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(SelfAttentionBlock(config))
+            self.layers.append(SelfAttentionBlock(layer_id, config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -454,7 +455,8 @@ class AllamoTransformer(nn.Module):
             
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
-            layer = SelfAttentionBlock(self.config)
+            new_layer_id = len(self.layers)
+            layer = SelfAttentionBlock(new_layer_id, self.config)
             self.layers.append(layer)
             self.config.n_layer += 1
             layer.init_weights(self.calculate_weight_init_std(self.config.n_layer))
