@@ -16,6 +16,7 @@ from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
     get_optimizer_checkpoint_path,
+    apply_activation_checkpointing,
 )
 
 class SimpleTrainer(BaseTrainer):
@@ -24,7 +25,7 @@ class SimpleTrainer(BaseTrainer):
         super().__init__(config)
         if config.distributed_checkpoint:
             config.distributed_checkpoint = False
-            logger.warn("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
+            logger.warning("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
         
     def distributed(self):
         return self.train_ctx.world_size > 1
@@ -44,6 +45,9 @@ class SimpleTrainer(BaseTrainer):
 
         self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration
 
+        if self.config.gradient_checkpointing:
+            apply_activation_checkpointing(model, self.config)
+
         if self.checkpoint_manager.is_checkpoint_available():
             self.checkpoint_manager.load_regular_model_checkpoint(model)
         else:
@@ -56,7 +60,7 @@ class SimpleTrainer(BaseTrainer):
                 model = torch.compile(model, mode=self.config.compile_mode)
                 logger.info("Model compiled and ready to use")
             except Exception as err:
-                logger.warn(f"Unable to compile the model: {err}")
+                logger.warning(f"Unable to compile the model: {err}")
 
         self.raw_model = model # neeeded in DDP training
         self.model = model

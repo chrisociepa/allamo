@@ -6,15 +6,11 @@ from allamo.configuration import AllamoConfiguration
 from allamo.torch_utils import (
     TORCH_DTYPE_MAP,
 )
+from allamo.train_utils import apply_activation_checkpointing
 from allamo.training_context import TrainingContext
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper,
-    CheckpointImpl,
-    apply_activation_checkpointing,
-)
 from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 from torch.distributed._tensor import Shard, Replicate
 from torch.distributed.tensor.parallel import (
@@ -25,7 +21,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.utils.checkpoint import checkpoint
 
 def build_world_mesh(train_ctx: TrainingContext, device_type: str = "cuda"):
     dims = (train_ctx.pp, train_ctx.dp, train_ctx.tp)
@@ -39,7 +34,7 @@ def parallelize_model_with_fsdp2(model, world_mesh, config, with_activation_chec
         apply_tensor_parallelism(model, world_mesh)
     
     if with_activation_checkpointing:
-        apply_activation_checkpointing(model)
+        apply_activation_checkpointing(model, config)
     
     apply_fsdp(model, world_mesh, config)
     
@@ -111,16 +106,6 @@ def apply_tensor_parallelism(model: nn.Module, world_mesh: DeviceMesh):
             parallelize_plan=layer_plan,
         )
     logger.info(f"Model parallelized with Tensor Parallelism (size: {world_mesh['tp'].size()})")
-
-def apply_activation_checkpointing(model: nn.Module):
-    for layer_id in range(len(model.layers)):
-        model.layers[layer_id] = checkpoint_wrapper(
-            model.layers[layer_id],
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            checkpoint_fn=checkpoint,
-            use_reentrant=False,
-            preserve_rng_state=False,
-        )
 
 def apply_fsdp(model: nn.Module, world_mesh: DeviceMesh, config: AllamoConfiguration):
     fsdp_config = {"mesh": world_mesh["dp"]}

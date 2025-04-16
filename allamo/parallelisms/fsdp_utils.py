@@ -44,7 +44,7 @@ def enable_activation_checkpointing(model, config):
         excluded_count = min(config.gradient_checkpointing_excluded_layers, total_layers)
         
         if excluded_count >= total_layers:
-            logger.warning(f"All layers excluded, so activation checkpointing won't be applied")
+            logger.warning(f"All {total_layers} layers are excluded, so activation checkpointing won't be applied.")
             return
         else:
             step = total_layers / excluded_count
