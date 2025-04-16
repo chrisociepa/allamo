@@ -29,7 +29,6 @@ class AllamoTransformerConfig:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
     sliding_window: int = None
-    gradient_checkpointing: bool = False
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
 
@@ -279,7 +278,7 @@ class Attention(nn.Module):
                         
             @lru_cache
             def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
-                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device)
+                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
             
             block_mask = None
             if attn_mask is None:
