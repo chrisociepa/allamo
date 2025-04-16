@@ -279,7 +279,7 @@ class Attention(nn.Module):
                         
             @lru_cache
             def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
-                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device)
             
             block_mask = None
             if attn_mask is None:
@@ -291,7 +291,7 @@ class Attention(nn.Module):
                     mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask(self.sliding_window))
                 block_mask = create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
 
-            y =  attention_version.attn_impl_module.flex_attention(q, k, v, block_mask=block_mask)
+            y =  attention_version.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
             y = y.transpose(1,2)
 
         else:

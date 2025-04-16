@@ -78,7 +78,18 @@ class AttentionVersion:
         try:
             import torch.nn.attention.flex_attention as flexatt
             self.attn_impl_module = flexatt
-            self.attn_impl_module.flex_attention = torch.compile(flexatt.flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+
+            compiled_flex_attention = torch.compile(flexatt.flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+            @torch.compiler.disable(recursive=False)
+            def compiled_flex_attention_fn(
+                q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                block_mask: flexatt.BlockMask,
+            ) -> torch.Tensor:
+                return compiled_flex_attention(q, k, v, block_mask=block_mask)
+            self.attn_impl_module.compiled_flex_attention_fn = compiled_flex_attention_fn
+
         except ImportError:
             self.enable_sdpa()
             logger.warning("FlexAttention is not available, falling back to scaled_dot_product_attention!")
