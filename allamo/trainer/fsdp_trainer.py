@@ -37,19 +37,9 @@ class FSDPTrainer(BaseTrainer):
             raise Exception('Full bfloat16 training is not supported with FSDP')
         
         self.fullstate_save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if self.config.gradient_checkpointing:
-            self.fsdp_activation_checkpointing = True
-            self.config.gradient_checkpointing = False # control gradient checkpointing with FSDP 
-            logger.info(
-                "Deactivated gradient checkpointing at the model configuration level. "
-                "Activated gradient checkpointing at the FSDP level."
-            )
-        else:
-            self.fsdp_activation_checkpointing = False
             
     def init_training(self):
         super().init_training()
-        self.model_config.gradient_checkpointing = False # AC is handled by FSDP
             
         with torch.device('meta'):
             model = AllamoTransformer(self.model_config)
@@ -59,9 +49,9 @@ class FSDPTrainer(BaseTrainer):
 
         if self.checkpoint_manager.checkpoint_name is None:
             if self.world_mesh is None:
-                self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)
+                self.model = parallelize_model_with_fsdp1(model, self.config, self.config.gradient_checkpointing)
             else:
-                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.fsdp_activation_checkpointing)
+                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.config.gradient_checkpointing)
             self.model.to_empty(device=self.device_type)
             self.model.init_model_weights()
             logger.info("Initialized a new model from scratch")
@@ -70,7 +60,7 @@ class FSDPTrainer(BaseTrainer):
             logger.info("Initializing optimizer from scratch")
         else:
             if self.config.distributed_checkpoint:
-                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.fsdp_activation_checkpointing)
+                self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.config.gradient_checkpointing)
                 logger.info("model.to_empty")
                 self.model.to_empty(device=self.device_type)
                 logger.info("model.init_model_weights")
@@ -88,7 +78,7 @@ class FSDPTrainer(BaseTrainer):
                 model.init_model_weights()
                 self.checkpoint_manager.load_regular_model_checkpoint(model)
                 
-                self.model = parallelize_model_with_fsdp1(model, self.config, self.fsdp_activation_checkpointing)
+                self.model = parallelize_model_with_fsdp1(model, self.config, self.config.gradient_checkpointing)
                 
                 self.optimizer = configure_optimizer(self.model, self.config, self.device_type)
                 self.load_optimizer_checkpoint(self.model, self.optimizer)
