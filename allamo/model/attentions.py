@@ -78,6 +78,7 @@ class AttentionVersion:
         try:
             import torch.nn.attention.flex_attention as flexatt
             self.attn_impl_module = flexatt
+            self.attn_impl_module.flex_attention = torch.compile(flexatt.flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
         except ImportError:
             self.enable_sdpa()
             logger.warning("FlexAttention is not available, falling back to scaled_dot_product_attention!")

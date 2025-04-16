@@ -279,7 +279,7 @@ class Attention(nn.Module):
                         
             @lru_cache
             def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
-                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device)
+                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
             
             block_mask = None
             if attn_mask is None:
