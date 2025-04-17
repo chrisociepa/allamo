@@ -2,6 +2,16 @@ import dataclasses
 import hashlib
 import os
 import shutil
+
+import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+    CheckpointImpl,
+)
+from torch.utils.checkpoint import checkpoint
+
+from allamo.configuration import AllamoConfiguration
+from allamo.logging import logger
 from allamo.model.model import AllamoTransformerConfig
 
 def rename_file_to_prev_version(file_path):
@@ -74,3 +84,36 @@ def get_model_config_field_names():
 def create_model_config(config):
     model_args = {k: getattr(config, k) for k in get_model_config_field_names() if hasattr(config, k)}
     return AllamoTransformerConfig(**model_args)
+
+def apply_activation_checkpointing(model: nn.Module, config: AllamoConfiguration):
+    excluded_layers = set()
+    if config.gradient_checkpointing_excluded_layers > 0:
+        total_layers = config.n_layer
+        excluded_count = min(config.gradient_checkpointing_excluded_layers, total_layers)
+        
+        if excluded_count >= total_layers:
+            logger.warning(f"All {total_layers} layers are excluded, so activation checkpointing won't be applied.")
+            return
+        else:
+            step = total_layers / excluded_count
+            excluded_layers = set([int(i * step) for i in range(excluded_count)])
+            actual_excluded = len(excluded_layers)
+            if actual_excluded < excluded_count:
+                additional_needed = excluded_count - actual_excluded
+                layer_idx = 0
+                while additional_needed > 0 and layer_idx < total_layers:
+                    if layer_idx not in excluded_layers:
+                        excluded_layers.add(layer_idx)
+                        additional_needed -= 1
+                    layer_idx += 1
+
+    for layer_id in range(len(model.layers)):
+        if layer_id not in excluded_layers:
+            model.layers[layer_id] = checkpoint_wrapper(
+                model.layers[layer_id],
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                checkpoint_fn=checkpoint,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+    logger.info(f"Activation checkpointing applied to the model (excluded {max(config.gradient_checkpointing_excluded_layers, 0)} layers)")

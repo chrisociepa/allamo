@@ -30,15 +30,44 @@ FSDP_SHARDING_STRATEGY_MAP = {
     'NO_SHARD': ShardingStrategy.NO_SHARD
 }
 
-def enable_activation_checkpointing(model):
+def enable_activation_checkpointing(model, config):
     non_reentrant_wrapper = functools.partial(
         checkpoint_wrapper,
         offload_to_cpu=False,
         checkpoint_impl=CheckpointImpl.NO_REENTRANT,
     )
-    check_fn = lambda submodule: isinstance(submodule, SelfAttentionBlock)
+    
+    if config.gradient_checkpointing_excluded_layers <= 0:
+        check_fn = lambda submodule: isinstance(submodule, SelfAttentionBlock)
+    else:
+        total_layers = config.n_layer
+        excluded_count = min(config.gradient_checkpointing_excluded_layers, total_layers)
+        
+        if excluded_count >= total_layers:
+            logger.warning(f"All {total_layers} layers are excluded, so activation checkpointing won't be applied.")
+            return
+        else:
+            step = total_layers / excluded_count
+            excluded_layers = set([int(i * step) for i in range(excluded_count)])
+            actual_excluded = len(excluded_layers)
+            if actual_excluded < excluded_count:
+                additional_needed = excluded_count - actual_excluded
+                layer_idx = 0
+                while additional_needed > 0 and layer_idx < total_layers:
+                    if layer_idx not in excluded_layers:
+                        excluded_layers.add(layer_idx)
+                        additional_needed -= 1
+                    layer_idx += 1
+            
+            def custom_check_fn(submodule):
+                if not isinstance(submodule, SelfAttentionBlock):
+                    return False
+                return submodule.layer_id not in excluded_layers
+            
+            check_fn = custom_check_fn
+    
     apply_activation_checkpointing(model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn)
-    logger.info(f"Activation checkpointing applied to the model")
+    logger.info(f"Activation checkpointing applied to the model (excluded {max(config.gradient_checkpointing_excluded_layers, 0)} layers)")
 
 def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activation_checkpointing: bool = False):
     logger.info("Configuring model with FSDP1")
@@ -68,7 +97,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
     logger.info(f"Model configured with FSDP1 and {sharding_strategy=}")
     
     if with_activation_checkpointing:
-        enable_activation_checkpointing(model)
+        enable_activation_checkpointing(model, config)
         
     logger.info(f"Model after parallelization {model=}\n")
     

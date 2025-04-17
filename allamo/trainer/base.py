@@ -47,18 +47,6 @@ class BaseTrainer:
         else:
             self.world_mesh = None
         
-        self.data_loader = self.init_dataloader()
-        
-        self.init_training()
-
-    def distributed(self):
-        raise NotImplementedError("Not implemented")
-
-    def init_torch(self):
-        self.device_type = 'cuda' if 'cuda' in self.config.device else 'cpu'
-        init_torch(self.train_ctx, self.config, distributed=self.distributed())
-
-    def init_dataloader(self):
         if self.world_mesh is None:
             self.dp_world_size = self.train_ctx.world_size
             self.dp_rank = self.train_ctx.rank
@@ -69,8 +57,16 @@ class BaseTrainer:
             self.dp_world_size = dp_mesh.size()
             self.dp_rank = dp_mesh.get_local_rank()
             self.tp_rank = tp_mesh.get_local_rank()
+        self.data_loader = AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
         
-        return AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
+        self.init_training()
+
+    def distributed(self):
+        raise NotImplementedError("Not implemented")
+
+    def init_torch(self):
+        self.device_type = 'cuda' if 'cuda' in self.config.device else 'cpu'
+        init_torch(self.train_ctx, self.config, distributed=self.distributed())
 
     def init_training(self):
         attention_version.configure(self.config)
@@ -185,12 +181,11 @@ class BaseTrainer:
             for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
                 logits, loss, _ = self.model(**batch)
-                if self.tp_rank == 0:
-                    if batch["target_weights"] is not None:
-                        loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                    validation_metrics[0] += loss.item()
-                    validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                    validation_metrics[2] += 1
+                if batch["target_weights"] is not None:
+                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
+                validation_metrics[0] += loss.item()
+                validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+                validation_metrics[2] += 1
             validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
             losses_out[split] = validation_metrics[0] / validation_metrics[2]
             accuraces[split] = validation_metrics[1] / validation_metrics[2]
@@ -294,11 +289,10 @@ class BaseTrainer:
                 loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
-                if self.tp_rank == 0:
-                    iter_metrics[0] += loss.item()
-                    iter_metrics[1] += unmasked_labels
-                    iter_metrics[2] += accuracy
-                    iter_metrics[3] += 1
+                iter_metrics[0] += loss.item()
+                iter_metrics[1] += unmasked_labels
+                iter_metrics[2] += accuracy
+                iter_metrics[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.data_loader.get_batch('train')
@@ -310,9 +304,7 @@ class BaseTrainer:
             # clip the gradient
             if self.config.grad_clip != 0.0:
                 self.scaler.unscale_(self.optimizer)
-                total_norm = self.clip_grad_norm()
-                if self.tp_rank == 0:
-                    iter_metrics[4] += total_norm
+                iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes

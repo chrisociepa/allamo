@@ -7,7 +7,6 @@ from functools import lru_cache
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
 
 from allamo.logging import logger
 from allamo.model.attentions import attention_version
@@ -30,7 +29,6 @@ class AllamoTransformerConfig:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
     sliding_window: int = None
-    gradient_checkpointing: bool = False
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
 
@@ -116,7 +114,6 @@ class FeedForward(nn.Module):
         self.up_proj = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
         self.act_fn  = get_activation(act_fn_name=config.act_fn, **config.act_fn_params)
         self.dropout = nn.Dropout(config.dropout) if config.dropout != 0 else None
-        self.gradient_checkpointing = config.gradient_checkpointing
         
     def init_weights(self, init_std: float):
         torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
@@ -126,10 +123,7 @@ class FeedForward(nn.Module):
             self.act_fn.reset_params()
 
     def forward(self, x):
-        if self.training and self.gradient_checkpointing:
-            x = checkpoint(self.mlp, x, use_reentrant=False, preserve_rng_state=False)
-        else:
-            x = self.mlp(x)
+        x = self.mlp(x)
         if self.dropout is not None:
             x = self.dropout(x)
         return x
@@ -147,7 +141,6 @@ class Attention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
         self.sliding_window = config.sliding_window if attention_version.flash_attn_supports_window_size else None
-        self.gradient_checkpointing = config.gradient_checkpointing
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
@@ -190,10 +183,7 @@ class Attention(nn.Module):
         # nh | number of heads
         B, T, C = q_x.size()
         
-        if self.training and self.gradient_checkpointing:
-            q, k, v = checkpoint(self.project_qkv, q_x, kv_x, use_reentrant=False, preserve_rng_state=False)
-        else:
-            q, k, v = self.project_qkv(q_x, kv_x)
+        q, k, v = self.project_qkv(q_x, kv_x)
         
         q = q.view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
@@ -288,7 +278,7 @@ class Attention(nn.Module):
                         
             @lru_cache
             def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
-                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device)
+                return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
             
             block_mask = None
             if attn_mask is None:
@@ -300,7 +290,7 @@ class Attention(nn.Module):
                     mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask(self.sliding_window))
                 block_mask = create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
 
-            y =  attention_version.attn_impl_module.flex_attention(q, k, v, block_mask=block_mask)
+            y =  attention_version.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
             y = y.transpose(1,2)
 
         else:
@@ -310,10 +300,7 @@ class Attention(nn.Module):
 
         # output projection
         y = y.contiguous().view(B, T, self.num_heads * self.head_size) # re-assemble all head outputs side by side
-        if self.training and self.gradient_checkpointing:
-            y = checkpoint(self.c_proj, y, use_reentrant=False, preserve_rng_state=False)
-        else:
-            y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
+        y = self.c_proj(y) # (B, T, nh * hs) -> (B, T, C)
         if self.proj_dropout is not None:
             y = self.proj_dropout(y)
         return y
@@ -350,8 +337,9 @@ class Attention(nn.Module):
 
 class SelfAttentionBlock(nn.Module):
 
-    def __init__(self, config: AllamoTransformerConfig):
+    def __init__(self, layer_id: int, config: AllamoTransformerConfig):
         super().__init__()
+        self.layer_id = layer_id
         self.attention = Attention(config)
         self.feed_forward = FeedForward(config)
         self.attention_norm = RMSNorm(config.n_embd, eps=config.norm_eps)
@@ -399,7 +387,7 @@ class AllamoTransformer(nn.Module):
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):
-            self.layers.append(SelfAttentionBlock(config))
+            self.layers.append(SelfAttentionBlock(layer_id, config))
         
         self.norm = RMSNorm(config.n_embd, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -454,7 +442,8 @@ class AllamoTransformer(nn.Module):
             
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
-            layer = SelfAttentionBlock(self.config)
+            new_layer_id = len(self.layers)
+            layer = SelfAttentionBlock(new_layer_id, self.config)
             self.layers.append(layer)
             self.config.n_layer += 1
             layer.init_weights(self.calculate_weight_init_std(self.config.n_layer))
