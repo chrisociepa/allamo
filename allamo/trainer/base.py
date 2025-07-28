@@ -359,7 +359,7 @@ class BaseTrainer:
                         "train/lr": lr,
                         "train/mtu": mtu,
                         "train/tokens_per_sec": (total_batch_size/iter_time),
-                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.dp_world_size/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
                         "train/tokens": self.train_ctx.processed_tokens,
                         "train/epoch": self.data_loader.epoch,
                         "train/total_batch_size": total_batch_size,
