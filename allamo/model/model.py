@@ -11,13 +11,15 @@ from torch.nn import functional as F
 from allamo.logging import logger
 from allamo.model.attentions import attention_version
 from allamo.model.activations import get_activation
+from allamo.model.layernorms import RMSNorm
+from allamo.model.rotary_embeddings import RotaryEmbedding
 
 @dataclass
 class AllamoTransformerConfig:
     block_size: int = 1024
     vocab_size: int = 32000
     rope_freq_base: int = 10000
-    rope_freq_scale: float = 1.0
+    rope_scaling: Dict = field(default_factory=dict)
     n_layer: int = 12
     num_kv_heads: Union[None, int] = None
     head_size: Union[None, int] = None
@@ -31,76 +33,7 @@ class AllamoTransformerConfig:
     sliding_window: int = None
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
-
-class RMSNorm(torch.nn.Module):
-    """RMSNorm normalizing function, introduced by Zhang and Sennrich (2019)"""
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
         
-    def forward(self, x):
-        input_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return self.weight * x.to(input_dtype)
-    
-    def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
-        
-class RotaryEmbedding(torch.nn.Module):
-    
-    def __init__(self, config: AllamoTransformerConfig):
-        super().__init__()
-        self.dim = config.head_size
-        self.max_seq_len = config.block_size
-        self.base = config.rope_freq_base if config.rope_freq_base is not None else 10000
-        self.scale = config.rope_freq_scale if config.rope_freq_scale is not None else 1.0
-        self._rope_init()
-        
-    # Define reset_parameters for FSDP initialization
-    def reset_parameters(self):
-        self._rope_init()
-
-    def _rope_init(self):
-        inv_freq = 1.0 / (self.scale * (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim)))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.build_rope_cache(self.max_seq_len)
-        
-    def build_rope_cache(self, max_seq_len: int = 4096) -> None:
-        t = torch.arange(max_seq_len, device=self.inv_freq.device, dtype=torch.int64).type_as(self.inv_freq)
-        freqs = torch.outer(t, self.inv_freq).float()
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
-    
-    def forward(self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        input_pos: Optional[torch.Tensor] = None,
-    ):
-        # q,k: [bs, num_attention_heads, seq_len, head_size]
-        dtype = q.dtype
-        q = q.float()
-        k = k.float()
-        if input_pos is None:
-            cos = self.cos_cached[None, None, :q.size(2), ...]
-            sin = self.sin_cached[None, None, :q.size(2), ...]
-        else:
-            cos = self.cos_cached[input_pos].unsqueeze(1)
-            sin = self.sin_cached[input_pos].unsqueeze(1)
-        
-        q_out = (q * cos) + (self.__rotate_half(q) * sin)
-        k_out = (k * cos) + (self.__rotate_half(k) * sin)
-        return q_out.to(dtype=dtype), k_out.to(dtype=dtype)
-    
-    def __rotate_half(self, x):
-        # Rotates half the hidden dims of the input
-        x1 = x[..., : x.shape[-1] // 2]
-        x2 = x[..., x.shape[-1] // 2 :]
-        return torch.cat((-x2, x1), dim=-1)
-
 class FeedForward(nn.Module):
 
     def __init__(self, config: AllamoTransformerConfig):
@@ -383,7 +316,7 @@ class AllamoTransformer(nn.Module):
         self.tok_embeddings = nn.Embedding(config.vocab_size, config.n_embd)
         self.tok_drop = nn.Dropout(config.dropout) if config.dropout != 0 else None
         
-        self.rotary_emb = RotaryEmbedding(config)
+        self.rotary_emb = RotaryEmbedding(config.head_size, config.block_size, config.rope_freq_base, config.rope_scaling)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(config.n_layer):

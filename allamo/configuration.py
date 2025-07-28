@@ -60,7 +60,7 @@ class AllamoConfiguration:
     grad_accum_schedule: bool = False
     grad_accum_max: int = 8
     rope_freq_base: int = 10000
-    rope_freq_scale: float = 1.0
+    rope_scaling: Dict = field(default_factory=dict)
     n_layer: int = 12
     n_head: int = 12
     head_size: int = 64
@@ -178,7 +178,6 @@ class AllamoConfiguration:
         parser.add_argument('--grad_accum_max_iter', type=int, help='Number of iterations to reach maximum gradient_accumulation_steps value')
         parser.add_argument('--grad_accum_schedule', action='store_true', default=None, help='Enable linear gradient_accumulation_steps scheduler')
         parser.add_argument('--rope_freq_base', type=int, help='RoPE base frequency')
-        parser.add_argument('--rope_freq_scale', type=int, help='RoPE frequency scaling factor')
         parser.add_argument('--n_layer', type=int, help='Number of layers')
         parser.add_argument('--n_head', type=int, help='Number of heads')
         parser.add_argument('--head_size', type=int, help='Often calculated as n_embd/n_head')
