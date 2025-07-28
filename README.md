@@ -150,16 +150,24 @@ The process of finetuning is similar to regular training, but we initialize from
 
 ### Extending Context Window
 
-As part of the fine-tuning process, you can easily extend the context window (block size) by modifying the `block_size`, `rope_freq_base` (default value is `10000`), and `rope_freq_scale` (default value is `1.0`) parameters. Please note that these parameters are also stored as part of a model checkpoint. Therefore, you must either modify them within the checkpoint or compel the framework to overwrite them by hardcoding the new values into `train.py` immediately after the checkpoint is loaded. For more information on Position Interpolation, you can refer to this [paper](https://arxiv.org/abs/2306.15595) or this [blog post](https://kaiokendev.github.io/til).
+As part of the training or fine-tuning process, you can easily extend the context window (block size). Set `block_size` to the desired value and provide the `rope_scaling` parameter with the appropriate scaling values. Note that model parameters are also stored as part of the model checkpoint. Therefore, you should modify them within the checkpoint.
+
+#### Linear Scaling
+
+Modify the `block_size` and `rope_freq_base` (default value is `10000`) parameters. Then provide the `rope_scaling` parameter with `rope_type` set to `linear` and `factor` set to the desired value. For more information on Position Interpolation, you can refer to this [paper](https://arxiv.org/abs/2306.15595) or this [blog post](https://kaiokendev.github.io/til).
 
 Below are some empirically derived example values for extending the context window. However, we encourage you to experiment and adjust these values to suit the specific needs of your model:
 
-| context scaling factor | rope_freq_base | rope_freq_scale |
-|------------------------|----------------|-----------------|
-| 2                      | 20000          | 0.83            |
-| 3                      | 40000          | 0.86            |
-| 4                      | 57200          | 0.75            |
-| 16                     | 26000          | 0.125           |
+| context scaling factor | rope_freq_base | factor |
+|------------------------|----------------|--------|
+| 2                      | 20000          | 0.83   |
+| 3                      | 40000          | 0.86   |
+| 4                      | 57200          | 0.75   |
+| 16                     | 26000          | 0.125  |
+
+#### YaRN
+
+Modify the `block_size` and provide the `rope_scaling` parameter with `rope_type` set to `yarn`, `factor` set to the desired value, and `original_max_position_embeddings` set to the original block_size. For more information on YaRN method, you can refer to this [paper](https://arxiv.org/abs/2309.00071).
 
 ## Import LLaMA models
 
