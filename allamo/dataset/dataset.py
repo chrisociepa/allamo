@@ -258,10 +258,17 @@ class AllamoDataset:
         if self.training_type == 'dpo':
             return self.prepare_alm_dpo_sample(sample)
         
-        result = {
-            'input_ids': torch.from_numpy(sample['input_ids']),
-            'target_ids': torch.from_numpy(sample['target_ids'])
-        }
+        if len(sample['input_ids']) == self.sample_size and "target_ids" not in sample:
+            result = {
+                'input_ids': torch.from_numpy(sample['input_ids'][:-1]),
+                'target_ids': torch.from_numpy(sample['input_ids'][1:])
+            }
+        else:
+            result = {
+                'input_ids': torch.from_numpy(sample['input_ids']),
+                'target_ids': torch.from_numpy(sample['target_ids'])
+            }
+        
         if self.weighted_loss:
             if 'target_weights' in sample:
                 result['target_weights'] = torch.from_numpy(sample['target_weights'])
