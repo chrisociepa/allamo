@@ -20,7 +20,7 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     SequenceParallel,
 )
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy
 
 def build_world_mesh(train_ctx: TrainingContext, device_type: str = "cuda"):
     dims = (train_ctx.pp, train_ctx.dp, train_ctx.tp)
@@ -109,8 +109,8 @@ def apply_fsdp(model: nn.Module, world_mesh: DeviceMesh, config: AllamoConfigura
             param_dtype=TORCH_DTYPE_MAP[config.dtype],
             reduce_dtype=torch.float32
         )
-    if config.fsdp_optimizer_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    if config.enable_cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy() # set pin_memory=False if you have insufficient CPU memory
     pp_enabled = world_mesh['pp'].size() > 1
     
     for layer_id, layer in enumerate(model.layers):

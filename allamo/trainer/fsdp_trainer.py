@@ -47,13 +47,21 @@ class FSDPTrainer(BaseTrainer):
 
         self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration
 
+        if self.config.enable_cpu_offload:
+            init_device = "cpu"
+            buffer_device = self.device_type
+        else:
+            init_device = self.device_type
+            buffer_device = None
+
         if self.checkpoint_manager.checkpoint_name is None:
             if self.world_mesh is None:
                 self.model = parallelize_model_with_fsdp1(model, self.config, self.config.gradient_checkpointing)
             else:
                 self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.config.gradient_checkpointing)
-            self.model.to_empty(device=self.device_type)
-            self.model.init_model_weights()
+            self.model.to_empty(device=init_device)
+            with torch.no_grad():
+                self.model.init_model_weights(buffer_device=buffer_device)
             logger.info("Initialized a new model from scratch")
             
             self.optimizer = configure_optimizer(self.model, self.config, self.device_type)            
@@ -62,9 +70,10 @@ class FSDPTrainer(BaseTrainer):
             if self.config.distributed_checkpoint:
                 self.model = parallelize_model_with_fsdp2(model, self.world_mesh, self.config, self.config.gradient_checkpointing)
                 logger.info("model.to_empty")
-                self.model.to_empty(device=self.device_type)
+                self.model.to_empty(device=init_device)
                 logger.info("model.init_model_weights")
-                self.model.init_model_weights()
+                with torch.no_grad():
+                    self.model.init_model_weights(buffer_device=buffer_device)
                 logger.info("checkpoint_manager.load_distributed_model_checkpoint")
                 self.checkpoint_manager.load_distributed_model_checkpoint(self.model)
                 
@@ -74,8 +83,9 @@ class FSDPTrainer(BaseTrainer):
                 self.checkpoint_manager.load_distributed_optimizer_checkpoint(self.model, self.optimizer)
                 logger.info("ready")
             else:
-                model.to_empty(device=self.device_type)
-                model.init_model_weights()
+                model.to_empty(device=init_device)
+                with torch.no_grad():
+                    model.init_model_weights(buffer_device=buffer_device)
                 self.checkpoint_manager.load_regular_model_checkpoint(model)
                 
                 self.model = parallelize_model_with_fsdp1(model, self.config, self.config.gradient_checkpointing)

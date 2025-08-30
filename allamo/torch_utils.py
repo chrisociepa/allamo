@@ -57,7 +57,10 @@ def configure_torch(config: AllamoConfiguration, rank: int = 0):
 
 def init_torch(train_ctx: TrainingContext, config: AllamoConfiguration, distributed=True):
     if distributed:
-        dist.init_process_group(backend=config.backend)
+        backend = config.backend if config.backend else "nccl"
+        if config.enable_cpu_offload and 'gloo' not in backend:
+            backend = f"{config.device}:{backend},cpu:gloo"
+        dist.init_process_group(backend=backend)
         if 'cuda' in config.device:
             config.device = f'cuda:{train_ctx.local_rank}'
             torch.cuda.set_device(config.device)

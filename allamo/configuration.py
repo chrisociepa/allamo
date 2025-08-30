@@ -97,6 +97,7 @@ class AllamoConfiguration:
     weighted_loss_method: str = 'allamo'
     adaptive_learning_rate: bool = False
     fsdp_sharding_strategy: str = 'FULL_SHARD'
+    enable_cpu_offload: bool = False
     epoch_completion_hook_program: str = None
     regular_checkpoint_hook_program: str = None
     training_type: str = 'pre'
@@ -212,6 +213,7 @@ class AllamoConfiguration:
         parser.add_argument('--weighted_loss_method', type=str, choices=['allamo', 'openchat'], help='How weighted loss is calculated')
         parser.add_argument('--adaptive_learning_rate', action='store_true', default=None, help='Whether to use adaptive learning rate')
         parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
+        parser.add_argument('--enable_cpu_offload', action='store_true', default=None, help='Whether to enable CPU offloading of parameters, gradients, and optimizer states in FSDP')
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
         parser.add_argument('--training_type', type=str, choices=['pre', 'sft', 'dpo'], help='Specifies the type of training: pre (pre-training), sft (supervised fine-tuning), or dpo (direct preference optimization)')

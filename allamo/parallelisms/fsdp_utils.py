@@ -4,6 +4,7 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
     BackwardPrefetch,
+    CPUOffload,
 )
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
@@ -79,6 +80,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
         },
     )
     sharding_strategy = FSDP_SHARDING_STRATEGY_MAP[config.fsdp_sharding_strategy]
+    cpu_offload_policy = CPUOffload(offload_params=True) if config.enable_cpu_offload else None
     fsdp_config = dict(
         auto_wrap_policy=auto_wrap_policy,
         sharding_strategy=sharding_strategy,
@@ -91,6 +93,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
         limit_all_gathers=True,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,  # will use slightly more memory vs. no prefetch
         use_orig_params=True, # required to use torch.compile()
+        cpu_offload=cpu_offload_policy,
     )
     
     model = FSDP(model, **fsdp_config)

@@ -328,8 +328,9 @@ class AllamoTransformer(nn.Module):
         self.log_estimated_size()
         self.init_model_weights()
         
-    def init_model_weights(self):
-        with torch.device(self.rotary_emb.inv_freq.device):
+    def init_model_weights(self, buffer_device: torch.device | None = None):
+        buffer_device = buffer_device or self.rotary_emb.inv_freq.device
+        with torch.device(buffer_device):
             self.rotary_emb.reset_parameters()
         
         if self.tok_embeddings is not None:
