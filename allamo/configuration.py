@@ -76,9 +76,13 @@ class AllamoConfiguration:
     learning_rate: float = 6e-4
     num_train_epochs: int = None
     max_iters: int = 600000
+    optimizer: str = 'adamw'
     weight_decay: float = 1e-1
     beta1: float = 0.9
     beta2: float = 0.95
+    beta3: float = 0.999
+    alpha: float = 5.0
+    T_alpha_beta3: float = None
     grad_clip: float = 1.0 
     decay_lr: bool = False
     warmup_iters: int = 2000
@@ -192,9 +196,13 @@ class AllamoConfiguration:
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
         parser.add_argument('--num_train_epochs', type=int, help='Total number of training epochs to perform')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
-        parser.add_argument('--weight_decay', type=float, help='Max learning rate')
+        parser.add_argument('--optimizer', type=str, choices=['adamw', 'ademamix'], help='Optimizer to use')
+        parser.add_argument('--weight_decay', type=float, help='Weight decay (L2 penalty)')
         parser.add_argument('--beta1', type=float, help='Adamw optimizer Beta1 param')
         parser.add_argument('--beta2', type=float, help='Adamw optimizer Beta2 param')
+        parser.add_argument('--beta3', type=float, help='AdEMAMix optimizer Beta3 param')
+        parser.add_argument('--alpha', type=float, help='AdEMAMix optimizer Alpha param')
+        parser.add_argument('--T_alpha_beta3', type=float, help='AdEMAMix optimizer time constant for alpha and beta3 scheduling (optional, default to None)')
         parser.add_argument('--grad_clip', type=float, help='Clip gradients at this value. Disabled when 0.')
         parser.add_argument('--decay_lr', action='store_true', default=None, help='Whether to decay the learning rate')
         parser.add_argument('--warmup_iters', type=int, help='Learning rate is calculated linearly for warmup_iters steps')
