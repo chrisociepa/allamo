@@ -96,8 +96,8 @@ class DPOTrainer(FSDPTrainer):
                 policy_accuracies = metrics[6].item() / cnt
                 policy_chosen_logps = metrics[7].item() / cnt
                 policy_rejected_logps = metrics[8].item() / cnt
-                if self.config.wandb_log:
-                    wandb.log({
+                if self.config.log_metrics:
+                    self.metrics_logger.log_metrics({
                         "iter": self.train_ctx.iter_num,
                         "dpo/rewards/accuracies": reward_accuracies,
                         "dpo/rewards/margins": reward_margins,

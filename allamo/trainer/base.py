@@ -13,6 +13,7 @@ from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
 from allamo.model.model import AllamoTransformer
 from allamo.dataset.data_loader import AllamoDataLoader
+from allamo.metrics.metrics_logger import MetricsLogger
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
 from allamo.optimizer.optimizer_utils import calculate_learning_rate
@@ -60,6 +61,7 @@ class BaseTrainer:
         self.data_loader = AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
         
         self.init_training()
+        self.init_metrics_logger()
 
     def distributed(self):
         raise NotImplementedError("Not implemented")
@@ -74,6 +76,9 @@ class BaseTrainer:
         self.checkpoint_manager.init_checkpoint()
         self.data_loader.load_datasets()
         self.model_config = create_model_config(self.config)
+    
+    def init_metrics_logger(self):
+        self.metrics_logger = MetricsLogger(self.config, self.train_ctx)
 
     def freeze_model_params(self, model: AllamoTransformer):
         if self.config.freeze_embeddings:
@@ -107,11 +112,6 @@ class BaseTrainer:
             logger.info(f"Cosing decay learning rate enabled. Currect learning rate: {lr}")
         else:
             logger.info(f"Using constant learning rate: {self.config.learning_rate}")
-    
-    def init_wandb(self):
-        if self.config.wandb_log and self.train_ctx.master_process:
-            wandb_run_name = self.config.wandb_run_name + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            wandb.init(project=self.config.wandb_project, name=wandb_run_name, config=self.config)
     
     def trigger_gc(self):
         gc.collect()
@@ -218,8 +218,8 @@ class BaseTrainer:
                 f"val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} "
                 f"(best loss={self.train_ctx.best_val_loss:.4f}), tokens {self.train_ctx.processed_tokens:,}"
             )
-            if self.config.wandb_log:
-                wandb.log({
+            if self.config.log_metrics:
+                self.metrics_logger.log_metrics({
                     "iter": self.train_ctx.iter_num,
                     "eval/time": eval_time*1000,
                     "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
@@ -349,7 +349,8 @@ class BaseTrainer:
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
                     f"ETA: {self.calculate_eta()}"
                 )
-                if self.config.wandb_log:
+
+                if self.config.log_metrics:
                     metrics = {
                         "iter": self.train_ctx.iter_num,
                         "train/loss": lossf,
@@ -369,7 +370,7 @@ class BaseTrainer:
                         metrics['train/mfu'] = mfu
                     if self.config.dataset_seq_train:
                         metrics['train/ds_offset'] = self.data_loader.dataset_offset
-                    wandb.log(metrics)
+                    self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             
         training_time = format_seconds_as_time((datetime.datetime.now() - self.start_timestamp).total_seconds())
