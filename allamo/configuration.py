@@ -35,9 +35,6 @@ class AllamoConfiguration:
     vocab_size: int = 31980
     tiktoken_tokenizer_name: str = None
     hf_tokenizer_path: str = None
-    wandb_log: bool = False
-    wandb_project: str = 'allamo'
-    wandb_run_name: str = 'allamo-run-' + str(time.time())
     gradient_accumulation_steps: int = 8
     batch_size: int = 64
     block_size: int = 1024
@@ -103,6 +100,15 @@ class AllamoConfiguration:
     training_type: str = 'pre'
     attention_implementation: str = 'sdpa'
     tensor_parallel_degree: int = 1
+
+    # metrics logging
+    log_metrics: bool = False
+    metrics_logger: str = None
+    metrics_logger_project: str = 'allamo'
+    metrics_logger_run_name: str = 'allamo-run-' + str(time.time())
+    metrics_logger_run_id: str = None
+    metrics_logger_hardware_monitoring: bool = False
+    metrics_logger_tags: List[str] = None
     
     # gradient checkpointing
     gradient_checkpointing: bool = False
@@ -157,9 +163,6 @@ class AllamoConfiguration:
         parser.add_argument('--vocab_size', type=int, help='Vacabulary size. Might be overwritten by checkpoint')
         parser.add_argument('--tiktoken_tokenizer_name', type=str, help='Tiktoken tokenizer name. Might be overwritten by checkpoint')
         parser.add_argument('--hf_tokenizer_path', type=str, help='HuggingFace tokenizer path. Might be overwritten by checkpoint')
-        parser.add_argument('--wandb_log', action='store_true', default=None, help='Enable logging to wandb')
-        parser.add_argument('--wandb_project', type=str, help='Wandb project name')
-        parser.add_argument('--wandb_run_name', type=str, help='Wandb run name')
         parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')
@@ -220,6 +223,14 @@ class AllamoConfiguration:
         parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
         parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
+
+        parser.add_argument('--log_metrics', action='store_true', default=None, help='Enable logging metrics')
+        parser.add_argument('--metrics_logger', type=str, choices=['wandb', 'neptune'], help='Metrics logger type')
+        parser.add_argument('--metrics_logger_project', type=str, help='Metrics logger project name')
+        parser.add_argument('--metrics_logger_run_name', type=str, help='Metrics logger run name')
+        parser.add_argument('--metrics_logger_run_id', type=str, help='Metrics logger run id')
+        parser.add_argument('--metrics_logger_hardware_monitoring', action='store_true', default=None, help='Enable hardware monitoring for Neptune')
+        parser.add_argument('--metrics_logger_tags', type=str, nargs='*', help='Metrics logger tags')
 
         parser.add_argument('--gradient_checkpointing', action='store_true', default=None, help='Enable gradient checkpointing')
         parser.add_argument('--gradient_checkpointing_excluded_layers', type=int, help='Specifies how many layers will not use gradient checkpointing')

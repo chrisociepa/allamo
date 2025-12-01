@@ -252,6 +252,9 @@ class AllamoDataset:
         did not have padding and samples are of length up to block_size.
         """
         if isinstance(sample, np.ndarray):
+            # Use only for testing
+            # if len(sample) > self.sample_size:
+            #    sample = sample[:self.sample_size]
             assert len(sample) == self.sample_size, "Invalid sample size"
             return torch.from_numpy(sample)
 

@@ -1,10 +1,7 @@
-import os
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-import wandb
 from allamo.logging import logger
-from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.trainer.fsdp_trainer import FSDPTrainer
 
@@ -96,9 +93,8 @@ class DPOTrainer(FSDPTrainer):
                 policy_accuracies = metrics[6].item() / cnt
                 policy_chosen_logps = metrics[7].item() / cnt
                 policy_rejected_logps = metrics[8].item() / cnt
-                if self.config.wandb_log:
-                    wandb.log({
-                        "iter": self.train_ctx.iter_num,
+                if self.config.log_metrics:
+                    self.metrics_logger.log_metrics({
                         "dpo/rewards/accuracies": reward_accuracies,
                         "dpo/rewards/margins": reward_margins,
                         "dpo/rewards/chosen": chosen_rewards,

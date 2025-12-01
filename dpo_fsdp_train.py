@@ -5,6 +5,5 @@ if __name__ == '__main__':
     config = AllamoConfiguration()
     config.training_type = 'dpo'
     trainer = DPOTrainer(config)
-    trainer.init_wandb()
     trainer.train()
     trainer.close()
