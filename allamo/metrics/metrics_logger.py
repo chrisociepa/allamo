@@ -75,6 +75,7 @@ class MetricsLogger:
     def log_metrics(self, metrics: Dict):
         if self.run is not None:
             if self.config.metrics_logger == 'wandb':
+                metrics['iter'] = self.train_ctx.iter_num
                 self.run.log(metrics)
             
             if self.config.metrics_logger == 'neptune':

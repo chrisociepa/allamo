@@ -4,7 +4,6 @@ import time
 import math
 import datetime
 import subprocess
-import wandb
 
 import torch
 import torch.distributed as dist
@@ -220,7 +219,6 @@ class BaseTrainer:
             )
             if self.config.log_metrics:
                 self.metrics_logger.log_metrics({
-                    "iter": self.train_ctx.iter_num,
                     "eval/time": eval_time*1000,
                     "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
                     "eval/train_loss": train_loss,
@@ -352,7 +350,6 @@ class BaseTrainer:
 
                 if self.config.log_metrics:
                     metrics = {
-                        "iter": self.train_ctx.iter_num,
                         "train/loss": lossf,
                         "train/acc": accuracy,
                         "train/ppl": ppl,
