@@ -21,7 +21,28 @@ class MetricsLogger:
 
             if self.config.metrics_logger == 'wandb' and self.train_ctx.master_process:
                 import wandb
-                self.run = wandb.init(project=self.config.metrics_logger_project, name=run_name, config=self.config)
+                settings = wandb.Settings(
+                    project=self.config.metrics_logger_project
+                )
+
+                if self.config.metrics_logger_run_id:
+                    logger.info(f"Resuming wandb run with id: {self.config.metrics_logger_run_id}")
+                    if "?_step=" in self.config.metrics_logger_run_id:
+                        settings.resume_from = self.config.metrics_logger_run_id
+                        settings.run_id = self.config.metrics_logger_run_id.split("?_step=")[0]
+                    else:
+                        settings.run_id = self.config.metrics_logger_run_id
+                        settings.resume = "allow"
+
+                self.run = wandb.init(
+                    config=self.config,
+                    name=run_name,
+                    settings=settings,
+                    job_type='training'
+                )
+
+                if self.config.metrics_logger_tags:
+                    self.run.tags = self.config.metrics_logger_tags
             
             if self.config.metrics_logger == 'neptune':
                 from neptune_scale import NeptuneLoggingHandler, Run
