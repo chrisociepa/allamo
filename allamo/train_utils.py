@@ -12,7 +12,7 @@ from torch.utils.checkpoint import checkpoint
 
 from allamo.configuration import AllamoConfiguration
 from allamo.logging import logger
-from allamo.model.model import AllamoTransformerConfig
+from allamo.model.modeling_utils import ModelSpec
 
 def rename_file_to_prev_version(file_path):
     if os.path.exists(file_path):
@@ -78,12 +78,12 @@ def model_checkpoint_files_exist(ckpt_file_name, ckpt_dir):
     return os.path.exists(get_config_checkpoint_path(ckpt_file_name, ckpt_dir)) \
             and os.path.exists(get_model_checkpoint_path(ckpt_file_name, ckpt_dir))
 
-def get_model_config_field_names():
-    return [f.name for f in dataclasses.fields(AllamoTransformerConfig)]
+def get_model_config_field_names(model_spec: ModelSpec):
+    return [f.name for f in dataclasses.fields(model_spec.model_config_cls)]
 
-def create_model_config(config):
-    model_args = {k: getattr(config, k) for k in get_model_config_field_names() if hasattr(config, k)}
-    return AllamoTransformerConfig(**model_args)
+def create_model_config(config: AllamoConfiguration, model_spec: ModelSpec):
+    model_args = {k: getattr(config, k) for k in get_model_config_field_names(model_spec) if hasattr(config, k)}
+    return model_spec.model_config_cls(**model_args)
 
 def apply_activation_checkpointing(model: nn.Module, config: AllamoConfiguration):
     excluded_layers = set()

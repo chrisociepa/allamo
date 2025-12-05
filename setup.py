@@ -10,7 +10,6 @@ setup(name='allamo',
             'torch',
             'numpy',
             'joblib',
-            'wandb',
-            'neptune-scale'
+            'wandb'
       ],
 )

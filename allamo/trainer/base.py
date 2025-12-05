@@ -10,7 +10,7 @@ import torch.distributed as dist
 
 from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
-from allamo.model.model import AllamoTransformer
+from allamo.model.modeling_utils import get_model_spec, BaseModel
 from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.metrics.metrics_logger import MetricsLogger
 from allamo.logging import configure_logger, logger
@@ -71,29 +71,22 @@ class BaseTrainer:
 
     def init_training(self):
         attention_version.configure(self.config)
-        self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.data_loader)
+        self.model_spec = get_model_spec(self.config.model_type)
+        self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.data_loader, self.model_spec)
         self.checkpoint_manager.init_checkpoint()
         self.data_loader.load_datasets()
-        self.model_config = create_model_config(self.config)
+        self.model_config = create_model_config(self.config, self.model_spec)
     
     def init_metrics_logger(self):
         self.metrics_logger = MetricsLogger(self.config, self.train_ctx)
 
-    def freeze_model_params(self, model: AllamoTransformer):
-        if self.config.freeze_embeddings:
-            model.freeze_params(model.tok_embeddings)
-            logger.info("Embeddings frozen")
-        if self.config.freeze_lm_head:
-            model.freeze_params(model.norm)
-            model.freeze_params(model.lm_head)
-            logger.info("LM head frozen")
-        if self.config.freeze_layers:
-            for layer_id in range(self.model_config.n_layer):
-                if layer_id not in self.config.keep_layers_trainable:
-                    model.freeze_params(model.layers[layer_id])
-                    logger.info(f"Layer {layer_id} frozen")
-                else:
-                    logger.info(f"Layer {layer_id} kept trainable")
+    def freeze_model_params(self, model: BaseModel):
+        model.freeze_model_params(
+            self.config.freeze_embeddings,
+            self.config.freeze_lm_head,
+            self.config.freeze_layers,
+            self.config.keep_layers_trainable
+        )
             
     def init_gradient_accumulation_scheduler(self):
         if self.config.grad_accum_schedule: 

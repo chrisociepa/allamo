@@ -10,7 +10,6 @@ from torch.distributed.fsdp import (
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
-from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.parallelisms.fsdp_utils import parallelize_model_with_fsdp1
@@ -42,7 +41,7 @@ class FSDPTrainer(BaseTrainer):
         super().init_training()
             
         with torch.device('meta'):
-            model = AllamoTransformer(self.model_config)
+            model = self.model_spec.model_cls(self.model_config)
         self.model_num_params = model.model_num_params
 
         self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration

@@ -101,6 +101,9 @@ class AllamoConfiguration:
     attention_implementation: str = 'sdpa'
     tensor_parallel_degree: int = 1
 
+    # model specification
+    model_type: str = 'bielik2'
+
     # metrics logging
     log_metrics: bool = False
     metrics_logger: str = None
@@ -223,6 +226,8 @@ class AllamoConfiguration:
         parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
         parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
+
+        parser.add_argument('--model_type', type=str, help='Model type to use')
 
         parser.add_argument('--log_metrics', action='store_true', default=None, help='Enable logging metrics')
         parser.add_argument('--metrics_logger', type=str, choices=['wandb', 'neptune'], help='Metrics logger type')

@@ -3,14 +3,14 @@ import math
 import torch
 
 from allamo.configuration import AllamoConfiguration
-from allamo.model.model import AllamoTransformer
+from allamo.model.modeling_utils import BaseModel
 from allamo.training_context import TrainingContext
 from allamo.logging import logger
 
 def is_weight_decay_forbidden(param_name):
     return param_name.endswith('.bias') or param_name.endswith('_norm.weight') or param_name == 'norm.weight'
 
-def configure_optimizer(model: AllamoTransformer, config: AllamoConfiguration, device_type: str):
+def configure_optimizer(model: BaseModel, config: AllamoConfiguration, device_type: str):
     # start with all of the candidate parameters
     param_dict = {param_name: p for param_name, p in model.named_parameters()}
     # filter out those that do not require grad

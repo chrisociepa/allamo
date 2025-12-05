@@ -8,7 +8,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from allamo.trainer.base import BaseTrainer
 from allamo.logging import logger
-from allamo.model.model import AllamoTransformer
 from allamo.configuration import AllamoConfiguration
 from allamo.optimizer.optimizer_utils import configure_optimizer
 from allamo.torch_utils import TORCH_DTYPE_MAP
@@ -40,7 +39,7 @@ class SimpleTrainer(BaseTrainer):
     def init_training(self):
         super().init_training()
         
-        model = AllamoTransformer(self.model_config)
+        model = self.model_spec.model_cls(self.model_config)
         self.model_num_params = model.model_num_params
 
         self.freeze_model_params(model) # Optionally freezes model parameters depending on the configuration
