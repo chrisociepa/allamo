@@ -24,9 +24,6 @@ from allamo.train_utils import (
 
 class FSDPTrainer(BaseTrainer):
 
-    def __init__(self, config: AllamoConfiguration):
-        super().__init__(config)
-        
     def distributed(self):
         return True
                     
@@ -159,24 +156,6 @@ class FSDPTrainer(BaseTrainer):
             return self.model.clip_grad_norm_(self.config.grad_clip).item()
         else:
             return super().clip_grad_norm()
-            
-    def forward(self, batch, last_micro_step):
-        logits, loss, _ = self.model(**batch)
-        if self.gradient_accumulation_steps > 1:
-            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
-        
-        if batch["target_weights"] is not None:
-            if self.config.weighted_loss_method == 'openchat':
-                target_weights = batch["target_weights"].sum()
-                # sum loss weights over all processes
-                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
-                loss = (self.dp_world_size / target_weights) * loss
-            else:
-                loss = loss / torch.sum(batch["target_weights"] > 0).item()
-        
-        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
-        return loss, unmasked_labels, accuracy
             
     def close(self):
         dist.barrier()

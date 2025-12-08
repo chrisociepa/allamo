@@ -135,13 +135,6 @@ class AllamoConfiguration:
     dpo_penalty_lambda: float = 50.0
     reference_checkpoint_name: str = 'ref_ckpt'
     
-    # inference params
-    prompt: str = "\n" 
-    num_samples: int = 1 
-    max_new_tokens: int = 50 
-    temperature: float = 0.8 
-    top_k: int = 100
-    
     def __post_init__(self):
         if self.load_configuration:
             self.load_values()
@@ -207,7 +200,7 @@ class AllamoConfiguration:
         parser.add_argument('--compile_mode', type=str, choices=['default', 'reduce-overhead', 'max-autotune'], help='Specifies what the PyTorch compiler should be optimizing while compiling')
         parser.add_argument('--mfu_flops_peak', type=float, help="Specifies the MFU's peak performance in FLOPs. A default value of -1 disables MFU estimation")
         parser.add_argument('--attention_implementation', type=str, choices=['eager', 'sdpa', 'fa2', 'fa3', 'xformers', 'flex'], help='Specifies attention implementation')
-        parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD'], help='FSDP sharding strategy')
+        parser.add_argument('--fsdp_sharding_strategy', type=str, choices=['FULL_SHARD', 'HYBRID_SHARD', '_HYBRID_SHARD_ZERO2', 'SHARD_GRAD_OP', 'NO_SHARD', 'None'], help='FSDP sharding strategy. None disables FSDP')
         parser.add_argument('--tensor_parallel_degree', type=int, help='Specifies the degree of tensor parallelism. Activates TP when it is greater than 1')
         parser.add_argument('--enable_cpu_offload', action='store_true', default=None, help='Whether to enable CPU offloading of parameters, gradients, and optimizer states in FSDP')
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
@@ -301,4 +294,3 @@ class AllamoConfiguration:
                     logger.info(f"The following config properties were overridden: {modified}")
             except Exception as err:
                 logger.warning(f"Unable to load override config. Error: {err}")
-        

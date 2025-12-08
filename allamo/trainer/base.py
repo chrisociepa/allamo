@@ -7,6 +7,7 @@ import subprocess
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
@@ -24,19 +25,15 @@ from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
     create_model_config,
+    get_log_prob,
 )
 from allamo.training_context import TrainingContext
 
 class BaseTrainer:
     
-    def __init__(self, config: AllamoConfiguration):
-        self.train_ctx = TrainingContext(
-            tp = config.tensor_parallel_degree,
-        )
-        if self.train_ctx.master_process:
-            configure_logger(config, True)
-        
+    def __init__(self, config: AllamoConfiguration, train_ctx: TrainingContext):       
         self.config = config
+        self.train_ctx = train_ctx
         self.init_torch()
         logger.info(f"Torch initialized for run {self.train_ctx.run_uuid}")
         
@@ -110,7 +107,7 @@ class BaseTrainer:
         torch.cuda.empty_cache()
     
     def should_evaluate(self):
-        return self.config.eval_interval > 0 and self.train_ctx.iter_num % self.config.eval_interval == 0
+        return self.config.eval_interval > 0 and self.train_ctx.iter_num % self.config.eval_interval == 0 and self.config.training_type != "dpo"
 
     def should_save_last_checkpoint(self):
         return self.config.checkpoint_interval > 0 and self.train_ctx.iter_num > self.start_iter and self.train_ctx.iter_num % self.config.checkpoint_interval == 0
@@ -161,6 +158,9 @@ class BaseTrainer:
         if self.distributed():
             dist.all_reduce(x, op=op)
         return x
+
+    def compute_logits_and_loss(self, batch, last_micro_step):
+        return self.model(**batch)
     
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -172,7 +172,7 @@ class BaseTrainer:
             validation_metrics = torch.zeros(3).to(self.config.device)
             for _ in range(self.config.eval_iters):
                 batch = self.data_loader.get_batch(split, True)
-                logits, loss, _ = self.model(**batch)
+                logits, loss, _ = self.compute_logits_and_loss(batch, False)
                 if batch["target_weights"] is not None:
                     loss = loss / torch.sum(batch["target_weights"] > 0).item()
                 validation_metrics[0] += loss.item()
@@ -227,6 +227,126 @@ class BaseTrainer:
                     "eval/best_val_loss": self.train_ctx.best_val_loss
                 })
         self.trigger_gc()
+
+    def evaluate_pretraining_loss(self, batch, last_micro_step):
+        logits, loss, _ = self.compute_logits_and_loss(batch, last_micro_step)
+        if self.gradient_accumulation_steps > 1:
+            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+        
+        unmasked_labels = self.config.block_size # we assume no padding in pretraining
+        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / self.config.block_size
+        return loss, unmasked_labels, accuracy
+
+    def evaluate_sft_loss(self, batch, last_micro_step):
+        logits, loss, _ = self.compute_logits_and_loss(batch, last_micro_step)
+        if self.gradient_accumulation_steps > 1:
+            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+        
+        if batch["target_weights"] is not None:
+            if self.config.weighted_loss_method == 'openchat':
+                target_weights = batch["target_weights"].sum()
+                # sum loss weights over all processes
+                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
+                loss = (self.dp_world_size / target_weights) * loss
+            else:
+                loss = loss / torch.sum(batch["target_weights"] > 0).item()
+        
+        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
+        return loss, unmasked_labels, accuracy
+
+    def evaluate_dpo_loss(self, batch, last_micro_step):
+        policy_chosen_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_micro_step)
+        policy_rejected_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_micro_step)
+        policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
+        policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
+        
+        assert "reference_chosen_logps" in batch and batch["reference_chosen_logps"] is not None
+        reference_chosen_logps = batch["reference_chosen_logps"]
+        reference_rejected_logps = batch["reference_rejected_logps"]
+        
+        # calculate DPO loss
+        chosen_rewards = self.config.dpo_chosen_beta * (policy_chosen_logps - reference_chosen_logps)
+        rejected_rewards = self.config.dpo_rejected_beta * (policy_rejected_logps - reference_rejected_logps)
+        reward_penalty = self.config.dpo_penalty_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
+        dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - reward_penalty).mean()
+        
+        if self.gradient_accumulation_steps > 1:
+            dpo_loss = dpo_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+            
+        chosen_unmasked_labels = torch.sum(batch["chosen_target_ids"].view(-1) != self.config.ignore_index).item()
+        rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
+        unmasked_labels = chosen_unmasked_labels + rejected_unmasked_labels
+        
+        accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels
+        
+        if last_micro_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
+            chosen_rewards = chosen_rewards.detach() 
+            rejected_rewards = rejected_rewards.detach()
+            reward_accuracies = (chosen_rewards > rejected_rewards).float().mean()
+            reward_margins = (chosen_rewards - rejected_rewards).mean()
+            chosen_rewards = chosen_rewards.mean()
+            rejected_rewards = rejected_rewards.mean()
+            reward_penalty = reward_penalty.mean()
+
+            policy_chosen_logps = policy_chosen_logps.detach()
+            policy_rejected_logps = policy_rejected_logps.detach()
+            policy_accuracies = (policy_chosen_logps > policy_rejected_logps).float().mean()
+            policy_chosen_logps = policy_chosen_logps.mean()
+            policy_rejected_logps = policy_rejected_logps.mean()
+            
+            metrics = torch.tensor([
+                1,
+                reward_accuracies.item(),
+                reward_margins.item(),
+                chosen_rewards.item(),
+                rejected_rewards.item(),
+                reward_penalty.item(),
+                policy_accuracies.item(),
+                policy_chosen_logps.item(),
+                policy_rejected_logps.item()
+            ]).to(self.config.device)
+            metrics = self.dist_all_reduce(metrics, op=dist.ReduceOp.SUM)
+            
+            if self.train_ctx.master_process:
+                cnt = metrics[0].item()
+                reward_accuracies = metrics[1].item() / cnt
+                reward_margins = metrics[2].item() / cnt
+                chosen_rewards = metrics[3].item() / cnt
+                rejected_rewards = metrics[4].item() / cnt
+                reward_penalty = metrics[5].item() / cnt
+                policy_accuracies = metrics[6].item() / cnt
+                policy_chosen_logps = metrics[7].item() / cnt
+                policy_rejected_logps = metrics[8].item() / cnt
+                if self.config.log_metrics:
+                    self.metrics_logger.log_metrics({
+                        "dpo/rewards/accuracies": reward_accuracies,
+                        "dpo/rewards/margins": reward_margins,
+                        "dpo/rewards/chosen": chosen_rewards,
+                        "dpo/rewards/rejected": rejected_rewards,
+                        "dpo/rewards/penalty": reward_penalty,
+                        "dpo/logps/chosen": policy_chosen_logps,
+                        "dpo/logps/rejected": policy_rejected_logps,
+                        "dpo/logps/accuracies": policy_accuracies
+                    })
+                else:
+                    logger.info(
+                        f"iter {self.train_ctx.iter_num:,}: "
+                        f"reward_acc={reward_accuracies:.4f} reward_marg={reward_margins:.4f} "
+                        f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
+                        f"reward_penalty={reward_penalty:.4f}"
+                    )
+        return dpo_loss, unmasked_labels, accuracy
+        
+    def evaluate_loss(self, batch, last_micro_step):
+        if self.config.training_type == 'pre':
+            return self.evaluate_pretraining_loss(batch, last_micro_step)
+        elif self.config.training_type == 'sft':
+            return self.evaluate_sft_loss(batch, last_micro_step)
+        elif self.config.training_type == 'dpo':
+            return self.evaluate_dpo_loss(batch, last_micro_step)
+        else:
+            raise ValueError(f"Unknown training type: {self.config.training_type}")
     
     def train(self):
         logger.info(f"Starting training (run id: {self.train_ctx.run_uuid}, world size: {self.train_ctx.world_size}) with configuration:\n{self.config}")
@@ -277,7 +397,7 @@ class BaseTrainer:
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             for micro_step in range(self.gradient_accumulation_steps):
-                loss, unmasked_labels, accuracy = self.forward(batch, (micro_step == self.gradient_accumulation_steps - 1))
+                loss, unmasked_labels, accuracy = self.evaluate_loss(batch, (micro_step == self.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
                 iter_metrics[0] += loss.item()

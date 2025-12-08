@@ -3,7 +3,8 @@ import hashlib
 import os
 import shutil
 
-import torch.nn as nn
+import torch
+import torch.nn.functional as F
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
@@ -85,7 +86,7 @@ def create_model_config(config: AllamoConfiguration, model_spec: ModelSpec):
     model_args = {k: getattr(config, k) for k in get_model_config_field_names(model_spec) if hasattr(config, k)}
     return model_spec.model_config_cls(**model_args)
 
-def apply_activation_checkpointing(model: nn.Module, config: AllamoConfiguration):
+def apply_activation_checkpointing(model: torch.nn.Module, config: AllamoConfiguration):
     excluded_layers = set()
     if config.gradient_checkpointing_excluded_layers > 0:
         total_layers = config.n_layer
@@ -117,3 +118,20 @@ def apply_activation_checkpointing(model: nn.Module, config: AllamoConfiguration
                 preserve_rng_state=False,
             )
     logger.info(f"Activation checkpointing applied to the model (excluded {max(config.gradient_checkpointing_excluded_layers, 0)} layers)")
+
+def get_log_prob(logits, target_ids, ignore_index):
+    """
+    Args:
+        logits: unnormalized logits [B, T, V]
+        target_ids: masked labels [B, T]
+        ignore_index: masked label id
+    Returns:
+        aggregated log probabilities [B, ]
+    """
+    labels = target_ids.clone()
+    loss_mask = (labels != ignore_index)
+    labels[labels == ignore_index] = 0 # will be ignored for the loss calc
+    
+    log_probs = F.log_softmax(logits, dim=-1)
+    per_token_logps = torch.gather(log_probs, -1, labels.unsqueeze(-1)).squeeze(-1)
+    return (per_token_logps * loss_mask).sum(-1)

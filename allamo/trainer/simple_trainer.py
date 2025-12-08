@@ -19,12 +19,6 @@ from allamo.train_utils import (
 )
 
 class SimpleTrainer(BaseTrainer):
-
-    def __init__(self, config: AllamoConfiguration):
-        super().__init__(config)
-        if config.distributed_checkpoint:
-            config.distributed_checkpoint = False
-            logger.warning("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
         
     def distributed(self):
         return self.train_ctx.world_size > 1
@@ -37,6 +31,9 @@ class SimpleTrainer(BaseTrainer):
             torch.set_default_dtype(torch.bfloat16)
         
     def init_training(self):
+        if self.config.distributed_checkpoint:
+            self.config.distributed_checkpoint = False
+            logger.warning("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
         super().init_training()
         
         model = self.model_spec.model_cls(self.model_config)
@@ -109,8 +106,8 @@ class SimpleTrainer(BaseTrainer):
 
     def should_evaluate(self):
         return super().should_evaluate() and self.train_ctx.master_process
-    
-    def forward(self, batch, last_micro_step):
+
+    def compute_logits_and_loss(self, batch, last_micro_step):
         if self.distributed():
             # in DDP training we only need to sync gradients at the last micro step.
             # the official way to do this is with model.no_sync() context manager, but
@@ -118,21 +115,7 @@ class SimpleTrainer(BaseTrainer):
             # looking at the source of that context manager, it just toggles this variable
             self.model.require_backward_grad_sync = last_micro_step
         with self.ctx:
-            logits, loss, _ = self.model(**batch)
-        if self.gradient_accumulation_steps > 1:
-            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
-        if batch["target_weights"] is not None:
-            if self.config.weighted_loss_method == 'openchat':
-                target_weights = batch["target_weights"].sum()
-                # sum loss weights over all processes
-                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
-                loss = (self.dp_world_size / target_weights) * loss
-            else:
-                loss = loss / torch.sum(batch["target_weights"] > 0).item()
-        
-        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
-        return loss, unmasked_labels, accuracy
+            return self.model(**batch)
 
     def close(self):
         if self.distributed():
