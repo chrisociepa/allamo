@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from allamo.logging import configure_logger, logger
-from allamo.model.model import AllamoTransformerConfig
+from allamo.model.modeling_utils import BaseModelConfig
 from allamo.train_utils import (
     get_model_checkpoint_path,
     get_config_checkpoint_path,
@@ -24,7 +24,7 @@ def analyze(checkpoint_dir_path, checkpoint_name_base, output_file):
         config_checkpoint = json.load(f)
     model_checkpoint = torch.load(get_model_checkpoint_path(checkpoint_name_base, checkpoint_dir_path), map_location='cpu')
 
-    allamo_transformer_config = AllamoTransformerConfig(**config_checkpoint['model_args'])
+    allamo_transformer_config = BaseModelConfig(**config_checkpoint['model_args'])
     n_layers = allamo_transformer_config.n_layer
     head_size = allamo_transformer_config.head_size
     intermediate_size = allamo_transformer_config.intermediate_size

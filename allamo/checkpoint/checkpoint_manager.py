@@ -18,6 +18,7 @@ from torch.distributed.checkpoint.state_dict import (
 from allamo.configuration import AllamoConfiguration
 from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.logging import logger
+from allamo.model.modeling_utils import ModelSpec
 from allamo.train_utils import (
     calculate_md5,
     get_config_checkpoint_path,
@@ -53,10 +54,11 @@ class OptimizerWrapper(Stateful):
 
 class CheckpointManager:
     
-    def __init__(self, config: AllamoConfiguration, train_ctx: TrainingContext, data_loader: AllamoDataLoader):
+    def __init__(self, config: AllamoConfiguration, train_ctx: TrainingContext, data_loader: AllamoDataLoader, model_spec: ModelSpec):
         self.config = config
         self.train_ctx = train_ctx
         self.data_loader = data_loader
+        self.model_spec = model_spec
         self.checkpoint_dir = self.config.checkpoint_path if self.config.checkpoint_path else self.config.out_dir
         self.checkpoint_name = None
         
@@ -88,7 +90,7 @@ class CheckpointManager:
             
         # force these config attributes to be equal otherwise we can't even resume training
         # the rest of the attributes (e.g. dropout) can stay as desired from command line
-        for k in get_model_config_field_names():
+        for k in get_model_config_field_names(self.model_spec):
             if hasattr(self.config, k) and k in config_checkpoint['model_args']:
                 setattr(self.config, k, config_checkpoint['model_args'][k])
         

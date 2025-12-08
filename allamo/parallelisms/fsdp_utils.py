@@ -18,7 +18,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 
 from allamo.logging import logger
 from allamo.configuration import AllamoConfiguration
-from allamo.model.model import SelfAttentionBlock
+from allamo.model.modeling_utils import AttentionBlock
 from allamo.torch_utils import (
     TORCH_DTYPE_MAP,
 )
@@ -39,7 +39,7 @@ def enable_activation_checkpointing(model, config):
     )
     
     if config.gradient_checkpointing_excluded_layers <= 0:
-        check_fn = lambda submodule: isinstance(submodule, SelfAttentionBlock)
+        check_fn = lambda submodule: isinstance(submodule, AttentionBlock)
     else:
         total_layers = config.n_layer
         excluded_count = min(config.gradient_checkpointing_excluded_layers, total_layers)
@@ -61,7 +61,7 @@ def enable_activation_checkpointing(model, config):
                     layer_idx += 1
             
             def custom_check_fn(submodule):
-                if not isinstance(submodule, SelfAttentionBlock):
+                if not isinstance(submodule, AttentionBlock):
                     return False
                 return submodule.layer_id not in excluded_layers
             
@@ -76,7 +76,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
     auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={
-            SelfAttentionBlock,
+            AttentionBlock,
         },
     )
     sharding_strategy = FSDP_SHARDING_STRATEGY_MAP[config.fsdp_sharding_strategy]

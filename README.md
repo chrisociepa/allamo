@@ -8,6 +8,8 @@ This repository is intended as a simple, hackable and fast implementation for tr
 
 If you're interested in seeing how we trained a 1B model for the Polish language using a single RTX 4090, with 60B tokens over 44 days, check out our [blog](https://azurro.pl/apt3-1b-base-en/).
 
+We use this framework to train Polish Language Model - [Bielik](https://bielik.ai).
+
 ## Install
 
 You can easily install and `import allamo` into your project:
@@ -21,15 +23,13 @@ pip install -e .
 Dependencies:
 
 - Python 3.8+
-- [pytorch](https://pytorch.org) - PyTorch 2 is highly recommended
+- [pytorch](https://pytorch.org)
 - [joblib](https://joblib.readthedocs.io)
 - [numpy](https://numpy.org/install/)
 - [wandb](https://wandb.ai/quickstart/)
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention) - optional, for FlashAttention 2 and Sliding Window
 - [huggingface transformers](https://huggingface.co/docs/transformers/installation) - optional
 - [huggingface tokenizers](https://huggingface.co/docs/tokenizers/python/latest/installation/main.html) - optional
-- [tiktoken](https://github.com/openai/tiktoken) - optional
-- [gradio](https://www.gradio.app/) - optional, for demo UI
 
 ## Datasets
 
@@ -66,6 +66,7 @@ To run on a single node with 1 GPU, example:
 ```bash
 $ python train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --wandb_log=True
 ```
 
@@ -74,15 +75,19 @@ To run on a single node with 8 GPUs with DDP, example:
 ```bash
 $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
-To run on 2+ nodes (with 8 GPUs each) with DDP, example:
+To run on 2+ nodes (with 8 GPUs each) with DDP (by turning off FSDP), example:
 - Run on the first (master) node with example IP 123.456.123.456:
 
 ```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
@@ -91,6 +96,8 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123
 ```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
@@ -98,8 +105,9 @@ To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
 - Run the same command on all nodes (master node IP: 123.456.123.456):
 
 ```bash
-torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --wandb_log=True
 ```
 
@@ -127,8 +135,9 @@ python -m torch.distributed.checkpoint.format_utils torch_to_dcp ../out_dir/mode
 Once the checkpoint is converted, you can start training with the desired TP degree, for example:
 
 ```bash
-torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --distributed_checkpoint \
     --tensor_parallel_degree=2
 ```
@@ -169,22 +178,17 @@ Below are some empirically derived example values for extending the context wind
 
 Modify the `block_size` and provide the `rope_scaling` parameter with `rope_type` set to `yarn`, `factor` set to the desired value, and `original_max_position_embeddings` set to the original block_size. For more information on YaRN method, you can refer to this [paper](https://arxiv.org/abs/2309.00071).
 
-## Import LLaMA models
+## Import HF models
 
-Go to `scripts/` and use the script `import_llama_weights.py` to import LLaMA model weights and tokenizer, and create a checkpoint for further finetuning. In order to obtain the weights, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5). Example script execution:
+Go to `scripts/` and use the script `import_from_hf.py` to import model weights from Hugging Face, and create a checkpoint for further training. Example script execution:
 
 ```bash
-python import_llama_weights.py \
-    --input_data_dir="../llama/7B/" \
-    --input_tokenizer_path="../llama/tokenizer.model" \
-    --output_data_dir="../data/llama-7b/"
+python import_from_hf.py \
+    --huggingface_model="mistralai/Mistral-7B-v0.1" \
+    --model_type=bielik2 \
+    --output_dir="/data/models/Mistral-7B-v0.1" \
+    --output_checkpoint_name_base="last_eval_ckpt"
 ```
-
-Notes: 
-
-1. the import process of the 7B LLaMA model takes ~14GB of RAM and generates 13.5GB output files.
-2. the script doesn't support sharded models.
-3. the LLaMA tokenizer is loaded using [HuggingFace Transformers](https://huggingface.co/docs/transformers/). Check if your installed version supports `LlamaTokenizer`.
 
 ## Export your model to Hugging Face format
 
@@ -192,93 +196,14 @@ When you have trained your model, you may want to run it in the Hugging Face eco
 
 ```bash
 $ python export_to_hf.py \
-    --input_dir="../data/my-llama/" \
-    --output_dir="../data/my-llama-hf/"
+    --input_dir="/data/models/Bielik-7B-v0.1" \
+    --checkpoint_name_base=last_eval_ckpt \
+    --output_dir="/data/models/Bielik-7B-v0.1/hf" \
+    --model_type=bielik2 \
+    --output_model_type=llama \
+    --output_dtype=bfloat16 \
+    --max_position_embeddings=8192
 ```
-
-## Sampling / Inference
-
-Use the script `sample.py` to sample from a model you trained. For example:
-
-```bash
-$ python inference/sample.py \
-    --config="./config/train_1B.json" \
-    --max_new_tokens=100 \
-    --temperature=0.7 \
-    --top_k=200 \
-    --num_samples=5 \
-    --prompt="Long long time ago"
-```
-
-You can also prompt the model with some text from a file prefixing its path with `FILE:`, example:
-
-```bash
-$ python inference/sample.py \
-    --config="./config/train_1B.json" \
-    --max_new_tokens=100 \
-    --temperature=0.7 \
-    --top_k=200 \
-    --num_samples=5 \
-    --prompt="FILE:prompt.txt"
-```
-
-Specify the tokenizer using `--tiktoken_tokenizer_name` for Tiktoken (e.g. `cl100k_base`), or thanks to HuggingFace Transformers, you can easily use your own pretrained tokenizer using `--custom_tokenizer_path` to provide your tokenizer's JSON config file.
-
-Use the script `sample_api.py` to expose 3 API endpoints. Then you will be able to query a pretrained model for text embeddings and completions. 
-
-To run the API with a pretrained model, example:
-
-```bash
-$ python inference/sample_api.py \
-    --config="./config/train_1B.json" \
-    --max_new_tokens=10 \
-    --temperature=0.7 \
-    --top_k=200 \
-    --num_samples=5
-```
-
-- Query for text embeddings, example:
-
-```bash
-$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/embeddings -d '{"prompt": "Long long time ago"}'
-```
-
-- Query for text completions, example:
-
-```bash
-$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/completions -d '{"prompt": "Long long time ago", "num_samples": 3}'
-```
-
-- Query for tokens to see how your prompt is tokenized, example:
-
-```bash
-$ curl -X POST -H "Content-Type: application/json" http://localhost:5000/tokens -d '{"prompt": "Long long time ago"}'
-```
-
-To run the UI at top of the API, example:
-
-```bash
-$ python inference/sample_ui.py
-```
-
-## Running LLaMA 7B on CPU
-
-![sample_ui](assets/allamo_gradio.jpg)
-
-You can reach a point where you intend to run an LLaMA model, but your GPU does not have sufficient memory, and you encounter the OOM error. The easiest and quickest way to handle, or rather work around, this issue is to run the model on the CPU using your RAM. You can easily do this by specifying the device in the arguments. Here is an example:
-
-```bash
-$ python inference/sample_api.py \
-    --checkpoint_path="../data/llama-7b/import_ckpt.pt" \
-    --llama_tokenizer_path="../data/llama-7b/" \
-    --device=cpu
-```
-
-Note: in order to run the 7B model, you will need ~14GB of RAM.
-
-## Efficiency
-
-With [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/) and `torch.compile()`, you can see significant speedup. Using the fused AdamW optimizer and `compile()`, my training ran 30% faster than without these two modes enabled.
 
 ## Citation
 
@@ -292,8 +217,3 @@ Please cite this repo if you use it.
   howpublished = {\url{https://github.com/chrisociepa/allamo}},
 }
 ```
-
-## References:
-
-1. [nanoGPT](https://github.com/karpathy/nanoGPT) - many thanks to Andrej Karpathy for amazing and inspirational work!
-2. [LLaMA](https://github.com/facebookresearch/llama)
