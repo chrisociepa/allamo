@@ -76,7 +76,7 @@ class Bielik2Model(BaseModel):
             _, T, _ = inputs_embeds.size()
         else:
             _, T = input_ids.size()
-            inputs_embeds = self.tok_embeddings(input_ids) # token embeddings of shape (b, t, n_embd)
+            inputs_embeds = self.get_embeddings()(input_ids) # token embeddings of shape (b, t, n_embd)
             if self.tok_drop is not None:
                 inputs_embeds = self.tok_drop(inputs_embeds)
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -88,25 +88,22 @@ class Bielik2Model(BaseModel):
                 raise ValueError(f"Unsupport attn_mask shape {attn_mask.shape}")
         
         hidden_states = inputs_embeds
-        for layer in self.layers:
+        for layer in self.get_layers():
             hidden_states = layer(hidden_states, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
         
-        final_embeddings = self.norm(hidden_states)
+        final_embeddings = self.get_lm_head_norm()(hidden_states)
         if target_ids is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(final_embeddings)
+            logits = self.get_lm_head()(final_embeddings)
             if target_weights is None:
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), ignore_index=ignore_index)
             else:
                 loss = (target_weights.view(-1) * F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), reduction="none")).sum()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.get_lm_head()(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
         return logits, loss, hidden_states
-
-    def calculate_weight_init_std(self, num_layers):
-        return 0.02 / math.sqrt(2 * num_layers)
     
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
@@ -115,19 +112,15 @@ class Bielik2Model(BaseModel):
             self.layers.append(layer)
             self.config.n_layer += 1
             layer.init_weights(self.calculate_weight_init_std(self.config.n_layer))
-
-    def freeze_model_params(self, freeze_embeddings: bool, freeze_lm_head: bool, freeze_layers: bool, keep_layers_trainable: List[int]):
-        if freeze_embeddings:
-            self.freeze_params(self.tok_embeddings)
-            logger.info("Embeddings frozen")
-        if freeze_lm_head:
-            self.freeze_params(self.norm)
-            self.freeze_params(self.lm_head)
-            logger.info("LM head frozen")
-        if freeze_layers:
-            for layer_id in range(self.model_config.n_layer):
-                if layer_id not in keep_layers_trainable:
-                    self.freeze_params(self.layers[layer_id])
-                    logger.info(f"Layer {layer_id} frozen")
-                else:
-                    logger.info(f"Layer {layer_id} kept trainable")
+    
+    def get_embeddings(self):
+        return self.tok_embeddings
+    
+    def get_lm_head_norm(self):
+        return self.norm
+    
+    def get_lm_head(self):
+        return self.lm_head
+    
+    def get_layers(self):
+        return self.layers

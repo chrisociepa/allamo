@@ -194,6 +194,21 @@ class BaseModel(torch.nn.Module):
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         pass
 
+    def get_embeddings(self):
+        return None
+
+    def get_lm_head_norm(self):
+        return None
+    
+    def get_lm_head(self):
+        return None
+    
+    def get_layers(self):
+        return None
+
+    def calculate_weight_init_std(self, num_layers):
+        return 0.02 / math.sqrt(2 * num_layers)
+
     def estimate_size(self):
         """
         Return the number of parameters and their size in the model.
@@ -214,13 +229,27 @@ class BaseModel(torch.nn.Module):
         model_bytes = self.model_num_bytes / 1024**2
         logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
                 
-    def freeze_params(self, module):
+    def freeze_module_params(self, module):
         for param in module.parameters():
             if param.requires_grad:
                 param.requires_grad = False
 
     def freeze_model_params(self, freeze_embeddings: bool, freeze_lm_head: bool, freeze_layers: bool, keep_layers_trainable: List[int]):
-        pass
+        if freeze_embeddings and self.get_embeddings() is not None:
+            self.freeze_module_params(self.get_embeddings())
+            logger.info("Embeddings frozen")
+        if freeze_lm_head and self.get_lm_head() is not None:
+            if self.get_lm_head_norm() is not None:
+                self.freeze_module_params(self.get_lm_head_norm())
+            self.freeze_module_params(self.get_lm_head())
+            logger.info("LM head frozen")
+        if freeze_layers and self.get_layers() is not None:
+            for layer_id in range(self.model_config.n_layer):
+                if layer_id not in keep_layers_trainable:
+                    self.freeze_module_params(self.get_layers()[layer_id])
+                    logger.info(f"Layer {layer_id} frozen")
+                else:
+                    logger.info(f"Layer {layer_id} kept trainable")
 
 @dataclass
 class ModelSpec:
