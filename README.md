@@ -66,6 +66,7 @@ To run on a single node with 1 GPU, example:
 ```bash
 $ python train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --wandb_log=True
 ```
 
@@ -74,15 +75,19 @@ To run on a single node with 8 GPUs with DDP, example:
 ```bash
 $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
-To run on 2+ nodes (with 8 GPUs each) with DDP, example:
+To run on 2+ nodes (with 8 GPUs each) with DDP (by turning off FSDP), example:
 - Run on the first (master) node with example IP 123.456.123.456:
 
 ```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
@@ -91,6 +96,8 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123
 ```bash
 $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
+    --fsdp_sharding_strategy=None \
     --wandb_log=True
 ```
 
@@ -98,8 +105,9 @@ To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
 - Run the same command on all nodes (master node IP: 123.456.123.456):
 
 ```bash
-torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --wandb_log=True
 ```
 
@@ -127,8 +135,9 @@ python -m torch.distributed.checkpoint.format_utils torch_to_dcp ../out_dir/mode
 Once the checkpoint is converted, you can start training with the desired TP degree, for example:
 
 ```bash
-torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 fsdp_train.py \
+torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 train.py \
     --config="./config/train_1B.json" \
+    --training_type=pre \
     --distributed_checkpoint \
     --tensor_parallel_degree=2
 ```
@@ -208,8 +217,3 @@ Please cite this repo if you use it.
   howpublished = {\url{https://github.com/chrisociepa/allamo}},
 }
 ```
-
-## References:
-
-1. [nanoGPT](https://github.com/karpathy/nanoGPT) - many thanks to Andrej Karpathy for amazing and inspirational work!
-2. [LLaMA](https://github.com/facebookresearch/llama)
