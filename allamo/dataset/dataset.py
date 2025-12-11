@@ -253,8 +253,8 @@ class AllamoDataset:
         """
         if isinstance(sample, np.ndarray):
             # Use only for testing
-            if len(sample) > self.sample_size:
-               sample = sample[:self.sample_size]
+            # if len(sample) > self.sample_size:
+            #    sample = sample[:self.sample_size]
             assert len(sample) == self.sample_size, "Invalid sample size"
             return torch.from_numpy(sample)
 
