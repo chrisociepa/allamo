@@ -210,26 +210,31 @@ class BaseModel(torch.nn.Module):
     def calculate_weight_init_std(self, num_layers):
         return 0.02 / math.sqrt(2 * num_layers)
 
-    def estimate_size(self):
+    def estimate_size(self, module):
         """
         Return the number of parameters and their size in the model.
         """
         params = 0
         bytes = 0
-        for p in self.parameters():
+        for p in module.parameters():
             params += p.numel()
             bytes += p.numel() * p.element_size()
-        for b in self.buffers():
+        for b in module.buffers():
             # don't count buffers as params
             bytes += b.numel() * b.element_size()
         return params, bytes
         
     def log_estimated_size(self):
-        self.model_num_params, self.model_num_bytes = self.estimate_size()
+        self.model_num_params, self.model_num_bytes = self.estimate_size(self)
         model_params = self.model_num_params / 1e6
         model_bytes = self.model_num_bytes / 1024**2
         logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
-                
+        if self.get_embeddings() is not None:
+            embds_params, embds_bytes = self.estimate_size(self.get_embeddings())
+            embds_params = embds_params / 1e6
+            embds_bytes = embds_bytes / 1024**2
+            logger.info(f"Embeddings parameters: {embds_params:.2f}M, Est. Size: {embds_bytes:.3f}MB")
+
     def freeze_module_params(self, module):
         for param in module.parameters():
             if param.requires_grad:
