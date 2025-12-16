@@ -15,39 +15,38 @@ class AllamoDataset:
     def __init__(self, config: AllamoConfiguration, train_split=True, rank=None, world_size=None):
         self.rank = rank
         self.world_size = world_size
-        self.data_dir = config.data_dir
         self.block_size = config.block_size
         self.sample_size = config.block_size + 1 
         self.ignore_index = config.ignore_index
         self.pad_token_id = config.pad_token_id
         self.weighted_loss = config.weighted_loss
         self.training_type = config.training_type
+        if train_split:
+            self.dataset_dir = config.dataset_train_dir
+            self.dataset_files_lst = config.dataset_train_files
+            self.dataset_file_prefix = config.dataset_train_file_prefix
+        else:
+            self.dataset_dir = config.dataset_validation_dir
+            self.dataset_files_lst = config.dataset_validation_files
+            self.dataset_file_prefix = config.dataset_validation_file_prefix
+
         self.data = None
         self.data_in_alm_format = False
-        self.dataset_files = self.get_dataset_files(config, train_split)
+        self.dataset_files = self.get_dataset_files()
         self.processed_files = []
-        if config.dataset_train_processed_files_count > 0:
+        if train_split and config.dataset_train_processed_files_count > 0:
             self.processed_files = self.dataset_files[:config.dataset_train_processed_files_count]
         
-    def get_dataset_files(self, config, train_split):
+    def get_dataset_files(self):
         dataset_files = []
-        if train_split and config.dataset_train_files:
-            dataset_files = config.dataset_train_files.split(',')
-        elif not train_split and config.dataset_validation_files:
-            dataset_files = config.dataset_validation_files.split(',')
-        elif config.dataset:
-            dataset_dir = os.path.join(config.data_dir, config.dataset)
-            prefix = config.dataset_train_file_prefix if train_split else config.dataset_validation_file_prefix
-            for dataset_file in glob.glob(os.path.join(dataset_dir, "*.*")):
-                if self.is_file_type_supported(dataset_file) and os.path.basename(dataset_file).startswith(prefix):
+        if self.dataset_files_lst:
+            dataset_files = self.dataset_files_lst.split(',')
+        elif self.dataset_dir:
+            for dataset_file in glob.glob(os.path.join(self.dataset_dir, "*.*")):
+                if self.is_file_type_supported(dataset_file) and (not self.dataset_file_prefix or os.path.basename(dataset_file).startswith(self.dataset_file_prefix)):
                     dataset_files.append(dataset_file)
-            logger.info(f"Found {len(dataset_files)} files in {dataset_dir} with prefix '{prefix}'")
-        if dataset_files:
-            return sorted(dataset_files)
-        elif train_split:
-            raise Exception('Training dataset files not found!')
-        else:
-            return []
+            logger.info(f"Found {len(dataset_files)} dataset files in {self.dataset_dir}")
+        return sorted(dataset_files)
     
     def is_file_type_supported(self, dataset_file):
         return dataset_file.endswith('.bin') or dataset_file.endswith('.pt') or dataset_file.endswith('.alm')

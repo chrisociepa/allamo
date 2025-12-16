@@ -3,11 +3,12 @@ import os
 import time
 import math
 import datetime
+import pprint
 import subprocess
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from contextlib import nullcontext
 
 from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
@@ -54,8 +55,8 @@ class BaseTrainer:
             self.dp_world_size = dp_mesh.size()
             self.dp_rank = dp_mesh.get_local_rank()
             self.tp_rank = tp_mesh.get_local_rank()
-        self.data_loader = AllamoDataLoader(self.config, self.dp_rank, self.dp_world_size)
         
+        self.init_dataloaders()
         self.init_training()
         self.init_metrics_logger()
 
@@ -65,14 +66,36 @@ class BaseTrainer:
     def init_torch(self):
         self.device_type = 'cuda' if 'cuda' in self.config.device else 'cpu'
         init_torch(self.train_ctx, self.config, distributed=self.distributed())
+    
+    def init_dataloaders(self):
+        self.train_dataloader = AllamoDataLoader(
+            config=self.config,
+            rank=self.dp_rank,
+            world_size=self.dp_world_size,
+            train_split=True
+        )
+
+        if self.config.eval_iters > 0 and self.config.eval_interval > 0:
+            self.val_dataloader = AllamoDataLoader(
+                config=self.config,
+                rank=self.dp_rank,
+                world_size=self.dp_world_size,
+                train_split=False
+            )
+        else:
+            self.val_dataloader = None
 
     def init_training(self):
         attention_version.configure(self.config)
         self.model_spec = get_model_spec(self.config.model_type)
-        self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.data_loader, self.model_spec)
+        self.checkpoint_manager = CheckpointManager(self.config, self.train_ctx, self.train_dataloader, self.model_spec)
         self.checkpoint_manager.init_checkpoint()
-        self.data_loader.load_datasets()
+        self.train_dataloader.load_datasets()
+        if self.val_dataloader:
+            self.val_dataloader.load_datasets()
         self.model_config = create_model_config(self.config, self.model_spec)
+        self.model_ctx = nullcontext()
+        self.log_init_learning_rate()
     
     def init_metrics_logger(self):
         self.metrics_logger = MetricsLogger(self.config, self.train_ctx)
@@ -84,16 +107,6 @@ class BaseTrainer:
             self.config.freeze_layers,
             self.config.keep_layers_trainable
         )
-            
-    def init_gradient_accumulation_scheduler(self):
-        if self.config.grad_accum_schedule: 
-            self.config.grad_accum_max = self.config.gradient_accumulation_steps
-            self.config.gradient_accumulation_steps = self.config.grad_accum_initial
-            logger.info(
-                f"Gradient accumulation scheduler enabled. "
-                f"Current gradient accumulation steps: {self.config.gradient_accumulation_steps}"
-            )
-        self.gradient_accumulation_steps = self.config.gradient_accumulation_steps
         
     def log_init_learning_rate(self):
         if self.config.decay_lr:
@@ -107,7 +120,7 @@ class BaseTrainer:
         torch.cuda.empty_cache()
     
     def should_evaluate(self):
-        return self.config.eval_interval > 0 and self.train_ctx.iter_num % self.config.eval_interval == 0 and self.config.training_type != "dpo"
+        return self.config.eval_iters > 0 and self.config.eval_interval > 0 and self.train_ctx.iter_num % self.config.eval_interval == 0
 
     def should_save_last_checkpoint(self):
         return self.config.checkpoint_interval > 0 and self.train_ctx.iter_num > self.start_iter and self.train_ctx.iter_num % self.config.checkpoint_interval == 0
@@ -119,7 +132,7 @@ class BaseTrainer:
         return torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip).item()
     
     def has_next_iter_to_perform(self):
-        if self.config.num_train_epochs is not None and self.data_loader.epoch >= self.config.num_train_epochs:
+        if self.config.num_train_epochs is not None and self.train_dataloader.epoch >= self.config.num_train_epochs:
             return False
         return self.train_ctx.iter_num <= self.config.max_iters
     
@@ -132,12 +145,6 @@ class BaseTrainer:
         avg_time_per_iter = elapsed_time.total_seconds() / elapsed_iters
         eta_seconds = math.ceil(avg_time_per_iter * (self.config.max_iters - self.train_ctx.iter_num))
         return format_seconds_as_time(eta_seconds)
-    
-    def get_grad_accum(self):
-        if self.config.grad_accum_schedule and self.gradient_accumulation_steps < self.config.grad_accum_max and self.train_ctx.iter_num % (self.config.grad_accum_max_iter/100) == 0:
-            return min(self.gradient_accumulation_steps + 1, self.config.grad_accum_max)
-        else:
-            return self.gradient_accumulation_steps
         
     def run_checkpoint_hook_program(self, hook_program, current_epoch, ckpt_file_name): 
         env_variables = {
@@ -159,88 +166,73 @@ class BaseTrainer:
             dist.all_reduce(x, op=op)
         return x
 
-    def compute_logits_and_loss(self, batch, last_micro_step):
-        return self.model(**batch)
+    def compute_logits_and_loss(self, batch, last_gas_step):
+        with self.model_ctx:
+            return self.model(**batch)
     
-    # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
-    def estimate_loss(self):
-        losses_out = {}
-        accuraces = {}
+    def evaluate_val_loss(self):
+        self.val_dataloader.reset_offset()
         self.model.eval()
-        for split in self.data_loader.splits:
-            validation_metrics = torch.zeros(3).to(self.config.device)
-            for _ in range(self.config.eval_iters):
-                batch = self.data_loader.get_batch(split, True)
-                logits, loss, _ = self.compute_logits_and_loss(batch, False)
-                if batch["target_weights"] is not None:
-                    loss = loss / torch.sum(batch["target_weights"] > 0).item()
-                validation_metrics[0] += loss.item()
-                validation_metrics[1] += (logits.max(2).indices == batch["target_ids"]).sum().item() / torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-                validation_metrics[2] += 1
-            validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
-            losses_out[split] = validation_metrics[0] / validation_metrics[2]
-            accuraces[split] = validation_metrics[1] / validation_metrics[2]
+        validation_metrics = torch.zeros(3).to(self.config.device)
+        for _ in range(self.config.eval_iters):
+            batch = self.val_dataloader.get_batch()
+            loss, unmasked_labels, accuracy = self.evaluate_loss(batch, 1, False)
+            validation_metrics[0] += loss.item()
+            validation_metrics[1] += unmasked_labels
+            validation_metrics[2] += accuracy
+        validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
+        val_loss = validation_metrics[0] / self.config.eval_iters
+        val_acc = validation_metrics[2] / self.config.eval_iters
         self.model.train()
-        if 'val' not in losses_out:
-            losses_out['val'] = losses_out['train']
-            accuraces['val'] = accuraces['train']
-        return losses_out, accuraces
+        return val_loss, validation_metrics[1], val_acc
     
     def evaluate(self):
         eval_time = time.time()
-        losses, accuraces = self.estimate_loss()
+        val_loss_t, unmasked_labels_t, val_acc_t = self.evaluate_val_loss()
         eval_time = time.time() - eval_time
-        train_loss = losses['train'].item()
-        val_loss = losses['val'].item()
-        if self.train_ctx.iter_num > self.start_iter:
-            if train_loss < self.train_ctx.best_train_loss:
-                self.train_ctx.best_train_loss = train_loss
-            if val_loss < self.train_ctx.best_val_loss:
-                self.train_ctx.best_val_loss = val_loss
-                if self.config.save_best_checkpoint:
-                    self.save_checkpoint('ckpt')
+
+        val_loss = val_loss_t.item()
+
+        if self.train_ctx.iter_num > self.start_iter and val_loss < self.train_ctx.best_val_loss:
+            self.train_ctx.best_val_loss = val_loss
+            if self.config.save_best_checkpoint:
+                self.save_checkpoint('ckpt')
                 
-        if self.train_ctx.master_process:                
-            train_ppl = torch.exp(losses['train']).item()
-            val_ppl = torch.exp(losses['val']).item()
+        if self.train_ctx.master_process:
+            val_acc = val_acc_t.item()
+            unmasked_labels = int(unmasked_labels_t.item())
+            val_ppl = torch.exp(val_loss_t).item()
+            diff_best_losses = self.train_ctx.best_val_loss - self.train_ctx.best_train_loss
             logger.info(
-                f"iter {self.train_ctx.iter_num:,}: train loss={train_loss:.4f} ppl={train_ppl:.4f} "
-                f"acc={accuraces['train']:.4f} (best loss={self.train_ctx.best_train_loss:.4f}), "
-                f"val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={accuraces['val']:.4f} "
-                f"(best loss={self.train_ctx.best_val_loss:.4f}), tokens {self.train_ctx.processed_tokens:,}"
+                f"iter {self.train_ctx.iter_num:,}: val loss={val_loss:.4f} ppl={val_ppl:.4f} acc={val_acc:.4f} "
+                f"(best loss={self.train_ctx.best_val_loss:.4f}, diff={diff_best_losses:.4f}), tokens {unmasked_labels:,}"
             )
             if self.config.log_metrics:
                 self.metrics_logger.log_metrics({
                     "eval/time": eval_time*1000,
-                    "eval/samples_per_second": (self.config.eval_iters * len(self.data_loader.splits)) / eval_time,
-                    "eval/train_loss": train_loss,
-                    "eval/val_loss": val_loss,
-                    "eval/train_ppl": train_ppl,
-                    "eval/val_ppl": val_ppl,
-                    "eval/train_acc": accuraces['train'].item(),
-                    "eval/val_acc": accuraces['val'].item(),
-                    "eval/diff_loss": (val_loss-train_loss),
-                    "eval/diff_acc": (accuraces['train']-accuraces['val']).item(),
-                    "eval/diff_ppl": (val_ppl-train_ppl),
-                    "eval/best_train_loss": self.train_ctx.best_train_loss,
-                    "eval/best_val_loss": self.train_ctx.best_val_loss
+                    "eval/loss": val_loss,
+                    "eval/ppl": val_ppl,
+                    "eval/acc": val_acc,
+                    "eval/tokens": unmasked_labels,
+                    "eval/best_loss": self.train_ctx.best_val_loss,
+                    "eval/diff_best_losses": diff_best_losses
                 })
         self.trigger_gc()
 
-    def evaluate_pretraining_loss(self, batch, last_micro_step):
-        logits, loss, _ = self.compute_logits_and_loss(batch, last_micro_step)
-        if self.gradient_accumulation_steps > 1:
-            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+    def evaluate_pretraining_loss(self, batch, gradient_accumulation_steps, last_gas_step):
+        logits, loss, _ = self.compute_logits_and_loss(batch, last_gas_step)
+        if gradient_accumulation_steps > 1:
+            loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
         
         unmasked_labels = self.config.block_size # we assume no padding in pretraining
         accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / self.config.block_size
         return loss, unmasked_labels, accuracy
 
-    def evaluate_sft_loss(self, batch, last_micro_step):
-        logits, loss, _ = self.compute_logits_and_loss(batch, last_micro_step)
-        if self.gradient_accumulation_steps > 1:
-            loss = loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+    def evaluate_sft_loss(self, batch, gradient_accumulation_steps, last_gas_step):
+        logits, loss, _ = self.compute_logits_and_loss(batch, last_gas_step)
+        if gradient_accumulation_steps > 1:
+            loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
         
         if batch["target_weights"] is not None:
             if self.config.weighted_loss_method == 'openchat':
@@ -255,9 +247,9 @@ class BaseTrainer:
         accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
         return loss, unmasked_labels, accuracy
 
-    def evaluate_dpo_loss(self, batch, last_micro_step):
-        policy_chosen_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_micro_step)
-        policy_rejected_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_micro_step)
+    def evaluate_dpo_loss(self, batch, gradient_accumulation_steps, last_gas_step):
+        policy_chosen_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_gas_step)
+        policy_rejected_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_gas_step)
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
         policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
         
@@ -271,8 +263,8 @@ class BaseTrainer:
         reward_penalty = self.config.dpo_penalty_lambda * torch.maximum(torch.zeros_like(policy_chosen_logps), reference_chosen_logps - policy_chosen_logps)
         dpo_loss = -F.logsigmoid(chosen_rewards - rejected_rewards - reward_penalty).mean()
         
-        if self.gradient_accumulation_steps > 1:
-            dpo_loss = dpo_loss / self.gradient_accumulation_steps # scale the loss to account for micro steps
+        if gradient_accumulation_steps > 1:
+            dpo_loss = dpo_loss / gradient_accumulation_steps # scale the loss to account for micro steps
             
         chosen_unmasked_labels = torch.sum(batch["chosen_target_ids"].view(-1) != self.config.ignore_index).item()
         rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
@@ -280,7 +272,7 @@ class BaseTrainer:
         
         accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels
         
-        if last_micro_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
+        if last_gas_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
             chosen_rewards = chosen_rewards.detach() 
             rejected_rewards = rejected_rewards.detach()
             reward_accuracies = (chosen_rewards > rejected_rewards).float().mean()
@@ -338,47 +330,44 @@ class BaseTrainer:
                     )
         return dpo_loss, unmasked_labels, accuracy
         
-    def evaluate_loss(self, batch, last_micro_step):
+    def evaluate_loss(self, batch, gradient_accumulation_steps, last_gas_step):
         if self.config.training_type == 'pre':
-            return self.evaluate_pretraining_loss(batch, last_micro_step)
+            return self.evaluate_pretraining_loss(batch, gradient_accumulation_steps, last_gas_step)
         elif self.config.training_type == 'sft':
-            return self.evaluate_sft_loss(batch, last_micro_step)
+            return self.evaluate_sft_loss(batch, gradient_accumulation_steps, last_gas_step)
         elif self.config.training_type == 'dpo':
-            return self.evaluate_dpo_loss(batch, last_micro_step)
+            return self.evaluate_dpo_loss(batch, gradient_accumulation_steps, last_gas_step)
         else:
             raise ValueError(f"Unknown training type: {self.config.training_type}")
     
     def train(self):
-        logger.info(f"Starting training (run id: {self.train_ctx.run_uuid}, world size: {self.train_ctx.world_size}) with configuration:\n{self.config}")
-        batch = self.data_loader.get_batch('train') # fetch the very first batch
+        self.trigger_gc()
+        logger.info(f"Training configuration:\n{pprint.pformat(self.config)}")
+        total_batch_size = self.config.batch_size * self.config.gradient_accumulation_steps * self.dp_world_size
+        total_tokens_per_iter = self.config.block_size * total_batch_size
+        logger.info(f"Starting training (run id: {self.train_ctx.run_uuid}, world size: {self.train_ctx.world_size}, total batch size: {total_batch_size})")
         self.start_iter = self.train_ctx.iter_num
         self.start_timestamp = datetime.datetime.now()
-        current_epoch = self.data_loader.epoch
-        current_num_loaded_files = self.data_loader.get_num_loaded_files()
+        current_epoch = self.train_dataloader.epoch
+        current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
         iter_metrics = torch.zeros(5).to(self.config.device)
-        self.trigger_gc()
+        batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
-            if current_epoch < self.data_loader.epoch:
+            if current_epoch < self.train_dataloader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=True)
                 if self.config.epoch_completion_hook_program and self.train_ctx.master_process:
                     pid = self.run_checkpoint_hook_program(self.config.epoch_completion_hook_program, current_epoch, ckpt_file_name)
                     logger.info(f"Epoch completion hook program started with pid {pid}")
-                current_epoch = self.data_loader.epoch
-                current_num_loaded_files = self.data_loader.get_num_loaded_files()
-            elif self.config.save_checkpoint_on_dataset_reload and current_num_loaded_files != self.data_loader.get_num_loaded_files():
+                current_epoch = self.train_dataloader.epoch
+                current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
+            elif self.config.save_checkpoint_on_dataset_reload and current_num_loaded_files != self.train_dataloader.get_num_loaded_files():
                 ckpt_file_name = f'ds_reload_{current_epoch}-{current_num_loaded_files}'
                 self.save_checkpoint(ckpt_file_name, model_only=True, epoch_ckpt=False)
-                current_num_loaded_files = self.data_loader.get_num_loaded_files()
+                current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
             elif self.config.should_override_config(self.train_ctx.iter_num):
                 self.config.override_config_properties()
             
-            timer = time.time()
-                            
-            # determine and set batch_size and gradient_accumulation_steps for this iteration 
-            micro_batch_size = self.data_loader.update_batch_size(self.train_ctx.iter_num)
-            total_batch_size = self.config.block_size * micro_batch_size * self.gradient_accumulation_steps * self.dp_world_size
-            self.gradient_accumulation_steps = self.get_grad_accum()
 
             # evaluate the loss on train/val sets and write best checkpoint
             if self.should_evaluate():
@@ -394,10 +383,11 @@ class BaseTrainer:
             accuracy = 0
             iter_metrics.zero_()
             batch_mfu_excluded_time = 0
+            timer = time.time()
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
-            for micro_step in range(self.gradient_accumulation_steps):
-                loss, unmasked_labels, accuracy = self.evaluate_loss(batch, (micro_step == self.gradient_accumulation_steps - 1))
+            for micro_step in range(self.config.gradient_accumulation_steps):
+                loss, unmasked_labels, accuracy = self.evaluate_loss(batch, self.config.gradient_accumulation_steps, (micro_step == self.config.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
                 iter_metrics[0] += loss.item()
@@ -406,7 +396,7 @@ class BaseTrainer:
                 iter_metrics[3] += 1
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                batch = self.data_loader.get_batch('train')
+                batch = self.train_dataloader.get_batch()
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling
@@ -424,7 +414,7 @@ class BaseTrainer:
             # adjust learning rate
             lr = calculate_learning_rate(self.train_ctx, self.config)
             if self.config.adaptive_learning_rate:
-                lr = lr * math.sqrt(iter_metrics[1].item() / total_batch_size)
+                lr = lr * math.sqrt(iter_metrics[1].item() / total_tokens_per_iter)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
             
@@ -447,7 +437,7 @@ class BaseTrainer:
                 accuracy = iter_metrics[2].item() / iter_metrics[3].item()
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
-                    mfu = estimate_mfu(self.model_num_params, self.config, micro_batch_size * self.gradient_accumulation_steps, fwdbwd_time)
+                    mfu = estimate_mfu(self.model_num_params, self.config, self.config.batch_size * self.config.gradient_accumulation_steps, fwdbwd_time)
                     mfu_str = f'{mfu*100:.2f}%'
                 else:
                     mfu = -1.0
@@ -457,9 +447,11 @@ class BaseTrainer:
                 logger.info(
                     f"iter {self.train_ctx.iter_num:,}: loss {lossf:.4f}, ppl {ppl:.4f}, acc {accuracy:.4f}, "
                     f"iter time {iter_time_ms:.2f}ms, tokens {self.train_ctx.processed_tokens:,}, lr {lr:.8f}, "
-                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.data_loader.epoch}, "
+                    f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.train_dataloader.epoch}, "
                     f"ETA: {self.calculate_eta()}"
                 )
+                if lossf < self.train_ctx.best_train_loss:
+                    self.train_ctx.best_train_loss = lossf
 
                 if self.config.log_metrics:
                     metrics = {
@@ -469,17 +461,16 @@ class BaseTrainer:
                         "train/grad_norm": grad_norm,
                         "train/lr": lr,
                         "train/mtu": mtu,
-                        "train/tokens_per_sec": (total_batch_size/iter_time),
-                        "train/tokens_per_gpu_per_sec": (total_batch_size/self.train_ctx.world_size/iter_time),
+                        "train/tokens_per_sec": (total_tokens_per_iter/iter_time),
+                        "train/tokens_per_gpu_per_sec": (total_tokens_per_iter/self.train_ctx.world_size/iter_time),
                         "train/tokens": self.train_ctx.processed_tokens,
-                        "train/epoch": self.data_loader.epoch,
-                        "train/total_batch_size": total_batch_size,
+                        "train/epoch": self.train_dataloader.epoch,
+                        "train/best_loss": self.train_ctx.best_train_loss,
+                        "train/ds_offset": self.train_dataloader.dataset_offset,
                         "train/iter_time": iter_time_ms,
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
-                    if self.config.dataset_seq_train:
-                        metrics['train/ds_offset'] = self.data_loader.dataset_offset
                     self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             

@@ -91,9 +91,6 @@ class FSDPTrainer(BaseTrainer):
                 
         # initialize a GradScaler only for FSDP's built-in mixed precision with fp16
         self.scaler = torch.amp.GradScaler(self.device_type, enabled=(self.config.dtype == 'float16'))
-        
-        self.init_gradient_accumulation_scheduler()
-        self.log_init_learning_rate()
     
     def load_optimizer_checkpoint(self, model, optimizer):
         ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)

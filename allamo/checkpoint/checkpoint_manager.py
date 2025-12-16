@@ -54,10 +54,10 @@ class OptimizerWrapper(Stateful):
 
 class CheckpointManager:
     
-    def __init__(self, config: AllamoConfiguration, train_ctx: TrainingContext, data_loader: AllamoDataLoader, model_spec: ModelSpec):
+    def __init__(self, config: AllamoConfiguration, train_ctx: TrainingContext, train_data_loader: AllamoDataLoader, model_spec: ModelSpec):
         self.config = config
         self.train_ctx = train_ctx
-        self.data_loader = data_loader
+        self.data_loader = train_data_loader
         self.model_spec = model_spec
         self.checkpoint_dir = self.config.checkpoint_path if self.config.checkpoint_path else self.config.out_dir
         self.checkpoint_name = None
@@ -107,16 +107,16 @@ class CheckpointManager:
         
         if 'allamo_dataloader' in config_checkpoint and self.data_loader is not None:
             if  'train_processed_files' in config_checkpoint['allamo_dataloader']:
-                self.data_loader.train_dataset.processed_files = config_checkpoint['allamo_dataloader']['train_processed_files']
-                if len(self.data_loader.train_dataset.processed_files) > 0:
+                self.data_loader.dataset.processed_files = config_checkpoint['allamo_dataloader']['train_processed_files']
+                if len(self.data_loader.dataset.processed_files) > 0:
                     # Removing the last element from the list because it represents the file where processing was interrupted.
                     # We will load this file and resume processing from there, indicated by the dataset_offset.
-                    self.data_loader.train_dataset.processed_files.pop()
+                    self.data_loader.dataset.processed_files.pop()
             if 'dataset_offset' in config_checkpoint['allamo_dataloader']:
                 self.data_loader.dataset_offset = config_checkpoint['allamo_dataloader']['dataset_offset'] // self.train_ctx.dp
             if 'epoch' in config_checkpoint['allamo_dataloader']:
                 self.data_loader.epoch = config_checkpoint['allamo_dataloader']['epoch']
-                
+    
     def is_checkpoint_available(self):
         return self.checkpoint_name is not None
 
@@ -145,7 +145,7 @@ class CheckpointManager:
             'processed_tokens': self.train_ctx.processed_tokens,
             'config': dataclasses.asdict(self.config),
             'allamo_dataloader': {
-                'train_processed_files': self.data_loader.train_dataset.processed_files,
+                'train_processed_files': self.data_loader.dataset.processed_files,
                 'dataset_offset': self.data_loader.dataset_offset * self.train_ctx.dp,
                 'epoch': self.data_loader.epoch
             }
