@@ -26,11 +26,13 @@ class BaseModelConfig:
     n_embd: int = 768
     intermediate_size: int = 2304
     dropout: float = 0.0
-    bias: bool = True
+    bias: bool = False
     norm_eps: float = 1e-5
     sliding_window: int = None
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
+    attn_output_gate: bool = False
+    qk_norm: bool = False
 
 class FeedForward(torch.nn.Module):
 
@@ -69,15 +71,19 @@ class Attention(torch.nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
         self.sliding_window = config.sliding_window if attention_version.flash_attn_supports_window_size else None
+        self.attn_output_gate = config.attn_output_gate
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
         # key, query, value projections for all heads
-        self.q_proj = torch.nn.Linear(config.n_embd, self.num_heads * self.head_size, bias=config.bias)
+        self.q_proj = torch.nn.Linear(config.n_embd, self.num_heads * self.head_size * (1 + config.attn_output_gate), bias=config.bias)
         self.k_proj = torch.nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
         self.v_proj = torch.nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
         # output projection
         self.c_proj = torch.nn.Linear(self.num_heads * self.head_size, config.n_embd, bias=config.bias)
+
+        self.q_norm = torch.nn.RMSNorm(config.head_size, eps=config.norm_eps) if config.qk_norm else None
+        self.k_norm = torch.nn.RMSNorm(config.head_size, eps=config.norm_eps) if config.qk_norm else None
                     
     def init_weights(self, init_std: float):
         for module in (self.q_proj, self.k_proj, self.v_proj):
@@ -102,9 +108,18 @@ class Attention(torch.nn.Module):
         
         q, k, v = self.project_qkv(q_x, kv_x)
         
-        q = q.view(B, T, self.num_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.num_heads, self.head_size * (1 + self.attn_output_gate))
+        if self.attn_output_gate:
+            q, gate = torch.chunk(q, 2, dim=-1)
+            gate = gate.reshape(B, T, -1)
+        q = q.transpose(1, 2) # (B, nh, T, hs)
         k = k.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.num_kv_heads, self.head_size).transpose(1, 2) # (B, nh, T, hs)
+
+        if self.q_norm:
+            q = self.q_norm(q)
+        if self.k_norm:
+            k = self.k_norm(k)
         
         q, k = rotary_emb(q, k, input_pos=input_pos)
         
@@ -116,6 +131,10 @@ class Attention(torch.nn.Module):
 
         # output projection (B, T, nh * hs) -> (B, T, C)
         y = y.contiguous().view(B, T, self.num_heads * self.head_size)
+
+        if self.attn_output_gate:
+            y = y * torch.sigmoid(gate)
+
         y = self.c_proj(y)
         if self.dropout > 0:
             F.dropout(y, self.dropout, training=self.training, inplace=True)

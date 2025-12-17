@@ -99,6 +99,8 @@ class AllamoConfiguration:
     sliding_window: int = None
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
+    attn_output_gate: bool = False
+    qk_norm: bool = False    
 
     # metrics logging
     log_interval: int = 1
@@ -214,6 +216,8 @@ class AllamoConfiguration:
         parser.add_argument('--bias', action='store_true', default=None, help='Enable bias globally. Helpful in finetuning process')
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
         parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
+        parser.add_argument('--attn_output_gate', action='store_true', default=None, help='Enable attention output gate')
+        parser.add_argument('--qk_norm', action='store_true', default=None, help='Enable QK norm')
 
         parser.add_argument('--log_interval', type=int, help='Number of iterations when training loss is logged')
         parser.add_argument('--log_metrics', action='store_true', default=None, help='Enable logging metrics')
