@@ -182,8 +182,8 @@ class BaseTrainer:
             validation_metrics[1] += unmasked_labels
             validation_metrics[2] += accuracy
         validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
-        val_loss = validation_metrics[0] / self.config.eval_iters
-        val_acc = validation_metrics[2] / self.config.eval_iters
+        val_loss = validation_metrics[0] / (self.config.eval_iters * self.dp_world_size)
+        val_acc = validation_metrics[2] / (self.config.eval_iters * self.dp_world_size)
         self.model.train()
         return val_loss, validation_metrics[1], val_acc
     
