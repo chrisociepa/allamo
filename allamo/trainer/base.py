@@ -174,16 +174,18 @@ class BaseTrainer:
     def evaluate_val_loss(self):
         self.val_dataloader.reset_offset()
         self.model.eval()
-        validation_metrics = torch.zeros(3).to(self.config.device)
+        validation_metrics = torch.zeros(4).to(self.config.device)
         for _ in range(self.config.eval_iters):
             batch = self.val_dataloader.get_batch()
             loss, unmasked_labels, accuracy = self.evaluate_loss(batch, 1, False)
             validation_metrics[0] += loss.item()
             validation_metrics[1] += unmasked_labels
             validation_metrics[2] += accuracy
+            validation_metrics[3] += 1
         validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
-        val_loss = validation_metrics[0] / (self.config.eval_iters * self.dp_world_size)
-        val_acc = validation_metrics[2] / (self.config.eval_iters * self.dp_world_size)
+        assert int(validation_metrics[3].item()) == self.config.eval_iters * self.dp_world_size
+        val_loss = validation_metrics[0] / validation_metrics[3]
+        val_acc = validation_metrics[2] / validation_metrics[3]
         self.model.train()
         return val_loss, validation_metrics[1], val_acc
     
@@ -225,8 +227,8 @@ class BaseTrainer:
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
         
-        unmasked_labels = self.config.block_size # we assume no padding in pretraining
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / self.config.block_size
+        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
+        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
         return loss, unmasked_labels, accuracy
 
     def evaluate_sft_loss(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -244,7 +246,7 @@ class BaseTrainer:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels
+        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
         return loss, unmasked_labels, accuracy
 
     def evaluate_dpo_loss(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -270,7 +272,7 @@ class BaseTrainer:
         rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
         unmasked_labels = chosen_unmasked_labels + rejected_unmasked_labels
         
-        accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels
+        accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels if chosen_unmasked_labels > 0 else 0
         
         if last_gas_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
             chosen_rewards = chosen_rewards.detach() 
