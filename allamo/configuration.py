@@ -29,21 +29,9 @@ class AllamoConfiguration:
     save_best_checkpoint: bool = False
     save_checkpoint_on_dataset_reload: bool = False
     distributed_checkpoint: bool = False
-
-    eval_interval: int = 1000
-    eval_iters: int = 200
-    eval_only: bool = False
     
+    batch_size: int = 4   
     gradient_accumulation_steps: int = 8
-    batch_size: int = 64
-    batch_size_initial: int = 2
-    batch_size_max_iter: int = 2000
-    batch_size_schedule: bool = False
-    batch_size_max: int = 64
-    grad_accum_initial: int = 2
-    grad_accum_max_iter: int = 2000
-    grad_accum_schedule: bool = False
-    grad_accum_max: int = 8    
     num_train_epochs: int = None
     max_iters: int = 600000
     weight_decay: float = 1e-1
@@ -79,17 +67,20 @@ class AllamoConfiguration:
     regular_checkpoint_hook_program: str = None
 
     # dataloader
-    data_dir: str = 'data'
-    dataset: str = None
-    dataset_train_files: str = None
-    dataset_validation_files: str = None
-    dataset_train_file_prefix: str = 'train.'
-    dataset_validation_file_prefix: str = 'val.'
-    dataset_train_processed_files_count: int = 0
-    dataset_seq_train: bool = True
-    dataset_seq_train_start: int = None
     dataset_buffer: bool = False
+    dataset_train_dir: str = None
+    dataset_train_files: str = None
+    dataset_train_file_prefix: str = None
+    dataset_train_processed_files_count: int = 0
+    dataset_validation_dir: str = None
+    dataset_validation_files: str = None
+    dataset_validation_file_prefix: str = None
 
+    # validation
+    eval_only: bool = False
+    eval_interval: int = 1000
+    eval_iters: int = -1
+    
     # model specification
     model_type: str = 'bielik2'
     block_size: int = 1024
@@ -160,18 +151,8 @@ class AllamoConfiguration:
         parser.add_argument('--save_checkpoint_on_dataset_reload', action='store_true', default=None, help='Enable model checkpoint saving on dataset reload')
         parser.add_argument('--distributed_checkpoint', action='store_true', default=None, help='Use PyTorch Distributed Checkpoint (DCP)')
 
-        parser.add_argument('--eval_interval', type=int, help='Number of iterations when evaluating model')
-        parser.add_argument('--eval_iters', type=int, help='Number of iterations when evaluating')
-        parser.add_argument('--eval_only', action='store_true', default=None, help='Exit right after the first evaluation. Indicates no training.')
-
-        parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--batch_size', type=int, help='Batch size')
-        parser.add_argument('--batch_size_initial', type=int, help='Initial batch_size value')
-        parser.add_argument('--batch_size_max_iter', help='Number of iterations to reach maximum batch_size value')
-        parser.add_argument('--batch_size_schedule', action='store_true', default=None, help='Enable linear batch_size scheduler')
-        parser.add_argument('--grad_accum_initial', type=int, help='Initial gradient_accumulation_steps value')
-        parser.add_argument('--grad_accum_max_iter', type=int, help='Number of iterations to reach maximum gradient_accumulation_steps value')
-        parser.add_argument('--grad_accum_schedule', action='store_true', default=None, help='Enable linear gradient_accumulation_steps scheduler')
+        parser.add_argument('--gradient_accumulation_steps', type=int, help='Help simulating larger batch sizes')
         parser.add_argument('--num_train_epochs', type=int, help='Total number of training epochs to perform')
         parser.add_argument('--max_iters', type=int, help='Total number of training iterations')
         parser.add_argument('--weight_decay', type=float, help='Max learning rate')
@@ -206,16 +187,18 @@ class AllamoConfiguration:
         parser.add_argument('--epoch_completion_hook_program', type=str, help='Path to the program/script to be executed after the epoch ends and the checkpoint is saved')
         parser.add_argument('--regular_checkpoint_hook_program', type=str, help='Path to the program/script to be executed after the regualar checkpoint is saved')
 
-        parser.add_argument('--data_dir', type=str, help='Directory where datasets exist')
-        parser.add_argument('--dataset', type=str, help='The name of the dataset directory within the data_dir')
-        parser.add_argument('--dataset_train_files', type=str, help='Comma-separated list of training dataset files to use')
-        parser.add_argument('--dataset_validation_files', type=str, help='Comma-separated list of validation dataset files to use')
-        parser.add_argument('--dataset_train_file_prefix', type=str, help='Custom prefix for training dataset files')
-        parser.add_argument('--dataset_validation_file_prefix', type=str, help='Custom prefix for validation dataset files')
-        parser.add_argument('--dataset_train_processed_files_count', type=int, help='The number of files already processed in the training dataset')
-        parser.add_argument('--dataset_seq_train', action='store_true', default=None, help='Iterate dataset sequentially')
-        parser.add_argument('--dataset_seq_train_start', type=int, help='Position in tokens to start with')
         parser.add_argument('--dataset_buffer', action='store_true', default=None, help='Enable buffer for dataset samples')
+        parser.add_argument('--dataset_train_dir', type=str, help='Path to the training dataset directory')
+        parser.add_argument('--dataset_train_files', type=str, help='Comma-separated list of training dataset files')
+        parser.add_argument('--dataset_train_file_prefix', type=str, help='Prefix for training dataset files')
+        parser.add_argument('--dataset_train_processed_files_count', type=int, help='The number of files already processed in the training dataset')
+        parser.add_argument('--dataset_validation_dir', type=str, help='Path to the validation dataset directory')
+        parser.add_argument('--dataset_validation_files', type=str, help='Comma-separated list of validation dataset files')
+        parser.add_argument('--dataset_validation_file_prefix', type=str, help='Prefix for validation dataset files')
+
+        parser.add_argument('--eval_only', action='store_true', default=None, help='Run evaluation without training')
+        parser.add_argument('--eval_interval', type=int, help='Number of iterations between evaluations')
+        parser.add_argument('--eval_iters', type=int, help='Number of iterations to run for each evaluation (disabled if <= 0)')
 
         parser.add_argument('--model_type', type=str, help='Model type to use')
         parser.add_argument('--block_size', type=int, help='The maximum sequence length that this model might ever be used with')

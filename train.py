@@ -20,7 +20,10 @@ def main():
     else:
         trainer = SimpleTrainer(config, train_ctx)
 
-    trainer.train()
+    if config.eval_only:
+        trainer.evaluate()
+    else:
+        trainer.train()
     trainer.close()
 
 if __name__ == '__main__':

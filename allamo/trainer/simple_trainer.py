@@ -1,7 +1,5 @@
 import os
 import shutil
-from contextlib import nullcontext
-
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -25,7 +23,6 @@ class SimpleTrainer(BaseTrainer):
         
     def init_torch(self):
         super().init_torch()
-        self.ctx = nullcontext() if self.device_type == 'cpu' else torch.amp.autocast(device_type=self.device_type, dtype=TORCH_DTYPE_MAP[self.config.dtype])
         if self.config.dtype == 'bfloat16-true':
             # torch.set_float32_matmul_precision("high")
             torch.set_default_dtype(torch.bfloat16)
@@ -35,6 +32,9 @@ class SimpleTrainer(BaseTrainer):
             self.config.distributed_checkpoint = False
             logger.warning("PyTorch Distributed Checkpoint (DCP) is only available for FSDP training! Fallback to regular checkpoint")
         super().init_training()
+
+        if self.device_type != 'cpu' and self.config.dtype != 'float32':
+            self.model_ctx = torch.amp.autocast(device_type=self.device_type, dtype=TORCH_DTYPE_MAP[self.config.dtype])
         
         model = self.model_spec.model_cls(self.model_config)
         self.model_num_params = model.model_num_params
@@ -71,9 +71,6 @@ class SimpleTrainer(BaseTrainer):
         self.optimizer = configure_optimizer(self.raw_model, self.config, self.device_type)
         if self.checkpoint_manager.is_checkpoint_available():
             self.load_optimizer_checkpoint(self.optimizer)
-        
-        self.init_gradient_accumulation_scheduler()
-        self.log_init_learning_rate()
 
     def load_optimizer_checkpoint(self, optimizer):
         ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)
@@ -107,15 +104,10 @@ class SimpleTrainer(BaseTrainer):
     def should_evaluate(self):
         return super().should_evaluate() and self.train_ctx.master_process
 
-    def compute_logits_and_loss(self, batch, last_micro_step):
+    def compute_logits_and_loss(self, batch, last_gas_step):
         if self.distributed():
-            # in DDP training we only need to sync gradients at the last micro step.
-            # the official way to do this is with model.no_sync() context manager, but
-            # I really dislike that this bloats the code and forces us to repeat code
-            # looking at the source of that context manager, it just toggles this variable
-            self.model.require_backward_grad_sync = last_micro_step
-        with self.ctx:
-            return self.model(**batch)
+            self.model.require_backward_grad_sync = last_gas_step
+        return super().compute_logits_and_loss(batch, last_gas_step)
 
     def close(self):
         if self.distributed():
