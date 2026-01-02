@@ -204,7 +204,7 @@ class AttentionVersion(torch.nn.Module):
 
     def xformers(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], dropout: float = 0.0) -> torch.Tensor:
         dropout_p = dropout if self.training else 0
-        B, T, C = q.size()
+        B, T, _, _ = q.size()
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
@@ -255,7 +255,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
-        B, T, C = q.size()
+        B, T, _, _ = q.size()
         block_mask = None
         if attn_mask is None:
             mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask

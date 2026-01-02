@@ -80,7 +80,7 @@ class Bielik2Model(BaseModel):
                 inputs_embeds = self.tok_drop(inputs_embeds)
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         
-        if attn_mask is not None and attention_version.version != 5: # FlexAttention use document ids instead of mask
+        if attn_mask is not None and attention_version.version != 'flex': # FlexAttention use document ids instead of mask
             if attn_mask.ndim == 3:
                 attn_mask = attn_mask.unsqueeze(1) # (B, T, T) -> (B, 1, T, T)
             elif attn_mask.ndim != 4:
