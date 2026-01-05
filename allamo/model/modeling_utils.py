@@ -127,7 +127,7 @@ class Attention(torch.nn.Module):
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
         
-        y = attention_version.apply(q, k, v, attn_mask, self.dropout, self.sliding_window)
+        y = attention_version.apply(q, k, v, attn_mask, seq_lens, self.dropout, self.sliding_window)
 
         # output projection (B, T, nh * hs) -> (B, T, C)
         y = y.contiguous().view(B, T, self.num_heads * self.head_size)

@@ -128,7 +128,7 @@ class AttentionVersion(torch.nn.Module):
         else:
             raise Exception('Unsupported attention version!')
     
-    def apply(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], dropout: float = 0.0, sliding_window: int = None) -> torch.Tensor:
+    def apply(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], seq_lens: Optional[torch.Tensor], dropout: float = 0.0, sliding_window: int = None) -> torch.Tensor:
         if self.version == 'eager':
             return self.eager(q, k, v, attn_mask, dropout)
         elif self.version == 'sdpa':
@@ -138,7 +138,7 @@ class AttentionVersion(torch.nn.Module):
         elif self.version == 'fa3':
             return self.fa3(q, k, v, attn_mask, sliding_window)
         elif self.version == 'xformers':
-            return self.xformers(q, k, v, attn_mask, dropout)
+            return self.xformers(q, k, v, attn_mask, seq_lens, dropout)
         elif self.version == 'flex':
             return self.flex_attention(q, k, v, attn_mask, sliding_window)
         else:
@@ -202,9 +202,9 @@ class AttentionVersion(torch.nn.Module):
             y = self.attn_impl_module.flash_attn_func(q, k, v, causal=True)
         return y
 
-    def xformers(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], dropout: float = 0.0) -> torch.Tensor:
+    def xformers(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], seq_lens: Optional[torch.Tensor], dropout: float = 0.0) -> torch.Tensor:
         dropout_p = dropout if self.training else 0
-        B, T, _, _ = q.size()
+        B, _, T, _ = q.size() # (B, nh, T, hs)
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
@@ -255,7 +255,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
-        B, T, _, _ = q.size()
+        B, _, T, _ = q.size() # (B, nh, T, hs)
         block_mask = None
         if attn_mask is None:
             mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask
