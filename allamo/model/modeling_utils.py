@@ -89,6 +89,11 @@ class Attention(torch.nn.Module):
         for module in (self.q_proj, self.k_proj, self.v_proj):
             torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
         torch.nn.init.trunc_normal_(self.c_proj.weight, mean=0.0, std=init_std)
+
+        if self.q_norm:
+            self.q_norm.reset_parameters()
+        if self.k_norm:
+            self.k_norm.reset_parameters()
         
     def forward(self,
                 q_x: torch.Tensor,
