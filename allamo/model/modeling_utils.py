@@ -33,19 +33,21 @@ class BaseModelConfig:
     act_fn_params: Dict = field(default_factory=dict)
     attn_output_gate: bool = False
     qk_norm: bool = False
+    gated_mlp: bool = True
 
 class FeedForward(torch.nn.Module):
 
     def __init__(self, config: BaseModelConfig):
         super().__init__()       
-        self.gate_proj = torch.nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.gate_proj = torch.nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias) if config.gated_mlp else None
         self.down_proj = torch.nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
         self.up_proj = torch.nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
         self.act_fn  = get_activation(act_fn_name=config.act_fn, **config.act_fn_params)
         self.dropout = torch.nn.Dropout(config.dropout) if config.dropout != 0 else None
         
     def init_weights(self, init_std: float):
-        torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
+        if self.gate_proj is not None:
+            torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
         for module in (self.down_proj, self.up_proj):
             torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
         if hasattr(self.act_fn, 'reset_params'):
@@ -58,7 +60,10 @@ class FeedForward(torch.nn.Module):
         return x
         
     def mlp(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if self.gate_proj is not None:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        else:
+            return self.down_proj(self.act_fn(self.up_proj(x)))
 
 
 class Attention(torch.nn.Module):
