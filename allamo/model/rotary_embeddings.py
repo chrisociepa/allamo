@@ -67,6 +67,25 @@ def _compute_yarn_rope_parameters(rotary_dim: int, max_position: int, rope_freq_
     )
     return inv_freq, mscale
 
+def _compute_llama3_rope_parameters(rotary_dim: int, max_position: int, rope_freq_base: float, rope_scaling: Optional[Dict[str, Any]] = None) -> Tuple[torch.Tensor, float]:
+    factor = rope_scaling["factor"]
+    low_freq_factor = rope_scaling["low_freq_factor"]
+    high_freq_factor = rope_scaling["high_freq_factor"]
+    old_context_len = rope_scaling["original_max_position_embeddings"]
+    inv_freq, _ = _compute_original_rope_parameters(rotary_dim, max_position, rope_freq_base)
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+
+    wavelen = 2 * math.pi / inv_freq
+    inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+    smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+    is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+    inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+    return inv_freq, None
+
 class RotaryEmbedding(torch.nn.Module):
     
     def __init__(self, rotary_dim: int, max_position: int, rope_freq_base: float, rope_scaling: Optional[Dict[str, Any]] = None):
@@ -87,6 +106,8 @@ class RotaryEmbedding(torch.nn.Module):
             self.rope_init_fn = _compute_linear_scaling_rope_parameters
         elif self.rope_type == "yarn":
             self.rope_init_fn = _compute_yarn_rope_parameters
+        elif self.rope_type == "llama3":
+            self.rope_init_fn = _compute_llama3_rope_parameters
         else:
             raise ValueError(f"Invalid rope type: {self.rope_type}")
 
