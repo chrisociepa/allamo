@@ -1,13 +1,21 @@
 import argparse
 import joblib
 import json
+import logging
 import os
 import time
 import torch
 from openai import OpenAI
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from allamo.logging import configure_logger, logger
+
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(stream_handler)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 def format_seconds_as_time(seconds):
     hours, remainder = divmod(seconds, 3600)
@@ -143,7 +151,6 @@ def save_samples(samples, input_file, args):
         logger.info(f"Samples saved in {samples_file}")
 
 if __name__ == "__main__":
-    configure_logger()
     parser = argparse.ArgumentParser(description='Tokenize dialogues for DPO training')
     parser.add_argument("-f", "--input_file", help="Input file in the ALM format")
     parser.add_argument("-i", "--input_dir", help="Directory with input files in the ALM format")
