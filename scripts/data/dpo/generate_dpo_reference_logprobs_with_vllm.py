@@ -80,7 +80,7 @@ async def process_file(input_file, output_file, vllm_client, model, ignore_index
     results = []
     done_count = 0
     failed_count = 0
-    log_interval = max(1, total_rows // 20) 
+    log_interval = max(1, total_rows // 100) 
     
     logger.info(f"Starting processing {total_rows} rows with concurrency limit {concurrency}...")
     start_time = time.time()
@@ -98,8 +98,9 @@ async def process_file(input_file, output_file, vllm_client, model, ignore_index
             elapsed = time.time() - start_time
             speed = done_count / elapsed if elapsed > 0 else 0
             eta = (total_rows - done_count) / speed if speed > 0 else 0
+            percent = (done_count / total_rows) * 100
             logger.info(
-                f"Progress: {done_count/total_rows:>4.1%} | "
+                f"Progress: {percent:3.0f}% | "
                 f"Done: {done_count}/{total_rows} | "
                 f"Failed: {failed_count} | "
                 f"Speed: {speed:.2f} it/s | "
