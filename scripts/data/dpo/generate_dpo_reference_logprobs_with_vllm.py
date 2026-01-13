@@ -6,7 +6,7 @@ import time
 import torch
 from openai import OpenAI
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from allamo.logging import configure_logger, logger
 
 def format_seconds_as_time(seconds):
@@ -60,15 +60,63 @@ def process_single_sample(sample, vllm_client, model, ignore_index):
     sample["reference_rejected_logps"] = rejected_logps.item()
     return sample
 
-def process_file(input_file, vllm_client, model, ignore_index, concurrency, disable_logging=True):
+def process_file(input_file, output_file, vllm_client, model, ignore_index, concurrency):
     samples = joblib.load(input_file)
-    
+    total_rows = len(samples)
+    log_interval = max(1, total_rows // 100)
+
+    results = [None] * total_rows
+    failed_count = 0
+    start_time = time.time()
+
+    logger.info(f"Starting processing {total_rows} rows with {concurrency} workers...")
+
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        list(tqdm(executor.map(lambda s: process_single_sample(s, vllm_client, model, ignore_index), samples), total=len(samples), disable=disable_logging))
+        future_to_idx = {
+            executor.submit(process_single_sample, sample, vllm_client, model, ignore_index): i
+            for i, sample in enumerate(samples)
+        }
+        
+        for i, future in enumerate(as_completed(future_to_idx), 1):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                logger.error(f"Row {idx} failed: {e}")
+                results[idx] = None
+                failed_count += 1
+
+            if i % log_interval == 0 or i == total_rows:
+                elapsed = time.time() - start_time
+                speed = i / elapsed if elapsed > 0 else 0
+                remaining_items = total_rows - i
+                eta_seconds = remaining_items / speed if speed > 0 else 0
+                
+                eta_str = format_seconds_as_time(eta_seconds)
+                percent = (i / total_rows) * 100
+
+                logger.info(
+                    f"Progress: {percent:3.0f}% | "
+                    f"Done: {i}/{total_rows} | "
+                    f"Failed: {failed_count} | "
+                    f"Speed: {speed:.2f} it/s | "
+                    f"ETA: {eta_str}"
+                )
+
+    total_time = format_seconds_as_time(time.time() - start_time)
+    success_count = total_rows - failed_count
+    logger.info("-" * 30)
+    logger.info(f"PROCESSING SUMMARY:")
+    logger.info(f"Total rows:      {total_rows}")
+    logger.info(f"Successfully:    {success_count}")
+    logger.info(f"Failed:          {failed_count}")
+    logger.info(f"Total time:      {total_time}")
+    logger.info("-" * 30)
+
+    with open(output_file, 'wb') as f:
+        joblib.dump(results, f)
     
-    with open(input_file, 'wb') as f:
-        joblib.dump(samples, f)
-    return samples
+    return results
 
 def save_samples(samples, input_file, args):
     if args.save_samples > 0:
@@ -106,7 +154,6 @@ if __name__ == "__main__":
     parser.add_argument("--concurrency", type=int, default=10, help="Number of concurrent requests")
     parser.add_argument("--ignore_index", type=int, default=-100, help="Ignore index for loss computation")
     parser.add_argument('--save_samples', type=int, default=-1, help='Number of samples to save')
-    parser.add_argument('--verbose', action='store_true', help='Verbose logging')
     args = parser.parse_args()
     
     input_files = []
@@ -126,8 +173,12 @@ if __name__ == "__main__":
 
     for input_file in input_files:
         logger.info(f'Processing {input_file}')
-        samples = process_file(input_file, vllm_client, args.vllm_model, args.ignore_index, args.concurrency, disable_logging=(not args.verbose))
+        output_file = os.path.join(args.output_dir, os.path.basename(input_file))
+        samples = process_file(input_file, output_file, vllm_client, args.vllm_model, args.ignore_index, args.concurrency)
+        logger.info(f"Saved ({len(samples)}) samples in {output_file}")
+
         save_samples(samples, input_file, args)
+
         stats = calculate_sample_stats(samples)
         logger.info(f"Stats for {input_file}:\n{json.dumps(stats, indent=4, ensure_ascii=False)}")
     

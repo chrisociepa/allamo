@@ -60,7 +60,7 @@ def calculate_sample_stats(samples):
         'avg_reference_rejected_logps': sum_reference_rejected_logps / len(samples)
     }
         
-def process_file(input_file, model, device, pin_memory, ignore_index, disable_logging=True):
+def process_file(input_file, output_file, model, device, pin_memory, ignore_index, disable_logging=True):
     samples = joblib.load(input_file)
     
     with torch.no_grad():
@@ -73,14 +73,14 @@ def process_file(input_file, model, device, pin_memory, ignore_index, disable_lo
             sample["reference_rejected_loss"] = reference_rejected_output.loss
             sample["reference_rejected_logps"] = get_log_prob(reference_rejected_output.logits, batch["rejected_target_ids"], ignore_index).item()
     
-    with open(input_file, 'wb') as f:
+    with open(output_file, 'wb') as f:
         joblib.dump(samples, f)
     return samples
         
 def process_chunk(args):
     input_file, hf_model_path, hf_model_dtype, device, pin_memory, ignore_index = args
     model = AutoModelForCausalLM.from_pretrained(hf_model_path, torch_dtype=get_dtype(hf_model_dtype), device_map=device)
-    process_file(input_file, model, device, pin_memory, ignore_index)
+    process_file(input_file, input_file, model, device, pin_memory, ignore_index) # overwrite chunk file
     
 def save_samples(samples, input_file, args):
     if args.save_samples > 0:
@@ -188,7 +188,9 @@ if __name__ == "__main__":
         
         for input_file in input_files:
             logger.info(f'Processing {input_file}')
-            samples =  process_file(input_file, model, device, args.pin_memory, args.ignore_index, disable_logging=(not args.verbose))
+            output_file = os.path.join(args.output_dir, os.path.basename(input_file))
+            samples =  process_file(input_file, output_file, model, device, args.pin_memory, args.ignore_index, disable_logging=(not args.verbose))
+            logger.info(f"Saved ({len(samples)}) samples in {output_file}")
             
             save_samples(samples, input_file, args)
 
