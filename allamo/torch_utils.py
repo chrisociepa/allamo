@@ -49,11 +49,6 @@ def configure_torch(config: AllamoConfiguration, rank: int = 0):
     torch.manual_seed(config.seed + rank)
     if 'cuda' in config.device:
         torch.cuda.manual_seed(config.seed + rank)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    
-        # Use for setting the internal precision of float32 matrix multiplications    
-        # torch.set_float32_matmul_precision("highest")
 
 def init_torch(train_ctx: TrainingContext, config: AllamoConfiguration, distributed=True):
     if distributed:
