@@ -31,6 +31,9 @@ class Bielik2HFAdapter(BaseHFAdapter):
         config.bias = self.check_bias(hf_model.state_dict())
         config.norm_eps = hf_model.config.rms_norm_eps
         config.rope_freq_base = int(hf_model.config.rope_theta)
+        config.qk_norm = getattr(hf_model.config, "qk_norm", False)
+        config.gated_mlp = hf_model.config.hidden_act != "xielu" # heurystic that works for Apertus models
+        config.attn_output_gate = False
         config.act_fn = hf_model.config.hidden_act
         if config.act_fn == "lra":
             config.act_fn_params = {
@@ -47,11 +50,13 @@ class Bielik2HFAdapter(BaseHFAdapter):
             state_dicts_map[f"layers.{layer_i}.attention.k_proj.weight"] = f"model.layers.{layer_i}.self_attn.k_proj.weight"
             state_dicts_map[f"layers.{layer_i}.attention.v_proj.weight"] = f"model.layers.{layer_i}.self_attn.v_proj.weight"
             state_dicts_map[f"layers.{layer_i}.attention.c_proj.weight"] = f"model.layers.{layer_i}.self_attn.o_proj.weight"
-            state_dicts_map[f"layers.{layer_i}.feed_forward.gate_proj.weight"] = f"model.layers.{layer_i}.mlp.gate_proj.weight"
             state_dicts_map[f"layers.{layer_i}.feed_forward.down_proj.weight"] = f"model.layers.{layer_i}.mlp.down_proj.weight"
             state_dicts_map[f"layers.{layer_i}.feed_forward.up_proj.weight"] = f"model.layers.{layer_i}.mlp.up_proj.weight"
             state_dicts_map[f"layers.{layer_i}.attention_norm.weight"] = f"model.layers.{layer_i}.input_layernorm.weight"
             state_dicts_map[f"layers.{layer_i}.ffn_norm.weight"] = f"model.layers.{layer_i}.post_attention_layernorm.weight"
+
+            if config.gated_mlp:
+                state_dicts_map[f"layers.{layer_i}.feed_forward.gate_proj.weight"] = f"model.layers.{layer_i}.mlp.gate_proj.weight"
             
             if config.bias:
                 self.set_mapping_or_zero(state_dicts_map, f"model.layers.{layer_i}.self_attn.q_proj.bias", f"layers.{layer_i}.attention.q_proj.bias", hf_model_sd, model_sd)
@@ -62,13 +67,21 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 self.set_mapping_or_zero(state_dicts_map, f"model.layers.{layer_i}.mlp.down_proj.bias", f"layers.{layer_i}.feed_forward.down_proj.bias", hf_model_sd, model_sd)
                 self.set_mapping_or_zero(state_dicts_map, f"model.layers.{layer_i}.mlp.up_proj.bias", f"layers.{layer_i}.feed_forward.up_proj.bias", hf_model_sd, model_sd)
             
+            if config.qk_norm:
+                state_dicts_map[f"layers.{layer_i}.q_norm.weight"] = f"model.layers.{layer_i}.self_attn.q_norm.weight"
+                state_dicts_map[f"layers.{layer_i}.k_norm.weight"] = f"model.layers.{layer_i}.self_attn.k_norm.weight"
+            
+            if config.act_fn == "xielu":
+                state_dicts_map[f"layers.{layer_i}.feed_forward.act_fn.alpha_p"] = f"model.layers.{layer_i}.mlp.act_fn.alpha_p"
+                state_dicts_map[f"layers.{layer_i}.feed_forward.act_fn.alpha_n"] = f"model.layers.{layer_i}.mlp.act_fn.alpha_n"
+            
         state_dicts_map["tok_embeddings.weight"] = "model.embed_tokens.weight"
         state_dicts_map["norm.weight"] = "model.norm.weight"
         state_dicts_map["lm_head.weight"] = "lm_head.weight"
         return state_dicts_map
 
     def to_hf_model(self, checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_model_type, hf_model_dtype, hf_model_max_position_embeddings):
-        SUPPORTED_MODEL_ARCHS = ['llama', 'mistral', 'llama_lra']
+        SUPPORTED_MODEL_ARCHS = ['llama', 'mistral', 'apertus', 'llama_lra']
         assert hf_model_type in SUPPORTED_MODEL_ARCHS, f"HF model {hf_model_type} architecture is not supported"
 
         os.makedirs(hf_model_path, exist_ok=True)
@@ -92,12 +105,15 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 f"model.layers.{layer_i}.self_attn.k_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.k_proj.weight"],
                 f"model.layers.{layer_i}.self_attn.v_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.v_proj.weight"],
                 f"model.layers.{layer_i}.self_attn.o_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.c_proj.weight"],
-                f"model.layers.{layer_i}.mlp.gate_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.weight"],
                 f"model.layers.{layer_i}.mlp.down_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.weight"],
                 f"model.layers.{layer_i}.mlp.up_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.weight"],
                 f"model.layers.{layer_i}.input_layernorm.weight": model_checkpoint[f"layers.{layer_i}.attention_norm.weight"],
                 f"model.layers.{layer_i}.post_attention_layernorm.weight": model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
             }
+
+            if config.gated_mlp:
+                state_dict[f"model.layers.{layer_i}.mlp.gate_proj.weight"] = model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.weight"]
+
             if config.bias:
                 state_dict[f"model.layers.{layer_i}.self_attn.q_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.q_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.self_attn.k_proj.bias"] = model_checkpoint[f"layers.{layer_i}.attention.k_proj.bias"]
@@ -106,6 +122,11 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 state_dict[f"model.layers.{layer_i}.mlp.gate_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.down_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.up_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.bias"]
+            
+            if config.qk_norm:
+                state_dict[f"model.layers.{layer_i}.self_attn.q_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.q_norm.weight"]
+                state_dict[f"model.layers.{layer_i}.self_attn.k_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.k_norm.weight"]
+            
             if config.act_fn == "lra":
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_0"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_0"]
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.p_coeff_1"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.p_coeff_1"]
@@ -117,6 +138,10 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_2"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_2"]
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_3"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_3"]
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.q_coeff_4"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.q_coeff_4"]
+            elif config.act_fn == "xielu":
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.alpha_p"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.alpha_p"]
+                state_dict[f"model.layers.{layer_i}.mlp.act_fn.alpha_n"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.alpha_n"]
+            
             for k, v in state_dict.items():
                 index_dict["weight_map"][k] = filename
                 param_count += v.numel()
@@ -180,6 +205,23 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 sliding_window=config.sliding_window,
                 hidden_act=config.act_fn,
             )
+        elif hf_model_type == "apertus":
+            from transformers import ApertusConfig
+            hf_config = ApertusConfig(
+                vocab_size=config.vocab_size,
+                max_position_embeddings=max_position_embeddings,
+                hidden_size=config.n_embd,
+                intermediate_size=config.intermediate_size,
+                num_attention_heads=config.n_head,
+                num_key_value_heads=config.num_kv_heads,
+                num_hidden_layers=config.n_layer,
+                rms_norm_eps=config.norm_eps,
+                rope_theta=config.rope_freq_base,
+                attention_bias=config.bias,
+                mlp_bias=config.bias,
+                qk_norm=config.qk_norm,
+                hidden_act=config.act_fn,
+            )
         elif hf_model_type == "llama_lra":
             from allamo.model.architectures.bielik2.modeling_hf_lra import LlamaLRAConfig
             hf_config = LlamaLRAConfig(
@@ -208,13 +250,16 @@ class Bielik2HFAdapter(BaseHFAdapter):
         logger.info(f"Loading the intermadiate HF checkpoint in {torch_dtype} dtype")
         if hf_model_type == "llama":
             from transformers import LlamaForCausalLM
-            hf_model = LlamaForCausalLM.from_pretrained(hf_intermadiate_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+            hf_model = LlamaForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
         elif hf_model_type == "mistral":
             from transformers import MistralForCausalLM
-            hf_model = MistralForCausalLM.from_pretrained(hf_intermadiate_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+            hf_model = MistralForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
+        elif hf_model_type == "apertus":
+            from transformers import ApertusForCausalLM
+            hf_model = ApertusForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
         elif hf_model_type == "llama_lra":
             from allamo.model.architectures.bielik2.modeling_hf_lra import LlamaLRAForCausalLM
-            hf_model = LlamaLRAForCausalLM.from_pretrained(hf_intermadiate_model_path, torch_dtype=torch_dtype, low_cpu_mem_usage=True)
+            hf_model = LlamaLRAForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
         
         # Avoid saving this as part of the config.
         del hf_model.config._name_or_path
