@@ -52,8 +52,20 @@ class Bielik2HFAdapter(BaseHFAdapter):
             state_dicts_map[f"layers.{layer_i}.attention.c_proj.weight"] = f"model.layers.{layer_i}.self_attn.o_proj.weight"
             state_dicts_map[f"layers.{layer_i}.feed_forward.down_proj.weight"] = f"model.layers.{layer_i}.mlp.down_proj.weight"
             state_dicts_map[f"layers.{layer_i}.feed_forward.up_proj.weight"] = f"model.layers.{layer_i}.mlp.up_proj.weight"
-            state_dicts_map[f"layers.{layer_i}.attention_norm.weight"] = f"model.layers.{layer_i}.input_layernorm.weight"
-            state_dicts_map[f"layers.{layer_i}.ffn_norm.weight"] = f"model.layers.{layer_i}.post_attention_layernorm.weight"
+
+            if f"model.layers.{layer_i}.input_layernorm.weight" in hf_model_sd:
+                state_dicts_map[f"layers.{layer_i}.attention_norm.weight"] = f"model.layers.{layer_i}.input_layernorm.weight"
+            elif f"model.layers.{layer_i}.attention_layernorm.weight" in hf_model_sd:
+                state_dicts_map[f"layers.{layer_i}.attention_norm.weight"] = f"model.layers.{layer_i}.attention_layernorm.weight"
+            else:
+                raise Exception(f"Layer {layer_i} attention norm not found in the model")
+            
+            if f"model.layers.{layer_i}.post_attention_layernorm.weight" in hf_model_sd:
+                state_dicts_map[f"layers.{layer_i}.ffn_norm.weight"] = f"model.layers.{layer_i}.post_attention_layernorm.weight"
+            elif f"model.layers.{layer_i}.feedforward_layernorm.weight" in hf_model_sd:
+                state_dicts_map[f"layers.{layer_i}.ffn_norm.weight"] = f"model.layers.{layer_i}.feedforward_layernorm.weight"
+            else:
+                raise Exception(f"Layer {layer_i} ffn norm not found in the model")
 
             if config.gated_mlp:
                 state_dicts_map[f"layers.{layer_i}.feed_forward.gate_proj.weight"] = f"model.layers.{layer_i}.mlp.gate_proj.weight"
@@ -68,8 +80,8 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 self.set_mapping_or_zero(state_dicts_map, f"model.layers.{layer_i}.mlp.up_proj.bias", f"layers.{layer_i}.feed_forward.up_proj.bias", hf_model_sd, model_sd)
             
             if config.qk_norm:
-                state_dicts_map[f"layers.{layer_i}.q_norm.weight"] = f"model.layers.{layer_i}.self_attn.q_norm.weight"
-                state_dicts_map[f"layers.{layer_i}.k_norm.weight"] = f"model.layers.{layer_i}.self_attn.k_norm.weight"
+                state_dicts_map[f"layers.{layer_i}.attention.q_norm.weight"] = f"model.layers.{layer_i}.self_attn.q_norm.weight"
+                state_dicts_map[f"layers.{layer_i}.attention.k_norm.weight"] = f"model.layers.{layer_i}.self_attn.k_norm.weight"
             
             if config.act_fn == "xielu":
                 state_dicts_map[f"layers.{layer_i}.feed_forward.act_fn.alpha_p"] = f"model.layers.{layer_i}.mlp.act_fn.alpha_p"
@@ -110,6 +122,13 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 f"model.layers.{layer_i}.input_layernorm.weight": model_checkpoint[f"layers.{layer_i}.attention_norm.weight"],
                 f"model.layers.{layer_i}.post_attention_layernorm.weight": model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
             }
+
+            if hf_model_type == "apertus":
+                state_dict[f"model.layers.{layer_i}.attention_layernorm.weight"] = model_checkpoint[f"layers.{layer_i}.attention_norm.weight"]
+                state_dict[f"model.layers.{layer_i}.feedforward_layernorm.weight"] = model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
+            else:
+                state_dict[f"model.layers.{layer_i}.input_layernorm.weight"] = model_checkpoint[f"layers.{layer_i}.attention_norm.weight"]
+                state_dict[f"model.layers.{layer_i}.post_attention_layernorm.weight"] = model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
 
             if config.gated_mlp:
                 state_dict[f"model.layers.{layer_i}.mlp.gate_proj.weight"] = model_checkpoint[f"layers.{layer_i}.feed_forward.gate_proj.weight"]

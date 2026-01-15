@@ -47,7 +47,7 @@ class BaseHFAdapter:
             logger.warning(f"Reset '{dst_key}' to zero")
     
     def load_hf_model(self, hf_model_path):
-        return AutoModelForCausalLM.from_pretrained(hf_model_path, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        return AutoModelForCausalLM.from_pretrained(hf_model_path, dtype=torch.float32, low_cpu_mem_usage=True)
     
     def check_parameter_coverage(self, hf_model_sd, model_sd, state_dicts_map):
         for k, v in model_sd.items():
