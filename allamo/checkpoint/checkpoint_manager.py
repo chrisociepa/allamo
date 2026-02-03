@@ -122,14 +122,20 @@ class CheckpointManager:
 
     def load_regular_model_checkpoint(self, model):
         model_ckpt_file_path = get_model_checkpoint_path(self.checkpoint_name, self.checkpoint_dir)
-        state_dict = torch.load(model_ckpt_file_path, map_location='cpu', weights_only=True)
-        remove_unwanted_prefix_from_model_state_dict(state_dict)
-        model.load_state_dict(state_dict)
         if self.config.log_checkpoint_md5_on_load and self.train_ctx.master_process:
             md5sum = calculate_md5(model_ckpt_file_path)
-            logger.info(f"Model state loaded from checkpoint {model_ckpt_file_path} - MD5: {md5sum}")
-        else:
-            logger.info(f"Model state loaded from checkpoint {model_ckpt_file_path}")
+            logger.info(f"Loading state dict from checkpoint {model_ckpt_file_path} with MD5: {md5sum}")
+        
+        state_dict = torch.load(model_ckpt_file_path, map_location='cpu', weights_only=True)
+        logger.info(f"State dict loaded from checkpoint {model_ckpt_file_path}")
+        
+        remove_unwanted_prefix_from_model_state_dict(state_dict)
+        incompatible_keys = model.load_state_dict(state_dict, strict=False)
+        logger.info(f"Model state loaded from checkpoint {model_ckpt_file_path}")
+        if incompatible_keys.unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint: {incompatible_keys.unexpected_keys}")
+        if incompatible_keys.missing_keys:
+            logger.warning(f"Missing keys in checkpoint: {incompatible_keys.missing_keys}")
 
     def save_config_checkpoint(self, config_ckpt_file_path, md5sum, model_config):
         if not self.train_ctx.master_process:
