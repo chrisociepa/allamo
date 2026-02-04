@@ -10,7 +10,7 @@ from allamo.train_utils import (
 class AutoModel:
 
     @classmethod
-    def from_pretrained(ckpt_file_name, ckpt_dir):
+    def from_pretrained(cls, ckpt_file_name, ckpt_dir):
         with open(get_config_checkpoint_path(ckpt_file_name, ckpt_dir), "r", encoding="utf-8") as f:
             config_checkpoint = json.load(f)
         model_checkpoint = torch.load(get_model_checkpoint_path(ckpt_file_name, ckpt_dir), map_location="cpu")
