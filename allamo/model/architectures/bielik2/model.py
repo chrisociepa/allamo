@@ -43,23 +43,23 @@ class Bielik2Model(BaseModel):
         with torch.device(buffer_device):
             self.rotary_emb.reset_parameters()
         
-        if self.tok_embeddings is not None:
-            torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=1.0)
+            if self.tok_embeddings is not None:
+                torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=1.0)
+                
+            weight_init_std = self.calculate_weight_init_std(self.config.n_layer)
+            for layer in self.layers:
+                if layer is not None:
+                    layer.init_weights(weight_init_std)
             
-        weight_init_std = self.calculate_weight_init_std(self.config.n_layer)
-        for layer in self.layers:
-            if layer is not None:
-                layer.init_weights(weight_init_std)
-        
-        if self.norm is not None:
-            self.norm.reset_parameters()
-        
-        if self.lm_head is not None:
-            cutoff_factor = 3
-            weight_init_std = self.config.n_embd ** -0.5
-            lower = -cutoff_factor * weight_init_std
-            upper = cutoff_factor * weight_init_std
-            torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
+            if self.norm is not None:
+                self.norm.reset_parameters()
+            
+            if self.lm_head is not None:
+                cutoff_factor = 3
+                weight_init_std = self.config.n_embd ** -0.5
+                lower = -cutoff_factor * weight_init_std
+                upper = cutoff_factor * weight_init_std
+                torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
 
     def forward(self,
         input_ids: torch.Tensor,
