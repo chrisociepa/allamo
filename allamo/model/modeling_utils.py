@@ -50,8 +50,8 @@ class FeedForward(torch.nn.Module):
             torch.nn.init.trunc_normal_(self.gate_proj.weight, mean=0.0, std=0.02)
         for module in (self.down_proj, self.up_proj):
             torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=init_std)
-        if hasattr(self.act_fn, 'reset_params'):
-            self.act_fn.reset_params()
+        if hasattr(self.act_fn, 'reset_parameters'):
+            self.act_fn.reset_parameters()
 
     def forward(self, x):
         x = self.mlp(x)
