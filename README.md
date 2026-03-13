@@ -67,7 +67,7 @@ To run on a single node with 1 GPU, example:
 $ python train.py \
     --config="./config/train_1B.json" \
     --training_type=pre \
-    --wandb_log=True
+    --metrics_logger=wandb
 ```
 
 To run on a single node with 8 GPUs with DDP, example:
@@ -77,7 +77,7 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=8 train.py \
     --config="./config/train_1B.json" \
     --training_type=pre \
     --fsdp_sharding_strategy=None \
-    --wandb_log=True
+    --metrics_logger=wandb
 ```
 
 To run on 2+ nodes (with 8 GPUs each) with DDP (by turning off FSDP), example:
@@ -88,7 +88,7 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 --master_addr=123.456.123
     --config="./config/train_1B.json" \
     --training_type=pre \
     --fsdp_sharding_strategy=None \
-    --wandb_log=True
+    --metrics_logger=wandb
 ```
 
 - Run on the worker node(s):
@@ -98,7 +98,7 @@ $ torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 --master_addr=123.456.123
     --config="./config/train_1B.json" \
     --training_type=pre \
     --fsdp_sharding_strategy=None \
-    --wandb_log=True
+    --metrics_logger=wandb
 ```
 
 To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
@@ -108,7 +108,7 @@ To run on 2+ nodes (with 8 GPUs each) with FSDP, example:
 torchrun --nnodes=2 --nproc-per-node=8 --rdzv-id=123 --rdzv-backend=c10d --rdzv-endpoint=123.456.123.456:29292 train.py \
     --config="./config/train_1B.json" \
     --training_type=pre \
-    --wandb_log=True
+    --metrics_logger=wandb
 ```
 
 Note: in case your cluster does not have Infiniband interconnect prepend `NCCL_IB_DISABLE=1`.

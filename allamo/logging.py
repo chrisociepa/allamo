@@ -17,6 +17,7 @@ def configure_logger(config: AllamoConfiguration = None, with_file_handler: bool
     logger.addHandler(stream_handler)
     
     if with_file_handler:
+        os.makedirs(config.out_dir, exist_ok=True)
         run_timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
         log_file_path = os.path.join(config.out_dir, f'allamo-{run_timestamp_str}.log')
         file_handler = logging.FileHandler(log_file_path)

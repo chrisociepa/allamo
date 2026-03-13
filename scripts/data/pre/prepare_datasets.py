@@ -39,7 +39,7 @@ def load_list_of_txt_files(index_file_path, input_data_dir, data_split):
         if 'Split' not in txt_files_df.columns:
             txt_files_df['Split'] = data_split if data_split else 'train'
     elif input_data_dir:
-        txt_files = glob.glob(os.path.join(input_data_dir, "*.txt"))
+        txt_files = [os.path.basename(p) for p in glob.glob(os.path.join(input_data_dir, "*.txt"))]
         txt_files_df = pd.DataFrame({'File': txt_files})
         txt_files_df['Split'] = data_split if data_split else 'train'
     else:
