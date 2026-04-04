@@ -32,6 +32,7 @@ class BaseModelConfig:
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
     attn_output_gate: bool = False
+    exclusive_self_attention: bool = False
     qk_norm: bool = False
     gated_mlp: bool = True
 
@@ -77,6 +78,7 @@ class Attention(torch.nn.Module):
         self.dropout = config.dropout
         self.sliding_window = config.sliding_window if attention_version.flash_attn_supports_window_size else None
         self.attn_output_gate = config.attn_output_gate
+        self.exclusive_self_attention = config.exclusive_self_attention
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
@@ -99,7 +101,18 @@ class Attention(torch.nn.Module):
             self.q_norm.reset_parameters()
         if self.k_norm:
             self.k_norm.reset_parameters()
-        
+
+    def _xsa_efficient(self, y: torch.Tensor, v_kv: torch.Tensor) -> torch.Tensor:
+        """XSA: subtract attention output's projection onto each KV head's value (arXiv:2603.09078).
+        y: [B, T, H, D], v_kv: [B, T, Hkv, D] without KV repeat — GQA-aware, matches repeated-v math."""
+        B, T, H, D = y.shape
+        Hkv = v_kv.size(-2)
+        group = H // Hkv
+        y_g = y.view(B, T, Hkv, group, D)
+        vn = F.normalize(v_kv, dim=-1, eps=1e-6).unsqueeze(-2)
+        proj = (y_g * vn).sum(dim=-1, keepdim=True) * vn
+        return (y_g - proj).reshape(B, T, H, D)
+
     def forward(self,
                 q_x: torch.Tensor,
                 kv_x: torch.Tensor,
@@ -132,12 +145,17 @@ class Attention(torch.nn.Module):
             k = self.k_norm(k)
         
         q, k = rotary_emb(q, k, input_pos=input_pos)
+
+        v_kv_bt = v.transpose(1, 2).contiguous() if self.exclusive_self_attention and kv_x is None else None
         
         if self.num_key_value_groups > 1:
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
         
         y = attention_version.apply(q, k, v, attn_mask, seq_lens, self.dropout, self.sliding_window)
+
+        if self.exclusive_self_attention and kv_x is None:
+            y = self._xsa_efficient(y, v_kv_bt)
 
         # output projection (B, T, nh * hs) -> (B, T, C)
         y = y.contiguous().view(B, T, self.num_heads * self.head_size)
@@ -205,6 +223,8 @@ class BaseModel(torch.nn.Module):
     
     def __post_init__(self):
         attention_version.log_version(self.config.sliding_window)
+        if self.config.exclusive_self_attention:
+            logger.info("Exclusive Self-Attention (XSA) is enabled")
         self.log_estimated_size()
         self.init_model_weights(buffer_device=None)
 

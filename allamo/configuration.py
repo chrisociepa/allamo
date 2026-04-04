@@ -100,6 +100,7 @@ class AllamoConfiguration:
     act_fn: str = "silu"
     act_fn_params: Dict = field(default_factory=dict)
     attn_output_gate: bool = False
+    exclusive_self_attention: bool = False
     qk_norm: bool = False   
     gated_mlp: bool = True
 
@@ -218,6 +219,7 @@ class AllamoConfiguration:
         parser.add_argument('--norm_eps', type=float, help='RMSNorm normalizing function param')
         parser.add_argument('--sliding_window', type=int, help='Enable sliding window attention with specified window size')
         parser.add_argument('--attn_output_gate', action='store_true', default=None, help='Enable attention output gate')
+        parser.add_argument('--exclusive_self_attention', action='store_true', default=None, help='Enable Exclusive Self-Attention (XSA); orthogonalizes attention output w.r.t. value vectors')
         parser.add_argument('--qk_norm', action='store_true', default=None, help='Enable QK norm')
         parser.add_argument('--gated_mlp', action='store_true', default=None, help='Enable gated MLP')
 

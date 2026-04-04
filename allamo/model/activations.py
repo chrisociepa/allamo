@@ -40,6 +40,18 @@ class XIELU(nn.Module):
     def extra_repr(self):
         return f'beta={self.beta_init}, eps={self.eps_init}'
 
+
+class LeakyReLUSquare(nn.Module):
+    """LeakyReLU then square: (LeakyReLU(x))²."""
+
+    def __init__(self, negative_slope: float = 0.5):
+        super().__init__()
+        self.leaky = nn.LeakyReLU(negative_slope=negative_slope)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.leaky(x)
+        return y.square()
+
 def get_activation(act_fn_name: str, **kwargs):
     if act_fn_name == "silu":
         return nn.SiLU()
@@ -57,5 +69,7 @@ def get_activation(act_fn_name: str, **kwargs):
         return XIELU(**kwargs)
     elif act_fn_name == "lra":
         return LRA(**kwargs)
+    elif act_fn_name == "leaky_relu_0.5_square":
+        return LeakyReLUSquare(negative_slope=0.5)
     
     raise Exception(f'Unsupported activation function: {act_fn_name}')
