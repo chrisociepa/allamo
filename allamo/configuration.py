@@ -39,6 +39,12 @@ class AllamoConfiguration:
     beta2: float = 0.95
     grad_clip: float = 1.0
 
+    optimizer: str = 'adamw'
+    muon_lr: float = 0.02
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
+    muon_norm_mode: str = 'col'
+
     adaptive_learning_rate: bool = False
     learning_rate: float = 6e-4
     warmup_iters: int = 2000
@@ -163,6 +169,12 @@ class AllamoConfiguration:
         parser.add_argument('--beta1', type=float, help='Adamw optimizer Beta1 param')
         parser.add_argument('--beta2', type=float, help='Adamw optimizer Beta2 param')
         parser.add_argument('--grad_clip', type=float, help='Clip gradients at this value. Disabled when 0.')
+
+        parser.add_argument('--optimizer', type=str, choices=['adamw', 'muon_plus'], help='Optimizer type: adamw or muon_plus (hybrid Muon+ for 2D hidden weights + AdamW for the rest)')
+        parser.add_argument('--muon_lr', type=float, help='Learning rate for Muon+ param groups (hidden 2D weights)')
+        parser.add_argument('--muon_momentum', type=float, help='Momentum for Muon+ (default 0.95)')
+        parser.add_argument('--muon_ns_steps', type=int, help='Newton-Schulz iteration steps for Muon+ (default 5)')
+        parser.add_argument('--muon_norm_mode', type=str, choices=['col', 'row', 'joint', 'none'], help='Post-orthogonalization normalization mode for Muon+')
 
         parser.add_argument('--adaptive_learning_rate', action='store_true', default=None, help='Whether to use adaptive learning rate')
         parser.add_argument('--learning_rate', type=float, help='Learning rate to start with')
