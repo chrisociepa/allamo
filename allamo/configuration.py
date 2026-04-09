@@ -170,7 +170,7 @@ class AllamoConfiguration:
         parser.add_argument('--beta2', type=float, help='Adamw optimizer Beta2 param')
         parser.add_argument('--grad_clip', type=float, help='Clip gradients at this value. Disabled when 0.')
 
-        parser.add_argument('--optimizer', type=str, choices=['adamw', 'muon_plus'], help='Optimizer type: adamw or muon_plus (hybrid Muon+ for 2D hidden weights + AdamW for the rest)')
+        parser.add_argument('--optimizer', type=str, choices=['adamw', 'muon', 'muon_plus'], help='Optimizer type: adamw, muon (torch.optim.Muon for 2D hidden weights + AdamW), or muon_plus (custom Muon+ with post-NS normalization + AdamW)')
         parser.add_argument('--muon_lr', type=float, help='Learning rate for Muon+ param groups (hidden 2D weights)')
         parser.add_argument('--muon_momentum', type=float, help='Momentum for Muon+ (default 0.95)')
         parser.add_argument('--muon_ns_steps', type=int, help='Newton-Schulz iteration steps for Muon+ (default 5)')

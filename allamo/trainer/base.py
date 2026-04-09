@@ -17,7 +17,7 @@ from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.metrics.metrics_logger import MetricsLogger
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
-from allamo.optimizer.optimizer_utils import calculate_learning_rate
+from allamo.optimizer.optimizer_utils import calculate_learning_rate, CombinedOptimizer
 from allamo.parallelisms.fsdp2_utils import build_world_mesh
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
@@ -407,7 +407,11 @@ class BaseTrainer:
                 
             # clip the gradient
             if self.config.grad_clip != 0.0:
-                self.scaler.unscale_(self.optimizer)
+                if isinstance(self.optimizer, CombinedOptimizer):
+                    for opt in self.optimizer.optimizers:
+                        self.scaler.unscale_(opt)
+                else:
+                    self.scaler.unscale_(self.optimizer)
                 iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
@@ -426,7 +430,11 @@ class BaseTrainer:
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
             # step the optimizer and scaler
-            self.scaler.step(self.optimizer)
+            if isinstance(self.optimizer, CombinedOptimizer):
+                for opt in self.optimizer.optimizers:
+                    self.scaler.step(opt)
+            else:
+                self.scaler.step(self.optimizer)
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
