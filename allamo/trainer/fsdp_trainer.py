@@ -35,6 +35,12 @@ class FSDPTrainer(BaseTrainer):
         self.fullstate_save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             
     def init_training(self):
+        if self.config.optimizer != 'adamw':
+            raise ValueError(
+                f"Optimizer '{self.config.optimizer}' is not supported with FSDP. "
+                "CombinedOptimizer / custom optimizers are incompatible with FSDP's "
+                "optimizer state sharding. Use '--optimizer adamw'."
+            )
         super().init_training()
             
         with torch.device('meta'):

@@ -146,6 +146,8 @@ class Attention(torch.nn.Module):
         
         q, k = rotary_emb(q, k, input_pos=input_pos)
 
+        # OPT: v is already [B, T, Hkv, D] before line 140's transpose; capturing it there
+        # instead of double-transposing here would save one transpose + contiguous copy.
         v_kv_bt = v.transpose(1, 2).contiguous() if self.exclusive_self_attention and kv_x is None else None
         
         if self.num_key_value_groups > 1:

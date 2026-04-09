@@ -103,6 +103,13 @@ class CombinedOptimizer:
     GradScaler requires a real torch.optim.Optimizer for unscale_/step, so
     scaler_unscale and scaler_step delegate to each sub-optimizer individually.
     The training loop must check for CombinedOptimizer at those call sites.
+
+    Known limitation: when used with GradScaler (fp16), unscale_ and step are
+    called per sub-optimizer. If inf/nan gradients appear in only one
+    sub-optimizer, that optimizer skips its step while the other proceeds,
+    leading to an inconsistent parameter update. This is acceptable in practice
+    because Muon/Muon+ is typically used with bfloat16 where GradScaler is a
+    no-op, but users should be aware when training with fp16.
     """
 
     def __init__(self, optimizers):

@@ -64,6 +64,7 @@ def muon_plus_update(grad, momentum_buf, beta=0.95, ns_steps=5, nesterov=True, n
 
 
 def _adam_update(grad, buf1, buf2, step, betas, eps):
+    # TODO: replace with torch.optim.AdamW (fused=True) for better GPU throughput
     buf1.lerp_(grad, 1 - betas[0])
     buf2.lerp_(grad.square(), 1 - betas[1])
     buf1c = buf1 / (1 - betas[0] ** step)
