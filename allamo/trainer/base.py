@@ -17,7 +17,7 @@ from allamo.dataset.data_loader import AllamoDataLoader
 from allamo.metrics.metrics_logger import MetricsLogger
 from allamo.logging import configure_logger, logger
 from allamo.model.attentions import attention_version
-from allamo.optimizer.optimizer_utils import calculate_learning_rate
+from allamo.optimizer.optimizer_utils import calculate_learning_rate, CombinedOptimizer
 from allamo.parallelisms.fsdp2_utils import build_world_mesh
 from allamo.torch_utils import init_torch
 from allamo.train_utils import (
@@ -228,7 +228,8 @@ class BaseTrainer:
             loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
+        # Detach for accuracy: logits.max(...) would add a backward path through full (B,T,V) logits.
+        accuracy = (logits.detach().max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
         return loss, unmasked_labels, accuracy
 
     def evaluate_sft_loss(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -246,7 +247,7 @@ class BaseTrainer:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
+        accuracy = (logits.detach().max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
         return loss, unmasked_labels, accuracy
 
     def evaluate_dpo_loss(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -272,7 +273,7 @@ class BaseTrainer:
         rejected_unmasked_labels = torch.sum(batch["rejected_target_ids"].view(-1) != self.config.ignore_index).item()
         unmasked_labels = chosen_unmasked_labels + rejected_unmasked_labels
         
-        accuracy = (policy_chosen_logits.max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels if chosen_unmasked_labels > 0 else 0
+        accuracy = (policy_chosen_logits.detach().max(2).indices == batch["chosen_target_ids"]).sum().item() / chosen_unmasked_labels if chosen_unmasked_labels > 0 else 0
         
         if last_gas_step and self.config.log_interval > 0 and self.train_ctx.iter_num % self.config.log_interval == 0:
             chosen_rewards = chosen_rewards.detach() 
@@ -406,26 +407,34 @@ class BaseTrainer:
                 
             # clip the gradient
             if self.config.grad_clip != 0.0:
-                self.scaler.unscale_(self.optimizer)
+                if isinstance(self.optimizer, CombinedOptimizer):
+                    for opt in self.optimizer.optimizers:
+                        self.scaler.unscale_(opt)
+                else:
+                    self.scaler.unscale_(self.optimizer)
                 iter_metrics[4] += self.clip_grad_norm()
             
             mfu_excluded_time = time.time()
             # sync loss and acc over all processes
             iter_metrics = self.dist_all_reduce(iter_metrics, op=dist.ReduceOp.SUM)
             
-            # adjust learning rate
+            # adjust learning rate (per-group scaling for hybrid optimizers like Muon+)
             lr = calculate_learning_rate(self.train_ctx, self.config)
             if self.config.adaptive_learning_rate:
                 lr = lr * math.sqrt(iter_metrics[1].item() / total_tokens_per_iter)
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
+                param_group['lr'] = lr * param_group.get('lr_scale', 1.0)
             
             if self.train_ctx.master_process:
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
             # step the optimizer and scaler
-            self.scaler.step(self.optimizer)
+            if isinstance(self.optimizer, CombinedOptimizer):
+                for opt in self.optimizer.optimizers:
+                    self.scaler.step(opt)
+            else:
+                self.scaler.step(self.optimizer)
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
