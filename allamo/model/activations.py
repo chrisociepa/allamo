@@ -69,7 +69,7 @@ def get_activation(act_fn_name: str, **kwargs):
         return XIELU(**kwargs)
     elif act_fn_name == "lra":
         return LRA(**kwargs)
-    elif act_fn_name == "leaky_relu_0.5_square":
-        return LeakyReLUSquare(negative_slope=0.5)
+    elif act_fn_name == "leaky_relu_square":
+        return LeakyReLUSquare(**kwargs)
     
     raise Exception(f'Unsupported activation function: {act_fn_name}')
