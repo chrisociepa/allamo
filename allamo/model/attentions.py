@@ -251,52 +251,28 @@ class AttentionVersion(torch.nn.Module):
         def document_mask(b, h, q_idx, kv_idx):
             return attn_mask[b, q_idx] == attn_mask[b, kv_idx]
 
+        @lru_cache(maxsize=32)
+        def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
+            if isinstance(device, torch.device):
+                device = str(device)  # torch.device isn't hashable consistently
+            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+        
         B, _, T, _ = q.size() # (B, nh, T, hs)
         block_mask = None
         if attn_mask is None:
             mask_mod = self.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask
-            block_mask = self._create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=q.device)
+            block_mask = create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=q.device)
         else:
             mask_mod = self.attn_impl_module.and_masks(causal_mask, document_mask)
             if sliding_window:
                 mask_mod = self.attn_impl_module.and_masks(mask_mod, sliding_window_mask(sliding_window))
-            block_mask = self._create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
+            block_mask = create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
 
         # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
         y = self.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
     
-    @lru_cache(maxsize=32)
-    def _create_block_mask_cached(self, mask, b, h, q_len, kv_len, device="cuda"):
-        if isinstance(device, torch.device):
-            device = str(device)  # torch.device isn't hashable consistently
-        return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
 
-    def _build_diffusion_mask_mod(self, T: int, q_len: int):
-        """
-        mask_mod for training diffusion attention.
-        
-        KV layout: [ctx_0..ctx_{T-1} | noise_0_0..noise_{T-1}_{q_len-1}]
-        Q  layout: [noise_0_0..noise_{T-1}_{q_len-1}]
-        
-        Token at q_idx (group t = q_idx // q_len) can attend to:
-        - ctx tokens:  kv_idx in [0, t+1)
-        - own noise:   kv_idx in [T + t*q_len, T + (t+1)*q_len)
-        """
-        def diffusion_mask(b, h, q_idx, kv_idx):
-            t = q_idx // q_len
-
-            # Attend to causal ctx prefix
-            ctx_ok = kv_idx < t + 1
-
-            # Attend to own noise group in KV
-            noise_start = T + t * q_len
-            noise_end   = T + (t + 1) * q_len
-            noise_ok = (kv_idx >= noise_start) & (kv_idx < noise_end)
-
-            return ctx_ok | noise_ok
-
-        return diffusion_mask
 
     def flex_attention_diffusion(
         self,
@@ -310,20 +286,53 @@ class AttentionVersion(torch.nn.Module):
         """
         FlexAttention for diffusion training with rectangular Q/KV lengths
         """
+        def diffusion_mask_mod(T: int, q_len: int):
+            """
+            mask_mod for training diffusion attention.
+            
+            KV layout: [ctx_0..ctx_{T-1} | noise_0_0..noise_{T-1}_{q_len-1}]
+            Q  layout: [noise_0_0..noise_{T-1}_{q_len-1}]
+            
+            Token at q_idx (group t = q_idx // q_len) can attend to:
+            - ctx tokens:  kv_idx in [0, t+1)
+            - own noise:   kv_idx in [T + t*q_len, T + (t+1)*q_len)
+            """
+            def diffusion_mask(b, h, q_idx, kv_idx):
+                t = q_idx // q_len
+
+                # Attend to causal ctx prefix
+                ctx_ok = kv_idx < t + 1
+
+                # Attend to own noise group in KV
+                noise_start = T + t * q_len
+                noise_end   = T + (t + 1) * q_len
+                noise_ok = (kv_idx >= noise_start) & (kv_idx < noise_end)
+
+                return ctx_ok | noise_ok
+
+            return diffusion_mask
+
+        @lru_cache(maxsize=32)
+        def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
+            if isinstance(device, torch.device):
+                device = str(device)  # torch.device isn't hashable consistently
+            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+        
+        
         B, nh, total_q, hs = q.size()
         kv_len = k.size(2)  # T + T*q_len
 
         assert total_q == T * q_len
         assert kv_len  == T + total_q
 
-        mask_mod = self._build_diffusion_mask_mod(T, q_len)
+        mask_mod = diffusion_mask_mod(T, q_len)
 
         if sliding_window is not None:
             def sliding_window_mask(b, h, q_idx, kv_idx):
                 return (q_idx - kv_idx <= sliding_window) & (kv_idx - q_idx <= sliding_window)
             mask_mod = self.attn_impl_module.and_masks(mask_mod, sliding_window_mask)
 
-        block_mask = self._create_block_mask_cached(
+        block_mask = create_block_mask_cached(
             mask_mod,
             b=B,
             h=None,
