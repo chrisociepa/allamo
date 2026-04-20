@@ -114,7 +114,13 @@ class Bielik2Model(BaseModel):
             target_hidden = torch.cat(hidden_states_list, dim=-1)
             target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
 
-            draft_hidden_states = self.get_embeddings()[self.mask_token_id].unsqueeze(0).unsqueeze(0).expand(B, T * self.draft_block_size, -1)
+            mask_token_tensor = torch.tensor([self.mask_token_id], device=target_hidden.device)
+            draft_hidden_states = (
+                self.get_embeddings()(mask_token_tensor)  # (1, D)
+                .unsqueeze(0)                             # (1, 1, D)
+                .expand(B, T * self.draft_block_size, -1) # (B, T * draft_block_size, D)
+            )
+
             for layer in self.dflash_layers:
                 draft_hidden_states = layer(
                     draft_hidden_states,
