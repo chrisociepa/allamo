@@ -35,6 +35,7 @@ class BaseModelConfig:
     exclusive_self_attention: bool = False
     qk_norm: bool = False
     gated_mlp: bool = True
+    dflash_config: Dict = field(default_factory=dict)
 
 class FeedForward(torch.nn.Module):
 
@@ -213,6 +214,138 @@ class AttentionBlock(torch.nn.Module):
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
+class DFlashAttention(Attention):
+
+    def forward(self,
+                q_x: torch.Tensor,   # (B, T*q_len, C)
+                kv_x: torch.Tensor,  # (B, T, C) - target hidden states
+                rotary_emb: RotaryEmbedding,
+                attn_mask: Optional[torch.Tensor] = None,
+                input_pos: Optional[torch.Tensor] = None,
+                seq_lens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, T, C = kv_x.size()
+        total_q  = q_x.shape[1]
+        q_len    = total_q // T
+        assert total_q % T == 0
+        assert attn_mask is None, "attn_mask not supported in DFlashAttention"
+        assert input_pos is None, "input_pos not supported in DFlashAttention"
+        assert seq_lens is None, "seq_lens not supported in DFlashAttention"
+
+        q = self.q_proj(q_x)
+        q = q.view(B, total_q, self.num_heads, self.head_size * (1 + self.attn_output_gate))
+        if self.attn_output_gate:
+            q, gate = torch.chunk(q, 2, dim=-1)
+            gate = gate.reshape(B, total_q, -1)
+        q = q.transpose(1, 2)         # (B, nh, T*q_len, hs)
+
+        k_ctx_proj   = self.k_proj(kv_x).view(B, T, -1, self.head_size).transpose(1, 2)
+        v_ctx        = self.v_proj(kv_x).view(B, T, -1, self.head_size).transpose(1, 2)
+        k_noise_proj = self.k_proj(q_x).view(B, total_q, -1, self.head_size).transpose(1, 2)
+        v_noise      = self.v_proj(q_x).view(B, total_q, -1, self.head_size).transpose(1, 2)
+
+        if self.q_norm:
+            q = self.q_norm(q)
+        if self.k_norm:
+            # Norm before RoPE, separately per segment
+            k_ctx_proj   = self.k_norm(k_ctx_proj)
+            k_noise_proj = self.k_norm(k_noise_proj)
+        
+        # Apply RoPE with correct positions per segment
+        q, k = self._apply_rope_diffusion(q, k_ctx_proj, k_noise_proj, rotary_emb, T, q_len)
+
+        v = torch.cat([v_ctx, v_noise], dim=2)  # (B, nh, T+T*q_len, hs)
+
+        v_kv_bt = v.transpose(1, 2).contiguous() if self.exclusive_self_attention and kv_x is None else None
+        
+        if self.num_key_value_groups > 1:
+            k = self.repeat_kv(k, self.num_key_value_groups)
+            v = self.repeat_kv(v, self.num_key_value_groups)
+
+        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=q_len, sliding_window=self.sliding_window)
+
+        if self.exclusive_self_attention and kv_x is None:
+            y = self._xsa_efficient(y, v_kv_bt)
+
+        # output projection (B, T, nh * hs) -> (B, T, C)
+        y = y.contiguous().view(B, total_q, self.num_heads * self.head_size)
+
+        if self.attn_output_gate:
+            y = y * torch.sigmoid(gate)
+
+        y = self.c_proj(y)
+        if self.dropout > 0:
+            F.dropout(y, self.dropout, training=self.training, inplace=True)
+        return y
+
+    def _apply_rope_diffusion(
+        self,
+        q: torch.Tensor,      # (B, nh, T*q_len, hs)
+        k_ctx: torch.Tensor,  # (B, nh, T, hs)
+        k_noise: torch.Tensor,# (B, nh, T*q_len, hs)
+        rotary_emb: RotaryEmbedding,
+        T: int,
+        q_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Applies RoPE with semantically correct positions:
+        - k_ctx[t]          -> position t (consistent with prefill)
+        - k_noise[t*q_len:] -> position t (same as its ctx counterpart)
+        - q[t*q_len:]       -> position t
+
+        This means every diffusion token in group t shares the same RoPE
+        position as the ctx token at index t, which preserves coherence
+        with the prefill phase.
+        """
+        device = q.device
+        dtype  = q.dtype
+
+        ctx_pos = torch.arange(T, device=device)  # (T,)
+
+        # noise/query positions: each group t repeats position t
+        noise_pos = torch.arange(T, device=device).repeat_interleave(q_len)  # (T*q_len,)
+
+        # RoPE for Q and K_noise share the same positions
+        q_rot, k_noise_rot = rotary_emb(q, k_noise, input_pos=noise_pos)
+
+        # RoPE for K_ctx and only k_ctx matters
+        _, k_ctx_rot = rotary_emb(k_ctx, k_ctx, input_pos=ctx_pos)
+
+        # Reconstruct full K: [ctx | noise]
+        k_full = torch.cat([k_ctx_rot, k_noise_rot], dim=2)  # (B, nh, T+T*q_len, hs)
+
+        return q_rot, k_full
+
+
+class DFlashLayer(torch.nn.Module):
+    
+    def __init__(self, layer_id: int, config: BaseModelConfig):
+        super().__init__()
+        self.layer_id = layer_id
+        self.attention = DFlashAttention(config)
+        self.feed_forward = FeedForward(config)
+        self.attention_norm = torch.nn.RMSNorm(config.n_embd, eps=config.norm_eps)
+        self.ffn_norm = torch.nn.RMSNorm(config.n_embd, eps=config.norm_eps)
+    
+    def init_weights(self, init_std: float):
+        self.attention.init_weights(init_std)
+        self.feed_forward.init_weights(init_std)
+        for norm in (self.attention_norm, self.ffn_norm):
+            norm.reset_parameters()
+
+    def forward(self,
+        x: torch.Tensor,
+        target_hidden: torch.Tensor,
+        rotary_emb: RotaryEmbedding,
+        attn_mask: Optional[torch.Tensor] = None,
+        input_pos: Optional[torch.Tensor] = None,
+        seq_lens: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        x = x + self.attention(self.attention_norm(x), target_hidden, rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+        x = x + self.feed_forward(self.ffn_norm(x))
+        return x
+
 class BaseModel(torch.nn.Module):
 
     def __init__(self, config: BaseModelConfig):
@@ -240,9 +373,27 @@ class BaseModel(torch.nn.Module):
         if self.config.intermediate_size is None:
             self.config.intermediate_size = self.config.n_embd * 3
             logger.info(f"defaulting to intermediate_size={self.config.intermediate_size} (3 * n_embd)")
+    
+    def configure_dflash(self):
+        self.dflash_target_layer_ids = self.config.dflash_config["target_layer_ids"]
+        self.dflash_fc = torch.nn.Linear(len(self.dflash_target_layer_ids) * self.config.n_embd, self.config.n_embd, bias=False)
+        self.dflash_hidden_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
+        self.dflash_layers = torch.nn.ModuleList()
+        for layer_id in range(self.config.dflash_config["num_hidden_layers"]):
+            self.dflash_layers.append(DFlashLayer(layer_id, self.config))
+        self.dflash_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
             
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         pass
+    
+    def init_dflash_weights(self):
+        torch.nn.init.trunc_normal_(self.dflash_fc.weight, mean=0.0, std=0.02)
+        self.dflash_hidden_norm.reset_parameters()
+        self.dflash_norm.reset_parameters()
+
+        weight_init_std = self.calculate_weight_init_std(len(self.dflash_layers))
+        for layer in self.dflash_layers:
+            layer.init_weights(weight_init_std)
 
     def get_embeddings(self):
         return None

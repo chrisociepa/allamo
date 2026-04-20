@@ -36,6 +36,13 @@ class Bielik2Model(BaseModel):
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
         self.lm_head = torch.nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
 
+        self.target_layer_ids: Optional[set[int]] = None
+        if self.config.dflash_config:
+            self.configure_dflash()
+            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
+            self.mask_token_id = self.config.dflash_config["mask_token_id"]
+            self.draft_block_size = self.config.dflash_config["block_size"]
+
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         super().init_model_weights(buffer_device)
         
@@ -60,6 +67,9 @@ class Bielik2Model(BaseModel):
                 lower = -cutoff_factor * weight_init_std
                 upper = cutoff_factor * weight_init_std
                 torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
+            
+            if self.config.dflash_config:
+                self.init_dflash_weights()
 
     def forward(self,
         input_ids: torch.Tensor,
@@ -70,11 +80,11 @@ class Bielik2Model(BaseModel):
         seq_lens: Optional[torch.Tensor] = None,
         ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if inputs_embeds is not None:
-            _, T, _ = inputs_embeds.size()
+            B, T, _ = inputs_embeds.size()
         else:
-            _, T = input_ids.size()
+            B, T = input_ids.size()
             inputs_embeds = self.get_embeddings()(input_ids) # token embeddings of shape (b, t, n_embd)
             if self.tok_drop is not None:
                 inputs_embeds = self.tok_drop(inputs_embeds)
@@ -86,23 +96,38 @@ class Bielik2Model(BaseModel):
             elif attn_mask.ndim != 4:
                 raise ValueError(f"Unsupport attn_mask shape {attn_mask.shape}")
         
+        if self.target_layer_ids:
+            hidden_states_list = []
+            
         hidden_states = inputs_embeds
-        for layer in self.get_layers():
+        for idx, layer in enumerate(self.get_layers()):
             hidden_states = layer(hidden_states, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+            if self.target_layer_ids and idx in self.target_layer_ids:
+                hidden_states_list.append(hidden_states)
         
-        final_embeddings = self.get_lm_head_norm()(hidden_states)
-        if target_ids is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.get_lm_head()(final_embeddings)
-            if target_weights is None:
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), ignore_index=ignore_index)
-            else:
-                loss = (target_weights.view(-1) * F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), reduction="none")).sum()
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.get_lm_head()(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
-        return logits, loss, hidden_states
+        hidden_states = self.get_lm_head_norm()(hidden_states)
+        logits = self.get_lm_head()(hidden_states)
+
+        draft_logits = None
+        if self.config.dflash_config:
+            assert target_weights is None, "DFlash does not support weighted loss"
+            target_hidden = torch.cat(hidden_states_list, dim=-1)
+            target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
+
+            draft_hidden_states = self.get_embeddings()[self.mask_token_id].unsqueeze(0).unsqueeze(0).expand(B, T * self.draft_block_size, -1)
+            for layer in self.dflash_layers:
+                draft_hidden_states = layer(
+                    draft_hidden_states,
+                    target_hidden=target_hidden,
+                    rotary_emb=self.rotary_emb,
+                    attn_mask=attn_mask,
+                    input_pos=input_pos,
+                    seq_lens=seq_lens,
+                )
+            draft_hidden_states = self.dflash_norm(draft_hidden_states)
+            draft_logits = self.get_lm_head()(draft_hidden_states) # (B, T * draft_block_size, vocab_size)
+        
+        return logits, draft_logits
     
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
@@ -123,3 +148,7 @@ class Bielik2Model(BaseModel):
     
     def get_layers(self):
         return self.layers
+    
+    def extract_context_feature(self, hidden_states: Tuple[torch.Tensor], layer_ids: List[int]) -> torch.Tensor:
+        selected_states = [hidden_states[layer_id] for layer_id in layer_ids]
+        return torch.cat(selected_states, dim=-1)

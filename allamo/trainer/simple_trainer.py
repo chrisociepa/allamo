@@ -104,10 +104,10 @@ class SimpleTrainer(BaseTrainer):
     def should_evaluate(self):
         return super().should_evaluate() and self.train_ctx.master_process
 
-    def compute_logits_and_loss(self, batch, last_gas_step):
+    def model_forward_step(self, batch, last_gas_step):
         if self.distributed():
             self.model.require_backward_grad_sync = last_gas_step
-        return super().compute_logits_and_loss(batch, last_gas_step)
+        return super().model_forward_step(batch, last_gas_step)
 
     def close(self):
         if self.distributed():
