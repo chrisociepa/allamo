@@ -144,8 +144,8 @@ class RotaryEmbedding(torch.nn.Module):
             cos = self.cos_cached[None, None, :q.size(2), ...]
             sin = self.sin_cached[None, None, :q.size(2), ...]
         else:
-            cos = self.cos_cached[input_pos].unsqueeze(1)
-            sin = self.sin_cached[input_pos].unsqueeze(1)
+            cos = self.cos_cached[input_pos][None, None, :, :]
+            sin = self.sin_cached[input_pos][None, None, :, :]
         
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
         k_out = (k * cos) + (self.__rotate_half(k) * sin)
