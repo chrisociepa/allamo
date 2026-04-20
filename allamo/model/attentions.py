@@ -254,23 +254,23 @@ class AttentionVersion(torch.nn.Module):
         B, _, T, _ = q.size() # (B, nh, T, hs)
         block_mask = None
         if attn_mask is None:
-            mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask
+            mask_mod = self.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask
             block_mask = self._create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=q.device)
         else:
-            mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, document_mask)
+            mask_mod = self.attn_impl_module.and_masks(causal_mask, document_mask)
             if sliding_window:
-                mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask(sliding_window))
+                mask_mod = self.attn_impl_module.and_masks(mask_mod, sliding_window_mask(sliding_window))
             block_mask = self._create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
 
         # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
-        y = attention_version.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
+        y = self.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
     
     @lru_cache(maxsize=32)
     def _create_block_mask_cached(self, mask, b, h, q_len, kv_len, device="cuda"):
         if isinstance(device, torch.device):
             device = str(device)  # torch.device isn't hashable consistently
-        return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+        return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
 
     def _build_diffusion_mask_mod(self, T: int, q_len: int):
         """
@@ -321,7 +321,7 @@ class AttentionVersion(torch.nn.Module):
         if sliding_window is not None:
             def sliding_window_mask(b, h, q_idx, kv_idx):
                 return (q_idx - kv_idx <= sliding_window) & (kv_idx - q_idx <= sliding_window)
-            mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask)
+            mask_mod = self.attn_impl_module.and_masks(mask_mod, sliding_window_mask)
 
         block_mask = self._create_block_mask_cached(
             mask_mod,
@@ -332,7 +332,7 @@ class AttentionVersion(torch.nn.Module):
             device=q.device,
         )
 
-        y = attention_version.attn_impl_module.compiled_flex_attention_fn(
+        y = self.attn_impl_module.compiled_flex_attention_fn(
             q, k, v, block_mask=block_mask
         )
         return y.transpose(1, 2)  # (B, T*q_len, nh, hs)
