@@ -255,7 +255,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             if isinstance(device, torch.device):
                 device = str(device)  # torch.device isn't hashable consistently
-            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+            return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
         B, _, T, _ = q.size() # (B, nh, T, hs)
         block_mask = None
@@ -272,8 +272,6 @@ class AttentionVersion(torch.nn.Module):
         y = self.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
     
-
-
     def flex_attention_diffusion(
         self,
         q: torch.Tensor,   # (B, nh, T*q_len, hs)
@@ -316,7 +314,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             if isinstance(device, torch.device):
                 device = str(device)  # torch.device isn't hashable consistently
-            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+            return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
         
         B, nh, total_q, hs = q.size()
