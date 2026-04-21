@@ -255,7 +255,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             if isinstance(device, torch.device):
                 device = str(device)  # torch.device isn't hashable consistently
-            return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
+            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
         B, _, T, _ = q.size() # (B, nh, T, hs)
         block_mask = None
@@ -314,8 +314,7 @@ class AttentionVersion(torch.nn.Module):
         def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
             if isinstance(device, torch.device):
                 device = str(device)  # torch.device isn't hashable consistently
-            return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
-        
+            return self.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
         
         B, nh, total_q, hs = q.size()
         kv_len = k.size(2)  # T + T*q_len
