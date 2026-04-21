@@ -67,7 +67,7 @@ class AttentionVersion(torch.nn.Module):
         super().__init__()
         self.attn_impl_module = None
         self.causal_mask = None
-        self.enable_sdpa()
+        self.enable_flex_attn() # FlexAttention is required to make DFlash working
         
     def configure(self, config: AllamoConfiguration):
         if config.attention_implementation:
@@ -141,7 +141,7 @@ class AttentionVersion(torch.nn.Module):
                 block_mask: flexatt.BlockMask,
             ) -> torch.Tensor:
                 return compiled_flex_attention(q, k, v, block_mask=block_mask)
-            self.attn_impl_module.compiled_flex_attention_fn = compiled_flex_attention_fn
+            _flex_attn_impl_module.compiled_flex_attention_fn = compiled_flex_attention_fn
 
         except ImportError:
             self.enable_sdpa()
@@ -292,13 +292,13 @@ class AttentionVersion(torch.nn.Module):
         else:
             def document_mask(b, h, q_idx, kv_idx):
                 return attn_mask[b, q_idx] == attn_mask[b, kv_idx]
-            mask_mod = self.attn_impl_module.and_masks(_causal_mask_fn, document_mask)
+            mask_mod = _flex_attn_impl_module.and_masks(_causal_mask_fn, document_mask)
             if sliding_window:
-                mask_mod = self.attn_impl_module.and_masks(mask_mod, _make_sliding_window_fn(sliding_window))
+                mask_mod = _flex_attn_impl_module.and_masks(mask_mod, _make_sliding_window_fn(sliding_window))
             block_mask = _create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=str(q.device))
 
         # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
-        y = self.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
+        y = _flex_attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
 
     def flex_attention_diffusion(self, q, k, v, T, q_len, sliding_window=None):
@@ -314,7 +314,7 @@ class AttentionVersion(torch.nn.Module):
         )
 
         # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
-        y = self.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
+        y = _flex_attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
 
 attention_version = AttentionVersion()
