@@ -450,7 +450,7 @@ class BaseModel(torch.nn.Module):
             self.freeze_module_params(self.get_lm_head())
             logger.info("LM head frozen")
         if freeze_layers and self.get_layers() is not None:
-            for layer_id in range(self.model_config.n_layer):
+            for layer_id in range(self.config.n_layer):
                 if layer_id not in keep_layers_trainable:
                     self.freeze_module_params(self.get_layers()[layer_id])
                     logger.info(f"Layer {layer_id} frozen")
