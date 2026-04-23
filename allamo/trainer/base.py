@@ -284,6 +284,8 @@ class BaseTrainer:
             draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)
             draft_labels = draft_labels.contiguous().view(B, T * self.draft_block_size)
 
+            # TODO: count accepted and ignored groups/blocks and log them as metrics
+
             draft_loss = F.cross_entropy(
                 draft_logits.view(-1, draft_logits.size(-1)),
                 draft_labels.view(-1),

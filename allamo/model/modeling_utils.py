@@ -214,7 +214,39 @@ class AttentionBlock(torch.nn.Module):
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-class DFlashAttention(Attention):
+class DFlashAttention(torch.nn.Module):
+
+    def __init__(self, config: BaseModelConfig):
+        super().__init__()
+        self.head_size = config.head_size
+        self.num_heads = config.n_head
+        self.num_kv_heads = config.num_kv_heads
+        self.num_key_value_groups = self.num_heads // self.num_kv_heads
+        self.dropout = config.dropout
+        self.attn_output_gate = config.attn_output_gate
+        self.qk_norm = config.dflash_config.get("qk_norm", config.qk_norm)
+        
+        assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
+        
+        # key, query, value projections for all heads
+        self.q_proj = torch.nn.Linear(config.n_embd, self.num_heads * self.head_size * (1 + config.attn_output_gate), bias=config.bias)
+        self.k_proj = torch.nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
+        self.v_proj = torch.nn.Linear(config.n_embd, self.num_kv_heads * self.head_size, bias=config.bias)
+        # output projection
+        self.c_proj = torch.nn.Linear(self.num_heads * self.head_size, config.n_embd, bias=config.bias)
+
+        self.q_norm = torch.nn.RMSNorm(config.head_size, eps=config.norm_eps) if self.qk_norm else None
+        self.k_norm = torch.nn.RMSNorm(config.head_size, eps=config.norm_eps) if self.qk_norm else None
+                    
+    def init_weights(self, init_std: float):
+        for module in (self.q_proj, self.k_proj, self.v_proj):
+            torch.nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
+        torch.nn.init.trunc_normal_(self.c_proj.weight, mean=0.0, std=init_std)
+
+        if self.q_norm:
+            self.q_norm.reset_parameters()
+        if self.k_norm:
+            self.k_norm.reset_parameters()
 
     def forward(self,
                 q_x: torch.Tensor,   # (B, T*q_len, C)
@@ -255,17 +287,12 @@ class DFlashAttention(Attention):
         q, k = self._apply_rope_diffusion(q, k_ctx_proj, k_noise_proj, rotary_emb, T, q_len)
 
         v = torch.cat([v_ctx, v_noise], dim=2)  # (B, nh, T+T*q_len, hs)
-
-        v_kv_bt = v.transpose(1, 2).contiguous() if self.exclusive_self_attention and kv_x is None else None
         
         if self.num_key_value_groups > 1:
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
 
-        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=q_len, sliding_window=self.sliding_window)
-
-        if self.exclusive_self_attention and kv_x is None:
-            y = self._xsa_efficient(y, v_kv_bt)
+        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=q_len, sliding_window=None)
 
         # output projection (B, T, nh * hs) -> (B, T, C)
         y = y.contiguous().view(B, total_q, self.num_heads * self.head_size)
@@ -298,7 +325,6 @@ class DFlashAttention(Attention):
         with the prefill phase.
         """
         device = q.device
-        dtype  = q.dtype
 
         ctx_pos = torch.arange(T, device=device)  # (T,)
 
@@ -315,6 +341,14 @@ class DFlashAttention(Attention):
         k_full = torch.cat([k_ctx_rot, k_noise_rot], dim=2)  # (B, nh, T+T*q_len, hs)
 
         return q_rot, k_full
+
+    def repeat_kv(self, x: torch.Tensor, num_key_value_groups: int) -> torch.Tensor:
+        # (B, num_kv_heads, T, hs) -> (B, nh, T, hs)
+        if num_key_value_groups == 1:
+            return x
+        B, num_kv_heads, T, hs = x.shape
+        x = x[:, :, None, :, :].expand(B, num_kv_heads, num_key_value_groups, T, hs)
+        return x.reshape(B, num_kv_heads * num_key_value_groups, T, hs)
 
 
 class DFlashLayer(torch.nn.Module):
