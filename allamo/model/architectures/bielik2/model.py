@@ -116,12 +116,17 @@ class Bielik2Model(BaseModel):
 
             # TODO: align draft sequence with target sequence making the same length (start a new block every draft_block_size tokens)
 
+            anchor_ids = torch.cat([
+                input_ids[:, 1:],
+                torch.full((B, 1), self.mask_token_id, dtype=input_ids.dtype, device=input_ids.device)
+            ], dim=1)
+            anchor_emb = self.get_embeddings()(anchor_ids) # (B, T, D)
+            
             mask_emb = self.get_embeddings()(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, D)
-            sampled_emb = self.get_embeddings()(logits.argmax(dim=-1))
 
-            D = sampled_emb.shape[-1]
+            D = anchor_emb.shape[-1]
             draft_hidden_states = mask_emb.expand(B, T, self.draft_block_size, D).clone()
-            draft_hidden_states[:, :, 0, :] = sampled_emb
+            draft_hidden_states[:, :, 0, :] = anchor_emb
             draft_hidden_states = draft_hidden_states.reshape(B, T * self.draft_block_size, D)
 
             for layer in self.dflash_layers:
