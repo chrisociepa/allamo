@@ -284,6 +284,13 @@ class BaseTrainer:
             draft_labels = padded[:, 1:].unfold(1, self.draft_block_size, 1)[:, :T, :] # (B, T, draft_block_size)
             draft_labels[:, :, 0] = self.config.ignore_index
 
+            # Mask groups containing EOS - tokens after EOS are unpredictable
+            eos_token_id = self.config.dflash_config.get("eos_token_id")
+            if eos_token_id is not None:
+                group_has_eos = (draft_labels == eos_token_id).any(dim=-1, keepdim=True)
+                draft_labels = draft_labels.masked_fill(group_has_eos, self.config.ignore_index)
+
+
             # If any label in a group is ignore_index, mask the entire group.
             group_has_ignore = (draft_labels == self.config.ignore_index).any(dim=-1, keepdim=True)
             draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)
