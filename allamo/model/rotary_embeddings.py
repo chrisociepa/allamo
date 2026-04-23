@@ -135,6 +135,7 @@ class RotaryEmbedding(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         input_pos: Optional[torch.Tensor] = None,
+        kv_input_pos: Optional[torch.Tensor] = None,
     ):
         # q,k: [bs, num_attention_heads, seq_len, head_size]
         dtype = q.dtype
@@ -148,7 +149,13 @@ class RotaryEmbedding(torch.nn.Module):
             sin = self.sin_cached[input_pos][None, None, :, :]
         
         q_out = (q * cos) + (self.__rotate_half(q) * sin)
+
+        if kv_input_pos is not None:
+            cos = self.cos_cached[kv_input_pos][None, None, :, :]
+            sin = self.sin_cached[kv_input_pos][None, None, :, :]
+
         k_out = (k * cos) + (self.__rotate_half(k) * sin)
+
         return q_out.to(dtype=dtype), k_out.to(dtype=dtype)
     
     def __rotate_half(self, x):

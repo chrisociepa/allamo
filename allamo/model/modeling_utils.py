@@ -307,40 +307,31 @@ class DFlashAttention(torch.nn.Module):
 
     def _apply_rope_diffusion(
         self,
-        q: torch.Tensor,      # (B, nh, T*q_len, hs)
-        k_ctx: torch.Tensor,  # (B, nh, T, hs)
-        k_noise: torch.Tensor,# (B, nh, T*q_len, hs)
+        q: torch.Tensor,       # (B, nh, T*q_len, hs)
+        k_ctx: torch.Tensor,   # (B, nh, T, hs)
+        k_noise: torch.Tensor, # (B, nh, T*q_len, hs)
         rotary_emb: RotaryEmbedding,
         T: int,
         q_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Applies RoPE with semantically correct positions:
-        - k_ctx[t]          -> position t (consistent with prefill)
-        - k_noise[t*q_len:] -> position t (same as its ctx counterpart)
-        - q[t*q_len:]       -> position t
-
-        This means every diffusion token in group t shares the same RoPE
-        position as the ctx token at index t, which preserves coherence
-        with the prefill phase.
-        """
         device = q.device
 
-        ctx_pos = torch.arange(T, device=device)  # (T,)
+        ctx_pos = torch.arange(T, device=device)  # [0, 1, ..., T-1]
 
-        # noise/query positions: each group t repeats position t
-        noise_pos = torch.arange(T, device=device).repeat_interleave(q_len)  # (T*q_len,)
+        t_idx     = torch.arange(T, device=device)              # [0, 1, ..., T-1]
+        k_idx     = torch.arange(q_len, device=device)          # [0, 1, ..., q_len-1]
+        noise_pos = (t_idx.unsqueeze(1) + k_idx.unsqueeze(0))   # (T, q_len) broadcasting
+        noise_pos = noise_pos.reshape(-1)                       # (T*q_len,)
 
-        # RoPE for Q and K_noise share the same positions
-        q_rot, k_noise_rot = rotary_emb(q, k_noise, input_pos=noise_pos)
+        # Q i K_noise have the same positions (both represent block t)
+        q_pos  = noise_pos
+        kv_pos = torch.cat([ctx_pos, noise_pos])  # (T + T*q_len,)
 
-        # RoPE for K_ctx and only k_ctx matters
-        _, k_ctx_rot = rotary_emb(k_ctx, k_ctx, input_pos=ctx_pos)
+        k_full = torch.cat([k_ctx, k_noise], dim=2)
 
-        # Reconstruct full K: [ctx | noise]
-        k_full = torch.cat([k_ctx_rot, k_noise_rot], dim=2)  # (B, nh, T+T*q_len, hs)
+        q_rot, k_full_rot = rotary_emb(q, k_full, input_pos=q_pos, kv_input_pos=kv_pos)
 
-        return q_rot, k_full
+        return q_rot, k_full_rot
 
     def repeat_kv(self, x: torch.Tensor, num_key_value_groups: int) -> torch.Tensor:
         # (B, num_kv_heads, T, hs) -> (B, nh, T, hs)
