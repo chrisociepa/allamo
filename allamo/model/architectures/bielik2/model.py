@@ -114,15 +114,15 @@ class Bielik2Model(BaseModel):
             target_hidden = torch.cat(hidden_states_list, dim=-1)
             target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
 
-            # FIXME: use predicted token as a first token in draft sequence
             # TODO: align draft sequence with target sequence making the same length (start a new block every draft_block_size tokens)
 
-            mask_token_tensor = torch.tensor([self.mask_token_id], device=target_hidden.device)
-            draft_hidden_states = (
-                self.get_embeddings()(mask_token_tensor)  # (1, D)
-                .unsqueeze(0)                             # (1, 1, D)
-                .expand(B, T * self.draft_block_size, -1) # (B, T * draft_block_size, D)
-            )
+            mask_emb = self.get_embeddings()(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, D)
+            sampled_emb = self.get_embeddings()(logits.argmax(dim=-1))
+
+            D = sampled_emb.shape[-1]
+            draft_hidden_states = mask_emb.expand(B, T, self.draft_block_size, D).clone()
+            draft_hidden_states[:, :, 0, :] = sampled_emb
+            draft_hidden_states = draft_hidden_states.reshape(B, T * self.draft_block_size, D)
 
             for layer in self.dflash_layers:
                 draft_hidden_states = layer(
