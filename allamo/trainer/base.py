@@ -39,6 +39,8 @@ class ModelOutput:
     draft_loss: torch.Tensor = None
     draft_accuracy: float = 0.0
     draft_unmasked_labels: int = 0
+    draft_ignored_groups: int = 0
+    draft_accepted_groups: int = 0
 
 class BaseTrainer:
     
@@ -269,6 +271,8 @@ class BaseTrainer:
         draft_loss = None
         draft_accuracy = 0.0
         draft_unmasked_labels = 0
+        draft_ignored_groups = 0
+        draft_accepted_groups = 0
         if draft_logits is not None:
             B, T = batch["target_ids"].shape
 
@@ -284,7 +288,9 @@ class BaseTrainer:
             draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)
             draft_labels = draft_labels.contiguous().view(B, T * self.draft_block_size)
 
-            # TODO: count accepted and ignored groups/blocks and log them as metrics
+            draft_ignored_groups = group_has_ignore.squeeze(-1).sum().item()
+            draft_total_groups = B * T
+            draft_accepted_groups = draft_total_groups - draft_ignored_groups
 
             draft_loss = F.cross_entropy(
                 draft_logits.view(-1, draft_logits.size(-1)),
@@ -294,7 +300,8 @@ class BaseTrainer:
 
             draft_unmasked_labels = torch.sum(draft_labels.view(-1) != self.config.ignore_index).item()
             draft_accuracy = (
-                (draft_logits.max(2).indices == draft_labels).sum().item() / draft_unmasked_labels
+                (draft_logits.view(-1, draft_logits.size(-1)).argmax(1) == draft_labels.view(-1)).sum().item()
+                / draft_unmasked_labels
                 if draft_unmasked_labels > 0 else 0.0
             )
 
@@ -310,7 +317,9 @@ class BaseTrainer:
             unmasked_labels=unmasked_labels,
             draft_loss=draft_loss,
             draft_accuracy=draft_accuracy,
-            draft_unmasked_labels=draft_unmasked_labels
+            draft_unmasked_labels=draft_unmasked_labels,
+            draft_ignored_groups=draft_ignored_groups,
+            draft_accepted_groups=draft_accepted_groups,
         )
 
     def dpo_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -419,7 +428,7 @@ class BaseTrainer:
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.train_dataloader.epoch
         current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
-        iter_metrics = torch.zeros(7).to(self.config.device)
+        iter_metrics = torch.zeros(9).to(self.config.device)
         batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
             if current_epoch < self.train_dataloader.epoch:
@@ -469,6 +478,8 @@ class BaseTrainer:
                     loss += model_output.draft_loss * self.draft_loss_scaling_factor
                     iter_metrics[5] += model_output.draft_loss.item()
                     iter_metrics[6] += model_output.draft_accuracy
+                    iter_metrics[7] += model_output.draft_ignored_groups
+                    iter_metrics[8] += model_output.draft_accepted_groups
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.train_dataloader.get_batch()
@@ -513,6 +524,8 @@ class BaseTrainer:
                 accuracy = iter_metrics_cpu[2].item() / iter_metrics_cpu[3].item()
                 draft_lossf = iter_metrics_cpu[5].item() / self.dp_world_size
                 draft_accuracy = iter_metrics_cpu[6].item() / iter_metrics_cpu[3].item()
+                draft_ignored_groups = iter_metrics_cpu[7].item() / iter_metrics_cpu[3].item()
+                draft_accepted_groups = iter_metrics_cpu[8].item() / iter_metrics_cpu[3].item()
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, self.config.batch_size * self.config.gradient_accumulation_steps, fwdbwd_time)
@@ -553,6 +566,8 @@ class BaseTrainer:
                         metrics['train/draft_loss'] = draft_lossf
                         metrics['train/draft_acc'] = draft_accuracy
                         metrics['train/total_loss'] = lossf + draft_lossf * self.draft_loss_scaling_factor
+                        metrics['train/draft_ignored_groups'] = draft_ignored_groups
+                        metrics['train/draft_accepted_groups'] = draft_accepted_groups
                     self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             
