@@ -282,6 +282,7 @@ class BaseTrainer:
                 value=self.config.ignore_index,
             )
             draft_labels = padded[:, 1:].unfold(1, self.draft_block_size, 1)[:, :T, :] # (B, T, draft_block_size)
+            draft_labels[:, :, 0] = self.config.ignore_index
 
             # If any label in a group is ignore_index, mask the entire group.
             group_has_ignore = (draft_labels == self.config.ignore_index).any(dim=-1, keepdim=True)
@@ -292,11 +293,21 @@ class BaseTrainer:
             draft_total_groups = B * T
             draft_accepted_groups = draft_total_groups - draft_ignored_groups
 
-            draft_loss = F.cross_entropy(
+            gamma = self.config.dflash_config.get("loss_decay_gamma", self.draft_block_size / math.log(10))
+            k = torch.arange(self.draft_block_size, device=draft_logits.device)
+            position_weights = torch.exp(-k / gamma)  # (draft_block_size,)
+
+            weight_map = position_weights.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
+            weight_map = weight_map.reshape(B, T * self.draft_block_size)
+            weight_map = weight_map * (draft_labels != self.config.ignore_index).float()
+
+            per_token_loss = F.cross_entropy(
                 draft_logits.view(-1, draft_logits.size(-1)),
                 draft_labels.view(-1),
                 ignore_index=self.config.ignore_index,
+                reduction="none",
             )
+            draft_loss = (per_token_loss * weight_map.view(-1)).sum() / weight_map.sum().clamp(min=1)
 
             draft_unmasked_labels = torch.sum(draft_labels.view(-1) != self.config.ignore_index).item()
             draft_accuracy = (
