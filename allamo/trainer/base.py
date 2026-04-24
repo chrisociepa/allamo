@@ -290,7 +290,6 @@ class BaseTrainer:
                 group_has_eos = (draft_labels == eos_token_id).any(dim=-1, keepdim=True)
                 draft_labels = draft_labels.masked_fill(group_has_eos, self.config.ignore_index)
 
-
             # If any label in a group is ignore_index, mask the entire group.
             group_has_ignore = (draft_labels == self.config.ignore_index).any(dim=-1, keepdim=True)
             draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)

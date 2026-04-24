@@ -24,10 +24,20 @@ class Bielik2Model(BaseModel):
     def configure(self):
         super().configure()
 
+        self.target_layer_ids: Optional[set[int]] = None
+        if self.config.dflash_config:
+            self.configure_dflash()
+            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
+            self.mask_token_id = self.config.dflash_config["mask_token_id"]
+            self.draft_block_size = self.config.dflash_config["block_size"]
+
         self.tok_embeddings = torch.nn.Embedding(self.config.vocab_size, self.config.n_embd)
         self.tok_drop = torch.nn.Dropout(self.config.dropout) if self.config.dropout != 0 else None
         
-        self.rotary_emb = RotaryEmbedding(self.config.head_size, self.config.block_size, self.config.rope_freq_base, self.config.rope_scaling)
+        max_seq_len = self.config.block_size
+        if self.config.dflash_config:
+            max_seq_len += self.draft_block_size
+        self.rotary_emb = RotaryEmbedding(self.config.head_size, max_seq_len, self.config.rope_freq_base, self.config.rope_scaling)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.n_layer):
@@ -35,13 +45,6 @@ class Bielik2Model(BaseModel):
         
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
         self.lm_head = torch.nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
-
-        self.target_layer_ids: Optional[set[int]] = None
-        if self.config.dflash_config:
-            self.configure_dflash()
-            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
-            self.mask_token_id = self.config.dflash_config["mask_token_id"]
-            self.draft_block_size = self.config.dflash_config["block_size"]
 
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         super().init_model_weights(buffer_device)
