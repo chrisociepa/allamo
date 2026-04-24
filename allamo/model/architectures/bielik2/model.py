@@ -26,7 +26,6 @@ class Bielik2Model(BaseModel):
 
         self.target_layer_ids: Optional[set[int]] = None
         if self.config.dflash_config:
-            self.configure_dflash()
             self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
             self.mask_token_id = self.config.dflash_config["mask_token_id"]
             self.draft_block_size = self.config.dflash_config["block_size"]
@@ -45,6 +44,9 @@ class Bielik2Model(BaseModel):
         
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
         self.lm_head = torch.nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
+
+        if self.config.dflash_config:
+            self.configure_dflash()
 
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         super().init_model_weights(buffer_device)
@@ -117,7 +119,7 @@ class Bielik2Model(BaseModel):
             target_hidden = torch.cat(hidden_states_list, dim=-1)
             target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
 
-            # TODO: align draft sequence with target sequence making the same length (start a new block every draft_block_size tokens)
+            # TODO: select subset of anchor tokens, e.g. every draft_block_size token
 
             anchor_ids = torch.cat([
                 input_ids[:, 1:],

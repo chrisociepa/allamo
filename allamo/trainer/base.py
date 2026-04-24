@@ -579,7 +579,7 @@ class BaseTrainer:
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
-                    if draft_lossf > 0:
+                    if draft_accepted_groups + draft_ignored_groups > 0:
                         metrics['train/draft_loss'] = draft_lossf
                         metrics['train/draft_acc'] = draft_accuracy
                         metrics['train/total_loss'] = lossf + draft_lossf * self.draft_loss_scaling_factor
