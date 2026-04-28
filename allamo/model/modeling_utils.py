@@ -225,6 +225,7 @@ class DFlashAttention(torch.nn.Module):
         self.dropout = config.dropout
         self.attn_output_gate = config.attn_output_gate
         self.qk_norm = config.dflash_config.get("qk_norm", config.qk_norm)
+        self.draft_block_size = config.dflash_config["block_size"]
         
         assert self.num_key_value_groups * self.num_kv_heads == self.num_heads
         
@@ -249,32 +250,32 @@ class DFlashAttention(torch.nn.Module):
             self.k_norm.reset_parameters()
 
     def forward(self,
-                q_x: torch.Tensor,   # (B, T*q_len, C)
+                q_x: torch.Tensor,   # (B, A * draft_block_size, C)
                 kv_x: torch.Tensor,  # (B, T, C) - target hidden states
                 rotary_emb: RotaryEmbedding,
+                anchor_pos: torch.Tensor,
                 attn_mask: Optional[torch.Tensor] = None,
                 input_pos: Optional[torch.Tensor] = None,
                 seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        B, T, C = kv_x.size()
-        total_q  = q_x.shape[1]
-        q_len    = total_q // T
-        assert total_q % T == 0
-        assert attn_mask is None, "attn_mask not supported in DFlashAttention"
-        assert input_pos is None, "input_pos not supported in DFlashAttention"
+        B, T, _ = kv_x.size()
+        QT  = q_x.shape[1]
+        A = QT // self.draft_block_size
+        # assert attn_mask is None, "attn_mask not supported in DFlashAttention"
+        # assert input_pos is None, "input_pos not supported in DFlashAttention"
         assert seq_lens is None, "seq_lens not supported in DFlashAttention"
 
         q = self.q_proj(q_x)
-        q = q.view(B, total_q, self.num_heads, self.head_size * (1 + self.attn_output_gate))
+        q = q.view(B, QT, self.num_heads, self.head_size * (1 + self.attn_output_gate))
         if self.attn_output_gate:
             q, gate = torch.chunk(q, 2, dim=-1)
-            gate = gate.reshape(B, total_q, -1)
-        q = q.transpose(1, 2)         # (B, nh, T*q_len, hs)
+            gate = gate.reshape(B, QT, -1)
+        q = q.transpose(1, 2) # (B, nh, A * draft_block_size, hs)
 
         k_ctx_proj   = self.k_proj(kv_x).view(B, T, -1, self.head_size).transpose(1, 2)
         v_ctx        = self.v_proj(kv_x).view(B, T, -1, self.head_size).transpose(1, 2)
-        k_noise_proj = self.k_proj(q_x).view(B, total_q, -1, self.head_size).transpose(1, 2)
-        v_noise      = self.v_proj(q_x).view(B, total_q, -1, self.head_size).transpose(1, 2)
+        k_noise_proj = self.k_proj(q_x).view(B, QT, -1, self.head_size).transpose(1, 2)
+        v_noise      = self.v_proj(q_x).view(B, QT, -1, self.head_size).transpose(1, 2)
 
         if self.q_norm:
             q = self.q_norm(q)
@@ -284,18 +285,18 @@ class DFlashAttention(torch.nn.Module):
             k_noise_proj = self.k_norm(k_noise_proj)
         
         # Apply RoPE with correct positions per segment
-        q, k = self._apply_rope_diffusion(q, k_ctx_proj, k_noise_proj, rotary_emb, T, q_len)
+        q, k = self._apply_rope_diffusion(q, k_ctx_proj, k_noise_proj, rotary_emb, anchor_pos, input_pos)
 
-        v = torch.cat([v_ctx, v_noise], dim=2)  # (B, nh, T+T*q_len, hs)
+        v = torch.cat([v_ctx, v_noise], dim=2)  # (B, nh, T + A * draft_block_size, hs)
         
         if self.num_key_value_groups > 1:
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
 
-        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=q_len, sliding_window=None)
+        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=self.draft_block_size)
 
-        # output projection (B, T, nh * hs) -> (B, T, C)
-        y = y.contiguous().view(B, total_q, self.num_heads * self.head_size)
+        # output projection (B, A * draft_block_size, nh * hs) -> (B, A * draft_block_size, C)
+        y = y.contiguous().view(B, QT, self.num_heads * self.head_size)
 
         if self.attn_output_gate:
             y = y * torch.sigmoid(gate)
@@ -307,27 +308,33 @@ class DFlashAttention(torch.nn.Module):
 
     def _apply_rope_diffusion(
         self,
-        q: torch.Tensor,       # (B, nh, T*q_len, hs)
-        k_ctx: torch.Tensor,   # (B, nh, T, hs)
-        k_noise: torch.Tensor, # (B, nh, T*q_len, hs)
+        q: torch.Tensor,        # (B, nh, A * draft_block_size, hs)
+        k_ctx: torch.Tensor,    # (B, nh, T, hs)
+        k_noise: torch.Tensor,  # (B, nh, A * draft_block_size, hs)
         rotary_emb: RotaryEmbedding,
-        T: int,
-        q_len: int,
+        anchor_pos: torch.Tensor,                  # (B, A)
+        input_pos: Optional[torch.Tensor] = None,  # (B, T)
     ) -> tuple[torch.Tensor, torch.Tensor]:
         device = q.device
+        T = k_ctx.size(2)
+        B = anchor_pos.size(0)
+        q_len = self.draft_block_size
 
-        ctx_pos = torch.arange(T, device=device)  # [0, 1, ..., T-1]
+        if input_pos is not None:
+            ctx_pos = input_pos # (B, T)
+            anchor_abs = input_pos.gather(1, anchor_pos + 1) # (B, A)
+        else:
+            ctx_pos = torch.arange(T, device=device).unsqueeze(0).expand(B, -1) # (B, T)
+            anchor_abs = anchor_pos + 1 # (B, A)
 
-        t_idx     = torch.arange(T, device=device)              # [0, 1, ..., T-1]
-        k_idx     = torch.arange(q_len, device=device)          # [0, 1, ..., q_len-1]
-        noise_pos = (t_idx.unsqueeze(1) + k_idx.unsqueeze(0))   # (T, q_len) broadcasting
-        noise_pos = noise_pos.reshape(-1)                       # (T*q_len,)
+        k_idx = torch.arange(q_len, device=device) # (q_len,)
+        noise_pos = anchor_abs.unsqueeze(-1) + k_idx # (B, A, q_len)
+        noise_pos = noise_pos.reshape(B, -1) # (B, A * q_len)
 
-        # Q i K_noise have the same positions (both represent block t)
-        q_pos  = noise_pos
-        kv_pos = torch.cat([ctx_pos, noise_pos])  # (T + T*q_len,)
+        q_pos = noise_pos # (B, A * q_len)
+        kv_pos = torch.cat([ctx_pos, noise_pos], dim=1) # (B, T + A * q_len)
 
-        k_full = torch.cat([k_ctx, k_noise], dim=2)
+        k_full = torch.cat([k_ctx, k_noise], dim=2) # (B, nh, T + A * q_len, hs)
 
         q_rot, k_full_rot = rotary_emb(q, k_full, input_pos=q_pos, kv_input_pos=kv_pos)
 
@@ -362,12 +369,13 @@ class DFlashLayer(torch.nn.Module):
         x: torch.Tensor,
         target_hidden: torch.Tensor,
         rotary_emb: RotaryEmbedding,
+        anchor_pos: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        x = x + self.attention(self.attention_norm(x), target_hidden, rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+        x = x + self.attention(self.attention_norm(x), target_hidden, rotary_emb, anchor_pos=anchor_pos, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 

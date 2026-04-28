@@ -79,18 +79,18 @@ class Bielik2Model(BaseModel):
     def forward(self,
         input_ids: torch.Tensor,
         target_ids: Optional[torch.Tensor] = None,
-        target_weights: Optional[torch.Tensor] = None,
+        anchor_pos: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
-        ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if inputs_embeds is not None:
             B, T, _ = inputs_embeds.size()
         else:
             B, T = input_ids.size()
-            inputs_embeds = self.get_embeddings()(input_ids) # token embeddings of shape (b, t, n_embd)
+            inputs_embeds = self.get_embeddings()(input_ids) # (B, T, C)
             if self.tok_drop is not None:
                 inputs_embeds = self.tok_drop(inputs_embeds)
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -115,36 +115,37 @@ class Bielik2Model(BaseModel):
 
         draft_logits = None
         if self.config.dflash_config:
-            assert target_weights is None, "DFlash does not support weighted loss"
             target_hidden = torch.cat(hidden_states_list, dim=-1)
             target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
 
-            # TODO: select subset of anchor tokens, e.g. every draft_block_size token
+            # anchor_pos indexes target_ids space; input_ids is shifted left by 1,
+            # so anchor_pos + 1 gives the corresponding input_ids positions
+            A = anchor_pos.size(1)
+            anchor_input_pos = anchor_pos + 1
+            anchor_ids = input_ids.gather(1, anchor_input_pos) # (B, A)
+            anchor_emb = self.get_embeddings()(anchor_ids) # (B, A, C)
 
-            anchor_ids = torch.cat([
-                input_ids[:, 1:],
-                torch.full((B, 1), self.mask_token_id, dtype=input_ids.dtype, device=input_ids.device)
-            ], dim=1)
-            anchor_emb = self.get_embeddings()(anchor_ids) # (B, T, D)
-            
-            mask_emb = self.get_embeddings()(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, D)
+            mask_emb = self.get_embeddings()(
+                torch.tensor([self.mask_token_id], device=target_hidden.device)
+            ) # (1, C)
 
-            D = anchor_emb.shape[-1]
-            draft_hidden_states = mask_emb.expand(B, T, self.draft_block_size, D).clone()
+            C = anchor_emb.shape[-1]
+            draft_hidden_states = mask_emb.expand(B, A, self.draft_block_size, C).clone() # (B, A, draft_block_size, C)
             draft_hidden_states[:, :, 0, :] = anchor_emb
-            draft_hidden_states = draft_hidden_states.reshape(B, T * self.draft_block_size, D)
+            draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
 
             for layer in self.dflash_layers:
                 draft_hidden_states = layer(
                     draft_hidden_states,
                     target_hidden=target_hidden,
                     rotary_emb=self.rotary_emb,
+                    anchor_pos=anchor_pos,
                     attn_mask=attn_mask,
                     input_pos=input_pos,
                     seq_lens=seq_lens,
                 )
             draft_hidden_states = self.dflash_norm(draft_hidden_states)
-            draft_logits = self.get_lm_head()(draft_hidden_states) # (B, T * draft_block_size, vocab_size)
+            draft_logits = self.get_lm_head()(draft_hidden_states) # (B, A * draft_block_size, vocab_size)
         
         return logits, draft_logits
     

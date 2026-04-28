@@ -242,7 +242,64 @@ class BaseTrainer:
                 })
         self.trigger_gc()
 
+    def prepare_dflash_anchor_positions(
+        self,
+        target_ids: torch.Tensor,
+        A: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Prepare A positions from target_ids (B, T), maximizing spacing between
+        selected positions while avoiding ignore_index where possible.
+
+        When valid_count >= A: selects A evenly-spaced positions from valid ones.
+        When valid_count < A: takes all valid positions + pads with ignore_index
+                            positions to reach A. No index repetitions in either case.
+
+        Args:
+            target_ids:   (B, T) int tensor with token labels, may contain ignore_index
+            A:            number of positions to select per sample
+
+        Returns:
+            anchor_pos: (B, A) long  - selected anchor positions along dim T
+        """
+        device = target_ids.device
+
+        valid_mask  = target_ids != self.config.ignore_index
+        valid_count = valid_mask.sum(dim=1) # (B,)
+
+        # Stable descending argsort puts all valid positions first, 
+        # invalid ones after, preserving their original relative order within each group
+        sort_order = valid_mask.long().argsort(dim=1, descending=True, stable=True) # (B, T)
+
+        # Path A: valid_count >= A
+        # Linspace over [0, valid_count - 1] produces exactly A unique local indices
+        # into the valid block - no repetitions since we map A slots onto >= A points
+        end_a   = (valid_count.clamp(min=1) - 1).float().unsqueeze(1) # (B, 1)
+        t       = torch.linspace(0, 1, A, device=device).unsqueeze(0) # (1, A)
+        local_a = (t * end_a).round().long() # (B, A)
+        indices_a = sort_order.gather(1, local_a) # (B, A)
+
+        # Path B: valid_count < A
+        # sort_order[:, :A] already contains all valid indices followed by unique
+        # invalid ones - no linspace needed, no repetitions by construction
+        indices_b = sort_order[:, :A] # (B, A)
+
+        use_a = (valid_count >= A).unsqueeze(1)
+        anchor_pos = torch.where(use_a, indices_a, indices_b) # (B, A)
+        
+        return anchor_pos
+
     def supervised_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+        if self.config.dflash_config:
+            eos_token_id = self.config.dflash_config.get("eos_token_id")
+            num_anchors = self.config.dflash_config.get("anchor_count", batch["target_ids"].size(1) // self.draft_block_size)
+            masked_target_ids = batch["target_ids"][:, :-(self.draft_block_size-1)]
+            if eos_token_id is not None:
+                masked_target_ids[masked_target_ids == eos_token_id] = self.config.ignore_index
+
+            anchor_pos = self.prepare_dflash_anchor_positions(masked_target_ids, num_anchors)
+            batch["anchor_pos"] = anchor_pos
+
         logits, draft_logits = self.model_forward_step(batch, last_gas_step)
         if "target_weights" not in batch or batch["target_weights"] is None:
             loss = F.cross_entropy(
@@ -274,38 +331,41 @@ class BaseTrainer:
         draft_ignored_groups = 0
         draft_accepted_groups = 0
         if draft_logits is not None:
-            B, T = batch["target_ids"].shape
+            B = batch["target_ids"].size(0)
 
             padded = F.pad(
                 batch["target_ids"],
                 (1, self.draft_block_size),
                 value=self.config.ignore_index,
             )
-            draft_labels = padded[:, 1:].unfold(1, self.draft_block_size, 1)[:, :T, :] # (B, T, draft_block_size)
+            draft_labels = padded[:, 1:].unfold(1, self.draft_block_size, 1) # (B, T, draft_block_size)
+
+            # Select only the anchor positions
+            anchor_idx = anchor_pos.unsqueeze(-1).expand(-1, -1, self.draft_block_size)
+            draft_labels = draft_labels.gather(1, anchor_idx) # (B, A, draft_block_size)
 
             # Mask groups containing EOS - tokens after EOS are unpredictable
-            eos_token_id = self.config.dflash_config.get("eos_token_id")
             if eos_token_id is not None:
                 group_has_eos = (draft_labels == eos_token_id).any(dim=-1, keepdim=True)
                 draft_labels = draft_labels.masked_fill(group_has_eos, self.config.ignore_index)
 
-            # If any label in a group is ignore_index, mask the entire group.
+            # If any label in a group is ignore_index, mask the entire group
             group_has_ignore = (draft_labels == self.config.ignore_index).any(dim=-1, keepdim=True)
             draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)
 
             draft_labels[:, :, 0] = self.config.ignore_index
-            draft_labels = draft_labels.contiguous().view(B, T * self.draft_block_size)
+            draft_labels = draft_labels.contiguous().view(B, num_anchors * self.draft_block_size)
 
             draft_ignored_groups = group_has_ignore.squeeze(-1).sum().item()
-            draft_total_groups = B * T
+            draft_total_groups = B * num_anchors
             draft_accepted_groups = draft_total_groups - draft_ignored_groups
 
             gamma = self.config.dflash_config.get("loss_decay_gamma", self.draft_block_size / math.log(10))
             k = torch.arange(self.draft_block_size, device=draft_logits.device)
             position_weights = torch.exp(-k / gamma)  # (draft_block_size,)
 
-            weight_map = position_weights.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
-            weight_map = weight_map.reshape(B, T * self.draft_block_size)
+            weight_map = position_weights.unsqueeze(0).unsqueeze(0).expand(B, num_anchors, -1)
+            weight_map = weight_map.reshape(B, num_anchors * self.draft_block_size)
             weight_map = weight_map * (draft_labels != self.config.ignore_index).float()
 
             per_token_loss = F.cross_entropy(
