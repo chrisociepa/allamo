@@ -125,12 +125,15 @@ class Bielik2Model(BaseModel):
             anchor_ids = input_ids.gather(1, anchor_input_pos) # (B, A)
             anchor_emb = self.get_embeddings()(anchor_ids) # (B, A, C)
 
-            mask_emb = self.get_embeddings()(
-                torch.tensor([self.mask_token_id], device=target_hidden.device)
-            ) # (1, C)
+            if self.config.dflash_config.get("mask_with_hidden_states", False):
+                anchor_input_pos_exp = anchor_input_pos.unsqueeze(-1).expand(B, A, hidden_states.size(-1))  # (B, A, C)
+                mask_emb_full = hidden_states.gather(1, anchor_input_pos_exp)  # (B, A, C)
+            else:
+                mask_emb = self.get_embeddings()(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
+                mask_emb_full = mask_emb.expand(B, A, hidden_states.size(-1))  # (B, A, C)
 
             C = anchor_emb.shape[-1]
-            draft_hidden_states = mask_emb.expand(B, A, self.draft_block_size, C).clone() # (B, A, draft_block_size, C)
+            draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size, C).clone()  # (B, A, draft_block_size, C)
             draft_hidden_states[:, :, 0, :] = anchor_emb
             draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
 
