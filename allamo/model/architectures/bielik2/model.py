@@ -6,6 +6,7 @@ from typing import Optional, Tuple, List
 from allamo.logging import logger
 from allamo.model.modeling_utils import AttentionBlock, BaseModel, BaseModelConfig, ModelSpec
 from allamo.model.attentions import attention_version
+from allamo.model.dflash.model import DFlashDraftModel
 from allamo.model.rotary_embeddings import RotaryEmbedding
 
 def get_model_spec():
@@ -24,19 +25,10 @@ class Bielik2Model(BaseModel):
     def configure(self):
         super().configure()
 
-        self.target_layer_ids: Optional[set[int]] = None
-        if self.config.dflash_config:
-            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
-            self.mask_token_id = self.config.dflash_config["mask_token_id"]
-            self.draft_block_size = self.config.dflash_config["block_size"]
-
         self.tok_embeddings = torch.nn.Embedding(self.config.vocab_size, self.config.n_embd)
         self.tok_drop = torch.nn.Dropout(self.config.dropout) if self.config.dropout != 0 else None
         
-        max_seq_len = self.config.block_size
-        if self.config.dflash_config:
-            max_seq_len += self.draft_block_size
-        self.rotary_emb = RotaryEmbedding(self.config.head_size, max_seq_len, self.config.rope_freq_base, self.config.rope_scaling)
+        self.rotary_emb = RotaryEmbedding(self.config.head_size, self.config.block_size, self.config.rope_freq_base, self.config.rope_scaling)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.n_layer):
@@ -45,8 +37,11 @@ class Bielik2Model(BaseModel):
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
         self.lm_head = torch.nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
 
+        self.target_layer_ids: Optional[set[int]] = None
+        self.dflash: Optional[DFlashDraftModel] = None
         if self.config.dflash_config:
-            self.configure_dflash()
+            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
+            self.dflash = DFlashDraftModel(self.config, self.tok_embeddings, self.lm_head, self.rotary_emb)
 
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         super().init_model_weights(buffer_device)
@@ -73,12 +68,11 @@ class Bielik2Model(BaseModel):
                 upper = cutoff_factor * weight_init_std
                 torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
             
-            if self.config.dflash_config:
-                self.init_dflash_weights()
+            if self.dflash is not None:
+                self.dflash.init_weights()
 
     def forward(self,
         input_ids: torch.Tensor,
-        target_ids: Optional[torch.Tensor] = None,
         anchor_pos: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
@@ -87,9 +81,9 @@ class Bielik2Model(BaseModel):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if inputs_embeds is not None:
-            B, T, _ = inputs_embeds.size()
+            T = inputs_embeds.size(1)
         else:
-            B, T = input_ids.size()
+            T = input_ids.size(1)
             inputs_embeds = self.get_embeddings()(input_ids) # (B, T, C)
             if self.tok_drop is not None:
                 inputs_embeds = self.tok_drop(inputs_embeds)
@@ -110,46 +104,23 @@ class Bielik2Model(BaseModel):
             if self.target_layer_ids and idx in self.target_layer_ids:
                 hidden_states_list.append(hidden_states)
         
+        last_hidden_states = hidden_states
         hidden_states = self.get_lm_head_norm()(hidden_states)
         logits = self.get_lm_head()(hidden_states)
 
         draft_logits = None
-        if self.config.dflash_config:
+        if self.dflash is not None:
             target_hidden = torch.cat(hidden_states_list, dim=-1)
-            target_hidden = self.dflash_hidden_norm(self.dflash_fc(target_hidden))
+            draft_logits = self.dflash(
+                input_ids=input_ids,
+                anchor_pos=anchor_pos,
+                attn_mask=attn_mask,
+                input_pos=input_pos,
+                seq_lens=seq_lens,
+                target_hidden=target_hidden,
+                last_hidden_states=last_hidden_states,
+            )
 
-            # anchor_pos indexes target_ids space; input_ids is shifted left by 1,
-            # so anchor_pos + 1 gives the corresponding input_ids positions
-            A = anchor_pos.size(1)
-            anchor_input_pos = anchor_pos + 1
-            anchor_ids = input_ids.gather(1, anchor_input_pos) # (B, A)
-            anchor_emb = self.get_embeddings()(anchor_ids) # (B, A, C)
-
-            if self.config.dflash_config.get("mask_with_hidden_states", False):
-                anchor_input_pos_exp = anchor_input_pos.unsqueeze(-1).expand(B, A, hidden_states.size(-1))  # (B, A, C)
-                mask_emb_full = hidden_states.gather(1, anchor_input_pos_exp)  # (B, A, C)
-            else:
-                mask_emb = self.get_embeddings()(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
-                mask_emb_full = mask_emb.expand(B, A, hidden_states.size(-1))  # (B, A, C)
-
-            C = anchor_emb.shape[-1]
-            draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size, C).clone()  # (B, A, draft_block_size, C)
-            draft_hidden_states[:, :, 0, :] = anchor_emb
-            draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
-
-            for layer in self.dflash_layers:
-                draft_hidden_states = layer(
-                    draft_hidden_states,
-                    target_hidden=target_hidden,
-                    rotary_emb=self.rotary_emb,
-                    anchor_pos=anchor_pos,
-                    attn_mask=attn_mask,
-                    input_pos=input_pos,
-                    seq_lens=seq_lens,
-                )
-            draft_hidden_states = self.dflash_norm(draft_hidden_states)
-            draft_logits = self.get_lm_head()(draft_hidden_states) # (B, A * draft_block_size, vocab_size)
-        
         return logits, draft_logits
     
     def add_layer(self, new_layers=1):
@@ -172,6 +143,5 @@ class Bielik2Model(BaseModel):
     def get_layers(self):
         return self.layers
     
-    def extract_context_feature(self, hidden_states: Tuple[torch.Tensor], layer_ids: List[int]) -> torch.Tensor:
-        selected_states = [hidden_states[layer_id] for layer_id in layer_ids]
-        return torch.cat(selected_states, dim=-1)
+    def get_dflash(self):
+        return self.dflash
