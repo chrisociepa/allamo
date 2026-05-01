@@ -198,7 +198,8 @@ class DFlashDraftModel(torch.nn.Module):
         self.target_layer_ids = set(config.dflash_config["target_layer_ids"])
         self.mask_token_id = config.dflash_config.get("mask_token_id", None)
         self.draft_block_size = config.dflash_config["block_size"]
-        self.dflash_target_layer_ids = self.config.dflash_config["target_layer_ids"]
+        self.dflash_target_layer_ids = config.dflash_config["target_layer_ids"]
+        self.mask_with_hidden_states = config.dflash_config.get("mask_with_hidden_states", False)
 
         self.embeddings = tok_embeddings
         self.lm_head = lm_head
@@ -207,7 +208,9 @@ class DFlashDraftModel(torch.nn.Module):
         self.fc = torch.nn.Linear(len(self.dflash_target_layer_ids) * self.config.n_embd, self.config.n_embd, bias=False)
         self.hidden_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
 
-        self.proj_m = torch.nn.Linear(self.config.n_embd, (self.draft_block_size - 1) * self.config.n_embd, bias=False)
+        if self.mask_with_hidden_states:
+            self.proj_m = torch.nn.Linear(self.config.n_embd, (self.draft_block_size - 1) * self.config.n_embd, bias=False)
+            self.m_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.dflash_config["num_hidden_layers"]):
@@ -218,9 +221,12 @@ class DFlashDraftModel(torch.nn.Module):
         
     def init_weights(self):
         torch.nn.init.trunc_normal_(self.fc.weight, mean=0.0, std=0.02)
-        torch.nn.init.trunc_normal_(self.proj_m.weight, mean=0.0, std=0.02)
         self.hidden_norm.reset_parameters()
         self.norm.reset_parameters()
+
+        if self.mask_with_hidden_states:
+            torch.nn.init.trunc_normal_(self.proj_m.weight, mean=0.0, std=0.02)
+            self.m_norm.reset_parameters()
 
         weight_init_std = 0.02 / math.sqrt(2 * len(self.layers))
         for layer in self.layers:
@@ -247,13 +253,13 @@ class DFlashDraftModel(torch.nn.Module):
         anchor_emb = self.embeddings(anchor_ids) # (B, A, C)
 
         C = anchor_emb.shape[-1]
-        if self.config.dflash_config.get("mask_with_hidden_states", False):
+        if self.mask_with_hidden_states:
             anchor_input_pos_exp = anchor_input_pos.unsqueeze(-1).expand(B, A, anchor_emb.size(-1))  # (B, A, C)
             mask_emb_full = last_hidden_states.gather(1, anchor_input_pos_exp)  # (B, A, C)
 
-            projected = self.proj_m(mask_emb_full)  # (B, A, (draft_block_size - 1) * C)
-
-            draft_slots = projected.reshape(B, A, self.draft_block_size - 1, C)
+            draft_slots = self.proj_m(mask_emb_full)  # (B, A, (draft_block_size - 1) * C)
+            draft_slots = self.m_norm(draft_slots)
+            draft_slots = draft_slots.reshape(B, A, self.draft_block_size - 1, C)
 
             draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_slots], dim=2)  # (B, A, draft_block_size, C)
         else:
