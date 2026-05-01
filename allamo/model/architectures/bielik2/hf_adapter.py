@@ -103,12 +103,17 @@ class Bielik2HFAdapter(BaseHFAdapter):
         logger.info(f"Loading model checkpoint from {checkpoint_dir_path}...")
         config_checkpoint, model_checkpoint = self.load_model_checkpoint(checkpoint_name_base, checkpoint_dir_path)
         config = self.get_model_config_class()(**config_checkpoint['model_args'])
+        num_layers = config.n_layer
 
         remove_unwanted_prefix_from_model_state_dict(model_checkpoint)
 
-        logger.info(f"Converting parameters from the checkpoint model")
+        if hf_model_type == "dflash":
+            logger.info("Limiting state dict to DFlash module keys")
+            num_layers = config.dflash_config["num_hidden_layers"]
+            model_checkpoint = {k[len("dflash."):]: v for k, v in model_checkpoint.items() if k.startswith("dflash.")}
+
+        logger.info(f"Converting parameters ({len(model_checkpoint)} keys) from the checkpoint model")
         param_count = 0
-        num_layers = config.n_layer
         index_dict = {"weight_map": {}}
         for layer_i in range(num_layers):
             logger.info(f"converting weights in layer {layer_i}")
@@ -270,7 +275,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
-                num_hidden_layers=config.n_layer,
+                num_hidden_layers=num_layers,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
                 attention_bias=False,
