@@ -258,8 +258,8 @@ class DFlashDraftModel(torch.nn.Module):
             mask_emb_full = last_hidden_states.gather(1, anchor_input_pos_exp)  # (B, A, C)
 
             draft_slots = self.proj_m(mask_emb_full)  # (B, A, (draft_block_size - 1) * C)
-            draft_slots = self.m_norm(draft_slots)
             draft_slots = draft_slots.reshape(B, A, self.draft_block_size - 1, C)
+            draft_slots = self.m_norm(draft_slots)
 
             draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_slots], dim=2)  # (B, A, draft_block_size, C)
         else:
