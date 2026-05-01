@@ -28,7 +28,8 @@ class Bielik2Model(BaseModel):
         self.tok_embeddings = torch.nn.Embedding(self.config.vocab_size, self.config.n_embd)
         self.tok_drop = torch.nn.Dropout(self.config.dropout) if self.config.dropout != 0 else None
         
-        self.rotary_emb = RotaryEmbedding(self.config.head_size, self.config.block_size, self.config.rope_freq_base, self.config.rope_scaling)
+        max_seq_len = self.config.block_size + self.config.head_size # add head_size to support draft model
+        self.rotary_emb = RotaryEmbedding(self.config.head_size, max_seq_len, self.config.rope_freq_base, self.config.rope_scaling)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.n_layer):

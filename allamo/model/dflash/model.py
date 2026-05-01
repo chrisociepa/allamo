@@ -89,7 +89,15 @@ class DFlashAttention(torch.nn.Module):
             k = self.repeat_kv(k, self.num_key_value_groups)
             v = self.repeat_kv(v, self.num_key_value_groups)
 
-        y = attention_version.flex_attention_diffusion(q, k, v, T=T, q_len=self.draft_block_size)
+        y = attention_version.flex_attention_diffusion(
+            q, k, v, 
+            T=T, 
+            q_len=self.draft_block_size,
+            anchor_pos=anchor_pos,
+            input_pos=input_pos,
+            attn_mask=attn_mask,
+            sliding_window=None
+        )
 
         # output projection (B, A * draft_block_size, nh * hs) -> (B, A * draft_block_size, C)
         y = y.contiguous().view(B, QT, self.num_heads * self.head_size)
@@ -224,6 +232,7 @@ class DFlashDraftModel(torch.nn.Module):
         last_hidden_states: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        B = input_ids.size(0)
         target_hidden = self.hidden_norm(self.fc(target_hidden))
 
         # anchor_pos indexes target_ids space; input_ids is shifted left by 1,
