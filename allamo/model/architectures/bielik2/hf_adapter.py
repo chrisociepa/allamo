@@ -30,7 +30,10 @@ class Bielik2HFAdapter(BaseHFAdapter):
         config.dropout = 0.0
         config.bias = self.check_bias(hf_model.state_dict())
         config.norm_eps = hf_model.config.rms_norm_eps
-        config.rope_freq_base = int(hf_model.config.rope_theta)
+        if hasattr(hf_model.config, "rope_parameters"):
+            config.rope_freq_base = int(hf_model.config.rope_parameters["rope_theta"])
+        else:
+            config.rope_freq_base = int(hf_model.config.rope_theta)
         config.qk_norm = getattr(hf_model.config, "qk_norm", False)
         config.gated_mlp = hf_model.config.hidden_act != "xielu" # heurystic that works for Apertus models
         config.attn_output_gate = False
