@@ -206,6 +206,9 @@ class DFlashDraftModel(torch.nn.Module):
 
         self.fc = torch.nn.Linear(len(self.dflash_target_layer_ids) * self.config.n_embd, self.config.n_embd, bias=False)
         self.hidden_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
+
+        self.proj_m = torch.nn.Linear(self.config.n_embd, (self.draft_block_size - 1) * self.config.n_embd, bias=False)
+
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.dflash_config["num_hidden_layers"]):
             self.layers.append(DFlashLayer(layer_id, self.config))
@@ -215,6 +218,7 @@ class DFlashDraftModel(torch.nn.Module):
         
     def init_weights(self):
         torch.nn.init.trunc_normal_(self.fc.weight, mean=0.0, std=0.02)
+        torch.nn.init.trunc_normal_(self.proj_m.weight, mean=0.0, std=0.02)
         self.hidden_norm.reset_parameters()
         self.norm.reset_parameters()
 
@@ -242,16 +246,23 @@ class DFlashDraftModel(torch.nn.Module):
         anchor_ids = input_ids.gather(1, anchor_input_pos) # (B, A)
         anchor_emb = self.embeddings(anchor_ids) # (B, A, C)
 
+        C = anchor_emb.shape[-1]
         if self.config.dflash_config.get("mask_with_hidden_states", False):
             anchor_input_pos_exp = anchor_input_pos.unsqueeze(-1).expand(B, A, anchor_emb.size(-1))  # (B, A, C)
             mask_emb_full = last_hidden_states.gather(1, anchor_input_pos_exp)  # (B, A, C)
+
+            projected = self.proj_m(mask_emb_full)  # (B, A, (draft_block_size - 1) * C)
+
+            draft_slots = projected.reshape(B, A, self.draft_block_size - 1, C)
+
+            draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_slots], dim=2)  # (B, A, draft_block_size, C)
         else:
             mask_emb = self.embeddings(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
             mask_emb_full = mask_emb.expand(B, A, anchor_emb.size(-1))  # (B, A, C)
 
-        C = anchor_emb.shape[-1]
-        draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size, C).clone()  # (B, A, draft_block_size, C)
-        draft_hidden_states[:, :, 0, :] = anchor_emb
+            draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size, C).clone()
+            draft_hidden_states[:, :, 0, :] = anchor_emb
+
         draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
 
         for layer in self.layers:
