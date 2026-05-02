@@ -200,6 +200,7 @@ class DFlashDraftModel(torch.nn.Module):
         self.draft_block_size = config.dflash_config["block_size"]
         self.dflash_target_layer_ids = config.dflash_config["target_layer_ids"]
         self.mask_with_hidden_states = config.dflash_config.get("mask_with_hidden_states", False)
+        self.mask_with_noise = config.dflash_config.get("mask_with_noise", False)
 
         self.embeddings = tok_embeddings
         self.lm_head = lm_head
@@ -262,6 +263,13 @@ class DFlashDraftModel(torch.nn.Module):
             draft_slots = self.m_norm(draft_slots)
 
             draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_slots], dim=2)  # (B, A, draft_block_size, C)
+        elif self.mask_with_noise:
+            # Diffusion-inspired initialization: fill draft slots with Gaussian noise, scaled to match the typical embedding magnitude
+            noise = torch.randn(B, A, self.draft_block_size - 1, C, device=anchor_emb.device, dtype=anchor_emb.dtype)
+            emb_scale = anchor_emb.detach().norm(dim=-1, keepdim=True).unsqueeze(2) / (C ** 0.5)
+            noise = noise * emb_scale
+
+            draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), noise], dim=2)  # (B, A, draft_block_size, C)
         else:
             mask_emb = self.embeddings(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
             mask_emb_full = mask_emb.expand(B, A, anchor_emb.size(-1))  # (B, A, C)
