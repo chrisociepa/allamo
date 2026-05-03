@@ -283,6 +283,8 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 rope_theta=config.rope_freq_base,
                 attention_bias=False,
                 mlp_bias=False,
+                num_target_layers=config.n_layer,
+                block_size=config.dflash_config["block_size"],
                 dflash_config={
                     "target_layer_ids": config.dflash_config["target_layer_ids"],
                     "mask_token_id": config.dflash_config.get("mask_token_id", None),
