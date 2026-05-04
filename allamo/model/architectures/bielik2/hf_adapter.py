@@ -107,12 +107,14 @@ class Bielik2HFAdapter(BaseHFAdapter):
         config_checkpoint, model_checkpoint = self.load_model_checkpoint(checkpoint_name_base, checkpoint_dir_path)
         config = self.get_model_config_class()(**config_checkpoint['model_args'])
         num_layers = config.n_layer
+        qk_norm = config.qk_norm
 
         remove_unwanted_prefix_from_model_state_dict(model_checkpoint)
 
         if hf_model_type == "dflash":
             logger.info("Limiting state dict to DFlash module keys")
             num_layers = config.dflash_config["num_hidden_layers"]
+            qk_norm = config.dflash_config.get("qk_norm", False)
             model_checkpoint = {k[len("dflash."):]: v for k, v in model_checkpoint.items() if k.startswith("dflash.")}
 
         logger.info(f"Converting parameters ({len(model_checkpoint)} keys) from the checkpoint model")
@@ -149,7 +151,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 state_dict[f"model.layers.{layer_i}.mlp.down_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.up_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.bias"]
             
-            if config.qk_norm:
+            if qk_norm:
                 state_dict[f"model.layers.{layer_i}.self_attn.q_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.q_norm.weight"]
                 state_dict[f"model.layers.{layer_i}.self_attn.k_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.k_norm.weight"]
             
