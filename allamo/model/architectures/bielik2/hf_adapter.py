@@ -185,10 +185,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
             state_dict["model.hidden_norm.weight"] = model_checkpoint["hidden_norm.weight"]
 
             if "mask_token_embd.weight" in model_checkpoint:
-                mask_token_id = config.dflash_config.get("mask_token_id", None)
-                assert mask_token_id is not None, "mask_token_id must be specified in dflash_config"
-                assert model_checkpoint["mask_token_embd.weight"].shape == state_dict["model.embed_tokens.weight"][mask_token_id].shape
-                state_dict["model.embed_tokens.weight"][mask_token_id] = model_checkpoint["mask_token_embd.weight"]
+                logger.warning("Mask token embedding found in draft model checkpoint. Merge it with the target model!")
         else:
             state_dict["model.embed_tokens.weight"] = model_checkpoint["tok_embeddings.weight"]
 
