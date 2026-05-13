@@ -54,22 +54,27 @@ def _make_diffusion_mask_with_docs_fn(T: int, q_len: int,
     ctx_ok: causal via absolute positions + same document as anchor.
     noise_ok: own block only + same document as anchor.
     """
+    A = anchor_pos.shape[1]
+
     def diffusion_mask(b, h, q_idx, kv_idx):
+        # Q - QT
+        # KV - T+QT
+        # q_len - block size
         t = q_idx // q_len
         anchor_idx = anchor_pos[b, t] + 1 # local ctx index of this block's anchor
         anchor_abs = input_pos[b, anchor_idx] # absolute position of anchor
         anchor_doc = attn_mask[b, anchor_idx] # document id of anchor
 
         # ctx: absolute position must be <= anchor's + same document
-        ctx_abs_ok = (kv_idx < T) & (input_pos[b, kv_idx] <= anchor_abs)
-        ctx_doc_ok = attn_mask[b, kv_idx] == anchor_doc
-        ctx_ok     = ctx_abs_ok & ctx_doc_ok
+        ctx_abs_ok = input_pos[b, kv_idx.clamp(0, T - 1)] <= anchor_abs
+        ctx_doc_ok = attn_mask[b, kv_idx.clamp(0, T - 1)] == anchor_doc
+        ctx_ok     = (kv_idx < T) & ctx_abs_ok & ctx_doc_ok
 
         # noise: own block only + same document as kv noise block's anchor
         noise_start  = T + t * q_len
         noise_end    = T + (t + 1) * q_len
         noise_pos_ok = (kv_idx >= noise_start) & (kv_idx < noise_end)
-        kv_t         = (kv_idx - T) // q_len
+        kv_t         = ((kv_idx - T) // q_len).clamp(0, A - 1)
         noise_doc_ok = attn_mask[b, anchor_pos[b, kv_t] + 1] == anchor_doc
         noise_ok     = noise_pos_ok & noise_doc_ok
 
