@@ -19,6 +19,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 from allamo.logging import logger
 from allamo.configuration import AllamoConfiguration
 from allamo.model.modeling_utils import AttentionBlock
+from allamo.model.dflash.model import DFlashLayer
 from allamo.torch_utils import (
     TORCH_DTYPE_MAP,
 )
@@ -77,6 +78,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
         transformer_auto_wrap_policy,
         transformer_layer_cls={
             AttentionBlock,
+            DFlashLayer,
         },
     )
     sharding_strategy = FSDP_SHARDING_STRATEGY_MAP[config.fsdp_sharding_strategy]

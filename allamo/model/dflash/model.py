@@ -56,9 +56,6 @@ class DFlashAttention(torch.nn.Module):
     ) -> torch.Tensor:
         B, T, _ = kv_x.size()
         QT  = q_x.shape[1]
-        A = QT // self.draft_block_size
-        # assert attn_mask is None, "attn_mask not supported in DFlashAttention"
-        # assert input_pos is None, "input_pos not supported in DFlashAttention"
         assert seq_lens is None, "seq_lens not supported in DFlashAttention"
 
         q = self.q_proj(q_x)
