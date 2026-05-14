@@ -83,6 +83,13 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
     )
     sharding_strategy = FSDP_SHARDING_STRATEGY_MAP[config.fsdp_sharding_strategy]
     cpu_offload_policy = CPUOffload(offload_params=True) if config.enable_cpu_offload else None
+    
+    frozen_params = [p for p in model.parameters() if not p.requires_grad]
+    if frozen_params:
+        logger.info(f"Configuring FSDP1 with frozen {sum(p.numel() for p in frozen_params):,} parameters")
+    else:
+        frozen_params = None
+    
     fsdp_config = dict(
         auto_wrap_policy=auto_wrap_policy,
         sharding_strategy=sharding_strategy,
@@ -96,6 +103,7 @@ def parallelize_model_with_fsdp1(model, config: AllamoConfiguration, with_activa
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,  # will use slightly more memory vs. no prefetch
         use_orig_params=True, # required to use torch.compile()
         cpu_offload=cpu_offload_policy,
+        ignored_states=frozen_params,
     )
     
     model = FSDP(model, **fsdp_config)
