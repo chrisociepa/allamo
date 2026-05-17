@@ -4,7 +4,7 @@ Swap the embedding layer of a HuggingFace model with embeddings from a separate 
 Usage:
     python swap_embeddings.py \
         -a path/to/source.ckpt \
-        -h path/to/hf_model_dir \
+        -m path/to/hf_model_dir \
         -o path/to/output_dir
 """
 
@@ -21,13 +21,13 @@ def parse_args() -> argparse.Namespace:
                     "tok_embeddings.weight from a separate checkpoint."
     )
     parser.add_argument(
-        "-a", "--src-ckpt",
+        "-a", "--allamo-ckpt",
         required=True,
         metavar="PATH",
         help="Path to the Allamo checkpoint (.pt) that contains 'tok_embeddings.weight'",
     )
     parser.add_argument(
-        "-h", "--hf-model",
+        "-m", "--hf-model",
         required=True,
         metavar="PATH",
         help="Path to the HuggingFace model directory",
@@ -103,7 +103,7 @@ def save_model(model: AutoModelForCausalLM, hf_model_path: str, output_path: str
 def main() -> None:
     configure_logger()
     args = parse_args()
-    new_embeddings = load_src_embeddings(args.src_ckpt)
+    new_embeddings = load_src_embeddings(args.allamo_ckpt)
     model = load_hf_model(args.hf_model)
     swap_embeddings(model, new_embeddings)
     del new_embeddings
