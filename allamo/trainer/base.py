@@ -294,7 +294,7 @@ class BaseTrainer:
         if self.config.dflash_config:
             eos_token_id = self.config.dflash_config.get("eos_token_id")
             num_anchors = self.config.dflash_config.get("anchor_count", batch["target_ids"].size(1) // self.draft_block_size)
-            masked_target_ids = batch["target_ids"][:, :-(self.draft_block_size-1)]
+            masked_target_ids = batch["target_ids"][:, :-(self.draft_block_size-1)].clone()
             if eos_token_id is not None:
                 masked_target_ids[masked_target_ids == eos_token_id] = self.config.ignore_index
 
