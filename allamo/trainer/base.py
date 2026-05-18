@@ -109,6 +109,7 @@ class BaseTrainer:
         self.model_ctx = nullcontext()
         self.log_init_learning_rate()
 
+        self.draft_loss_scaling_factor = 0.0
         if self.config.dflash_config:
             self.draft_loss_scaling_factor = self.config.dflash_config.get("loss_scaling_factor", 0.1)
             self.draft_block_size = self.config.dflash_config["block_size"]
@@ -604,6 +605,8 @@ class BaseTrainer:
                 draft_accuracy = iter_metrics_cpu[6].item() / iter_metrics_cpu[3].item()
                 draft_ignored_groups = iter_metrics_cpu[7].item() / iter_metrics_cpu[3].item()
                 draft_accepted_groups = iter_metrics_cpu[8].item() / iter_metrics_cpu[3].item()
+                dflash_metrics = draft_accepted_groups + draft_ignored_groups > 0
+                total_loss = lossf + draft_lossf * self.draft_loss_scaling_factor
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, self.config.batch_size * self.config.gradient_accumulation_steps, fwdbwd_time)
@@ -619,6 +622,12 @@ class BaseTrainer:
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.train_dataloader.epoch}, "
                     f"ETA: {self.calculate_eta()}"
                 )
+                if dflash_metrics:
+                    logger.info(
+                        f"[dflash] iter {self.train_ctx.iter_num:,}: total loss {total_loss:.4f}, dLoss {draft_lossf:.4f}, dAcc {draft_accuracy:.4f}, "
+                        f" groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}"
+                    )
+
                 if lossf < self.train_ctx.best_train_loss:
                     self.train_ctx.best_train_loss = lossf
 
@@ -640,10 +649,10 @@ class BaseTrainer:
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
-                    if draft_accepted_groups + draft_ignored_groups > 0:
+                    if dflash_metrics:
                         metrics['train/draft_loss'] = draft_lossf
                         metrics['train/draft_acc'] = draft_accuracy
-                        metrics['train/total_loss'] = lossf + draft_lossf * self.draft_loss_scaling_factor
+                        metrics['train/total_loss'] = total_loss
                         metrics['train/draft_ignored_groups'] = draft_ignored_groups
                         metrics['train/draft_accepted_groups'] = draft_accepted_groups
                     self.metrics_logger.log_metrics(metrics)
