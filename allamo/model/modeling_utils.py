@@ -317,6 +317,17 @@ class BaseModel(torch.nn.Module):
                     logger.info(f"Layer {layer_id} frozen")
                 else:
                     logger.info(f"Layer {layer_id} kept trainable")
+        
+        if self.dflash is not None and self.dflash.unfreeze_mask_token==False and freeze_embeddings:
+            mask_token_id = self.dflash.mask_token_id
+            embeddings = self.get_embeddings()
+            embeddings.weight.requires_grad = True
+            def mask_token_only_grad_hook(grad):
+                mask = torch.zeros_like(grad)
+                mask[mask_token_id] = 1.0
+                return grad * mask
+            embeddings.weight.register_hook(mask_token_only_grad_hook)
+            logger.info(f"Embeddings trainable (mask token only)")
 
 @dataclass
 class ModelSpec:
