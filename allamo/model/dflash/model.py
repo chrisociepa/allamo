@@ -252,10 +252,10 @@ class DFlashDraftModel(torch.nn.Module):
             mask_emb = self.mask_token_embd
         else:
             mask_emb = self.embeddings(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
-        mask_emb_full = mask_emb.expand(B, A, anchor_emb.size(-1))  # (B, A, C)
+        mask_emb_full = mask_emb.expand(B, A, C)
 
-        draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size, C).clone()
-        draft_hidden_states[:, :, 0, :] = anchor_emb
+        draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size - 1, C).clone()
+        draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_hidden_states], dim=2)
         draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
 
         for layer in self.layers:
