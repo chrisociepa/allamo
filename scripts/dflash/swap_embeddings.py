@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Directory where the patched model will be saved",
     )
+    parser.add_argument(
+        "-m", "--mask_token_id",
+        type=int,
+        help="If provided, only the mask embedding will be copied",
+    )
     return parser.parse_args()
 
 
@@ -70,7 +75,7 @@ def load_hf_model(hf_model_path: str) -> AutoModelForCausalLM:
     return model
 
 
-def swap_embeddings(model: AutoModelForCausalLM, new_embeddings: torch.Tensor) -> None:
+def swap_embeddings(model: AutoModelForCausalLM, new_embeddings: torch.Tensor, mask_token_id: int | None = None) -> None:
     target_key = "model.embed_tokens.weight"
     current_sd = model.state_dict()
     if target_key not in current_sd:
@@ -88,9 +93,12 @@ def swap_embeddings(model: AutoModelForCausalLM, new_embeddings: torch.Tensor) -
         new_embeddings = new_embeddings.to(current_sd[target_key].dtype)
 
     with torch.no_grad():
-        model.model.embed_tokens.weight.copy_(new_embeddings)
-
-    logger.info(f"Successfully swapped '{target_key}'")
+        if mask_token_id is not None:
+            model.model.embed_tokens.weight[mask_token_id] = new_embeddings[mask_token_id].detach().clone()
+            logger.info(f"Successfully swapped mask token embedding at index {mask_token_id}")
+        else:
+            model.model.embed_tokens.weight.copy_(new_embeddings)
+            logger.info(f"Successfully swapped '{target_key}'")
 
 
 def save_model(model: AutoModelForCausalLM, hf_model_path: str, output_path: str) -> None:
@@ -105,7 +113,7 @@ def main() -> None:
     args = parse_args()
     new_embeddings = load_src_embeddings(args.allamo_ckpt)
     model = load_hf_model(args.hf_model)
-    swap_embeddings(model, new_embeddings)
+    swap_embeddings(model, new_embeddings, args.mask_token_id)
     del new_embeddings
     save_model(model, args.hf_model, args.output)
 
