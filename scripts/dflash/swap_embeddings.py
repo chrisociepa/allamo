@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where the patched model will be saved",
     )
     parser.add_argument(
-        "-m", "--mask_token_id",
+        "-t", "--mask_token_id",
         type=int,
         help="If provided, only the mask embedding will be copied",
     )
