@@ -1,6 +1,7 @@
 import json
 import torch
 
+from allamo.logging import logger
 from allamo.model.modeling_utils import get_model_spec
 from allamo.train_utils import (
     get_model_checkpoint_path,
