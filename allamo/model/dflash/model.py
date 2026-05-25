@@ -19,7 +19,7 @@ class DFlashAttention(torch.nn.Module):
         self.num_kv_heads = config.num_kv_heads
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.dropout = config.dropout
-        self.attn_output_gate = config.attn_output_gate
+        self.attn_output_gate = config.dflash_config.get("attn_output_gate", config.attn_output_gate)
         self.qk_norm = config.dflash_config.get("qk_norm", config.qk_norm)
         self.draft_block_size = config.dflash_config["block_size"]
         
