@@ -19,6 +19,10 @@ class AutoModel:
         model_config = model_spec.model_config_cls(**config_checkpoint['model_args'])
 
         model = model_spec.model_cls(model_config)
-        model.load_state_dict(model_checkpoint)
+        incompatible_keys = model.load_state_dict(model_checkpoint, strict=False)
+        if incompatible_keys.unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint: {incompatible_keys.unexpected_keys}")
+        if incompatible_keys.missing_keys:
+            logger.warning(f"Missing keys in checkpoint: {incompatible_keys.missing_keys}")
 
         return model, model_spec, config_checkpoint
