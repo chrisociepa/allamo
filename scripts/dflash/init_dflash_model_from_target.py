@@ -14,8 +14,8 @@ def init_weights_from_target(
     target_layers: torch.nn.ModuleList,
     target_layer_ids: list[int],
 ):
-    target_ids = [l + 1 for l in target_layer_ids]
-    for draft_idx, layer_id in enumerate(target_ids):
+    assert len(target_layer_ids) == len(draft_layers), f"Number of target layers ({len(target_layer_ids)}) must match number of draft layers ({len(draft_layers)})"
+    for draft_idx, layer_id in enumerate(target_layer_ids):
         draft_layer = draft_layers[draft_idx]
         target_layer = target_layers[layer_id]
 
@@ -61,6 +61,13 @@ def main():
         "--output_dir",
         help="Location to write initialized model",
     )
+    parser.add_argument(
+        '--target_layer_ids',
+        type=int,
+        nargs='*',
+        default=[],
+        help='List of target model layer indices to use (e.g., --target_layer_ids 47 48 49)'
+    )
     args = parser.parse_args()
 
     model, model_spec, config_checkpoint = AutoModel.from_pretrained(args.checkpoint_name_base, args.input_dir)
@@ -70,7 +77,7 @@ def main():
     init_weights_from_target(
         model.dflash.layers,
         model.layers,
-        config_checkpoint["model_args"]["dflash_config"]["target_layer_ids"]
+        args.target_layer_ids
     )
     logger.info("Initialized dflash model from target model")
     
