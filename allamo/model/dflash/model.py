@@ -203,10 +203,15 @@ class DFlashDraftModel(torch.nn.Module):
 
         if self.unfreeze_mask_token:
             with torch.no_grad():
-                orig_emb = self.embeddings.weight[self.mask_token_id]
+                if self.mask_token_id is not None:
+                    orig_emb = self.embeddings.weight[self.mask_token_id]
+                    log_msg = f"Unfrozen mask token embedding for token ID {self.mask_token_id}."
+                else:
+                    orig_emb = self.embeddings.weight.mean(dim=0)
+                    log_msg = "Unfrozen mask token embedding initialized as mean of all embeddings."
+                            
             self.mask_token_embd = torch.nn.Parameter(orig_emb.clone())
-            logger.warning(f"Unfrozen mask token embedding for token ID {self.mask_token_id}. "
-                           f"Remember to merge it with the main model before unfreezing it.")
+            logger.warning(f"{log_msg} Remember to merge it with the main model before unfreezing it.")
 
         self.fc = torch.nn.Linear(len(self.target_layer_ids) * self.config.n_embd, self.config.n_embd, bias=False)
         self.hidden_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
