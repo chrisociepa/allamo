@@ -219,7 +219,9 @@ class DFlashDraftModel(torch.nn.Module):
         self.init_weights()
         
     def init_weights(self):
-        torch.nn.init.trunc_normal_(self.fc.weight, mean=0.0, std=0.02)
+        weight_init_std = 0.02 / math.sqrt(len(self.target_layer_ids))
+        torch.nn.init.trunc_normal_(self.fc.weight, mean=0.0, std=weight_init_std)
+
         self.hidden_norm.reset_parameters()
         self.norm.reset_parameters()
 
