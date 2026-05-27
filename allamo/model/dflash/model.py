@@ -236,14 +236,15 @@ class DFlashDraftModel(torch.nn.Module):
 
     def forward(self,
         input_ids: torch.Tensor,
-        anchor_pos: Optional[torch.Tensor] = None,
+        anchor_pos: torch.Tensor,
+        target_hidden_states: List[torch.Tensor],
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
-        target_hidden: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         B = input_ids.size(0)
+        target_hidden = torch.cat(target_hidden_states, dim=-1)
         target_hidden = self.hidden_norm(self.fc(target_hidden))
 
         # anchor_pos indexes target_ids space; input_ids is shifted left by 1,

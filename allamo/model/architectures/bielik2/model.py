@@ -110,14 +110,13 @@ class Bielik2Model(BaseModel):
 
         draft_logits = None
         if self.dflash is not None:
-            target_hidden = torch.cat(hidden_states_list, dim=-1)
             draft_logits = self.dflash(
                 input_ids=input_ids,
                 anchor_pos=anchor_pos,
+                target_hidden_states=hidden_states_list,
                 attn_mask=attn_mask,
                 input_pos=input_pos,
                 seq_lens=seq_lens,
-                target_hidden=target_hidden,
             )
 
         return logits, draft_logits
