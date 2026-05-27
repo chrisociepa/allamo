@@ -241,7 +241,6 @@ class DFlashDraftModel(torch.nn.Module):
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
         target_hidden: Optional[torch.Tensor] = None,
-        last_hidden_states: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B = input_ids.size(0)

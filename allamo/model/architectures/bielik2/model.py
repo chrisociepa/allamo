@@ -104,8 +104,7 @@ class Bielik2Model(BaseModel):
             hidden_states = layer(hidden_states, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
             if self.target_layer_ids and idx in self.target_layer_ids:
                 hidden_states_list.append(hidden_states)
-        
-        last_hidden_states = hidden_states
+
         hidden_states = self.get_lm_head_norm()(hidden_states)
         logits = self.get_lm_head()(hidden_states)
 
@@ -119,7 +118,6 @@ class Bielik2Model(BaseModel):
                 input_pos=input_pos,
                 seq_lens=seq_lens,
                 target_hidden=target_hidden,
-                last_hidden_states=last_hidden_states,
             )
 
         return logits, draft_logits
