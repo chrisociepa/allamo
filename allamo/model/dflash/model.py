@@ -196,6 +196,7 @@ class DFlashDraftModel(torch.nn.Module):
         self.mask_token_id = config.dflash_config.get("mask_token_id", None)
         self.draft_block_size = config.dflash_config["block_size"]
         self.unfreeze_mask_token = config.dflash_config.get("unfreeze_mask_token", False)
+        self.detach_hidden_states = config.dflash_config.get("detach_hidden_states", False)
 
         self.embeddings = tok_embeddings
         self.lm_head = lm_head
@@ -244,6 +245,9 @@ class DFlashDraftModel(torch.nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         B = input_ids.size(0)
+
+        if self.detach_hidden_states:
+            target_hidden_states = [hs.detach() for hs in target_hidden_states]
         target_hidden = torch.cat(target_hidden_states, dim=-1)
         target_hidden = self.hidden_norm(self.fc(target_hidden))
 
@@ -264,6 +268,8 @@ class DFlashDraftModel(torch.nn.Module):
         draft_hidden_states = mask_emb_full.unsqueeze(2).expand(B, A, self.draft_block_size - 1, C).clone()
         draft_hidden_states = torch.cat([anchor_emb.unsqueeze(2), draft_hidden_states], dim=2)
         draft_hidden_states = draft_hidden_states.reshape(B, A * self.draft_block_size, C)
+        if self.detach_hidden_states:
+            draft_hidden_states = draft_hidden_states.detach().requires_grad_(True)
 
         for layer in self.layers:
             draft_hidden_states = layer(
