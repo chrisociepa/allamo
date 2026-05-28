@@ -41,6 +41,7 @@ class ModelOutput:
     draft_unmasked_labels: int = 0
     draft_ignored_groups: int = 0
     draft_accepted_groups: int = 0
+    draft_acceptance_length: float = 0.0
 
 class BaseTrainer:
     
@@ -331,6 +332,7 @@ class BaseTrainer:
         draft_unmasked_labels = 0
         draft_ignored_groups = 0
         draft_accepted_groups = 0
+        draft_acceptance_length = 0.0
         if draft_logits is not None:
             B = batch["target_ids"].size(0)
 
@@ -378,11 +380,23 @@ class BaseTrainer:
             draft_loss = (per_token_loss * weight_map.view(-1)).sum() / weight_map.sum().clamp(min=1)
 
             draft_unmasked_labels = torch.sum(draft_labels.view(-1) != self.config.ignore_index).item()
+            draft_predictions = draft_logits.view(-1, draft_logits.size(-1)).argmax(1)
             draft_accuracy = (
-                (draft_logits.view(-1, draft_logits.size(-1)).argmax(1) == draft_labels.view(-1)).sum().item()
+                (draft_predictions == draft_labels.view(-1)).sum().item()
                 / draft_unmasked_labels
                 if draft_unmasked_labels > 0 else 0.0
             )
+
+            draft_labels_grouped = draft_labels.view(B, num_anchors, self.draft_block_size)
+            draft_preds_grouped = draft_predictions.view(B, num_anchors, self.draft_block_size)
+            active_mask = (draft_labels_grouped != self.config.ignore_index)
+            has_active = active_mask.any(dim=-1)
+            if has_active.any():
+                correct = (draft_preds_grouped == draft_labels_grouped) & active_mask
+                breaks_prefix = active_mask & ~correct
+                no_break_so_far = (~breaks_prefix).cumprod(dim=-1)
+                acceptance_length_per_group = (no_break_so_far & active_mask).sum(dim=-1).float()
+                draft_acceptance_length = acceptance_length_per_group[has_active].mean().item()
 
         if gradient_accumulation_steps > 1:
             # scale the loss to account for micro steps
@@ -399,6 +413,7 @@ class BaseTrainer:
             draft_unmasked_labels=draft_unmasked_labels,
             draft_ignored_groups=draft_ignored_groups,
             draft_accepted_groups=draft_accepted_groups,
+            draft_acceptance_length=draft_acceptance_length,
         )
 
     def dpo_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
@@ -507,7 +522,7 @@ class BaseTrainer:
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.train_dataloader.epoch
         current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
-        iter_metrics = torch.zeros(9).to(self.config.device)
+        iter_metrics = torch.zeros(10).to(self.config.device)
         batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
             if current_epoch < self.train_dataloader.epoch:
@@ -559,6 +574,7 @@ class BaseTrainer:
                     iter_metrics[6] += model_output.draft_accuracy
                     iter_metrics[7] += model_output.draft_ignored_groups
                     iter_metrics[8] += model_output.draft_accepted_groups
+                    iter_metrics[9] += model_output.draft_acceptance_length
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.train_dataloader.get_batch()
@@ -605,6 +621,7 @@ class BaseTrainer:
                 draft_accuracy = iter_metrics_cpu[6].item() / iter_metrics_cpu[3].item()
                 draft_ignored_groups = iter_metrics_cpu[7].item() / iter_metrics_cpu[3].item()
                 draft_accepted_groups = iter_metrics_cpu[8].item() / iter_metrics_cpu[3].item()
+                draft_acceptance_length = iter_metrics_cpu[9].item() / iter_metrics_cpu[3].item()
                 dflash_metrics = draft_accepted_groups + draft_ignored_groups > 0
                 total_loss = lossf + draft_lossf * self.draft_loss_scaling_factor
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
@@ -625,7 +642,8 @@ class BaseTrainer:
                 if dflash_metrics:
                     logger.info(
                         f"[dflash] iter {self.train_ctx.iter_num:,}: total loss {total_loss:.4f}, dLoss {draft_lossf:.4f}, dAcc {draft_accuracy:.4f}, "
-                        f" groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}"
+                        f" groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}, "
+                        f" avg acceptance length={draft_acceptance_length:.2f}"
                     )
 
                 if lossf < self.train_ctx.best_train_loss:
@@ -655,6 +673,7 @@ class BaseTrainer:
                         metrics['train/total_loss'] = total_loss
                         metrics['train/draft_ignored_groups'] = draft_ignored_groups
                         metrics['train/draft_accepted_groups'] = draft_accepted_groups
+                        metrics['train/draft_acceptance_length'] = draft_acceptance_length
                     self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             
