@@ -325,7 +325,7 @@ class BaseTrainer:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
+        accuracy = (logits.argmax(dim=-1) == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
 
         draft_loss = None
         draft_accuracy = 0.0
@@ -336,8 +336,12 @@ class BaseTrainer:
         if draft_logits is not None:
             B = batch["target_ids"].size(0)
 
+            with torch.no_grad():
+                target_predicted_ids = logits.argmax(dim=-1)  # (B, T)
+                target_predicted_ids[batch["target_ids"] == self.config.ignore_index] = self.config.ignore_index
+
             padded = F.pad(
-                batch["target_ids"],
+                target_predicted_ids,
                 (1, self.draft_block_size),
                 value=self.config.ignore_index,
             )
