@@ -112,8 +112,11 @@ class Bielik2Model(BaseModel):
 
         draft_logits = None
         if self.dflash is not None:
+            with torch.no_grad():
+                target_predicted_ids = logits.argmax(dim=-1) # (B, T)
+
             draft_logits = self.dflash(
-                input_ids=input_ids,
+                target_ids=target_predicted_ids,
                 anchor_pos=anchor_pos,
                 target_hidden_states=hidden_states_list,
                 attn_mask=attn_mask,

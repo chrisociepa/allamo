@@ -236,7 +236,7 @@ class DFlashDraftModel(torch.nn.Module):
             layer.init_weights(weight_init_std)
 
     def forward(self,
-        input_ids: torch.Tensor,
+        target_ids: torch.Tensor,
         anchor_pos: torch.Tensor,
         target_hidden_states: List[torch.Tensor],
         attn_mask: Optional[torch.Tensor] = None,
@@ -244,18 +244,14 @@ class DFlashDraftModel(torch.nn.Module):
         seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        B = input_ids.size(0)
+        B, A = anchor_pos.shape
 
         if self.detach_hidden_states:
             target_hidden_states = [hs.detach() for hs in target_hidden_states]
         target_hidden = torch.cat(target_hidden_states, dim=-1)
         target_hidden = self.hidden_norm(self.fc(target_hidden))
 
-        # anchor_pos indexes target_ids space; input_ids is shifted left by 1,
-        # so anchor_pos + 1 gives the corresponding input_ids positions
-        A = anchor_pos.size(1)
-        anchor_input_pos = anchor_pos + 1
-        anchor_ids = input_ids.gather(1, anchor_input_pos) # (B, A)
+        anchor_ids = target_ids.gather(1, anchor_pos) # (B, A)
         anchor_emb = self.embeddings(anchor_ids) # (B, A, C)
 
         C = anchor_emb.shape[-1]
