@@ -318,6 +318,12 @@ class BaseModel(torch.nn.Module):
                 else:
                     logger.info(f"Layer {layer_id} kept trainable")
 
+        if self.get_dflash() is not None and freeze_embeddings and self.config.dflash_config.get("zero_embds_grad", False):
+            embeddings = self.get_embeddings()
+            embeddings.weight.requires_grad = True
+            embeddings.weight.register_hook(torch.zeros_like)
+            logger.info(f"Embeddings unfrozen but with registered zero grad hook - only weight decay will be applied during training")
+
 @dataclass
 class ModelSpec:
     model_type: str
