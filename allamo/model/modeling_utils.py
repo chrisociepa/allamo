@@ -320,9 +320,16 @@ class BaseModel(torch.nn.Module):
 
         if self.get_dflash() is not None and freeze_embeddings and self.config.dflash_config.get("zero_embds_grad", False):
             embeddings = self.get_embeddings()
-            embeddings.weight.requires_grad = True
-            embeddings.weight.register_hook(torch.zeros_like)
-            logger.info(f"Embeddings unfrozen but with registered zero grad hook - only weight decay will be applied during training")
+            embeddings.weight.requires_grad_(True)
+
+            def zero_grad_hook(grad):
+                return grad * 0
+
+            embeddings.weight.register_hook(zero_grad_hook)
+            logger.info(
+                "Embedding gradients are disabled via hook; "
+                "parameter updates may only come from optimizer behavior such as weight decay."
+            )
 
 @dataclass
 class ModelSpec:
