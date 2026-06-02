@@ -606,6 +606,11 @@ class BaseTrainer:
             if self.train_ctx.master_process:
                 # FIXME: CPU-GPU sync point, could be done when logging metrics
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
+            
+            if self.config.dflash_config and self.config.dflash_config.get("zero_embds_grad", False):
+                if self.model.get_embeddings().weight.grad is not None:
+                    with torch.no_grad():
+                        self.model.get_embeddings().weight.grad.zero_()
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
             # step the optimizer and scaler
