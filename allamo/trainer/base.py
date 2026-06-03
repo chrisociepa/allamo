@@ -108,7 +108,6 @@ class BaseTrainer:
             self.val_dataloader.load_datasets()
         self.model_config = create_model_config(self.config, self.model_spec)
         self.model_ctx = nullcontext()
-        self.raw_model = None
         self.log_init_learning_rate()
 
         self.draft_loss_scaling_factor = 0.0
@@ -607,12 +606,6 @@ class BaseTrainer:
             if self.train_ctx.master_process:
                 # FIXME: CPU-GPU sync point, could be done when logging metrics
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
-            
-            if self.config.dflash_config and self.config.dflash_config.get("zero_embds_grad", False):
-                embeddings = self.raw_model.get_embeddings() if self.raw_model is not None else self.model.get_embeddings()
-                if embeddings.weight.grad is not None:
-                    with torch.no_grad():
-                        embeddings.weight.grad.zero_()
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
             # step the optimizer and scaler
