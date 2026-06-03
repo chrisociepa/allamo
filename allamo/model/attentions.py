@@ -30,7 +30,7 @@ def _make_diffusion_mask_fn(T: int, q_len: int, anchor_pos: torch.Tensor):
 
         # anchor_pos is in target_ids space, so +1 to get the corresponding input_ids index,
         # which is the ctx segment's local index space (kv_idx < T walks input_ids).
-        ctx_ok   = (kv_idx < T) & (kv_idx <= anchor_pos[b, t] + 1)
+        ctx_ok   = (kv_idx < T) & (kv_idx <= anchor_pos[b, t])
 
         noise_start = T + t * q_len
         noise_end   = T + (t + 1) * q_len
@@ -65,8 +65,8 @@ def _make_diffusion_mask_with_docs_fn(T: int, q_len: int,
         anchor_abs = input_pos[b, anchor_idx] # absolute position of anchor
         anchor_doc = attn_mask[b, anchor_idx] # document id of anchor
 
-        # ctx: absolute position must be <= anchor's + same document
-        ctx_abs_ok = input_pos[b, kv_idx.clamp(0, T - 1)] <= anchor_abs
+        # ctx: absolute position must be < anchor's + same document
+        ctx_abs_ok = input_pos[b, kv_idx.clamp(0, T - 1)] < anchor_abs
         ctx_doc_ok = attn_mask[b, kv_idx.clamp(0, T - 1)] == anchor_doc
         ctx_ok     = (kv_idx < T) & ctx_abs_ok & ctx_doc_ok
 
