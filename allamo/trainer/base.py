@@ -248,23 +248,34 @@ class BaseTrainer:
         self,
         target_ids: torch.Tensor,
         A: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
-        Prepare A positions from target_ids (B, T), maximizing spacing between
-        selected positions while avoiding ignore_index where possible.
+        Prepare A anchor positions per sample from target_ids (B, T).
 
-        When valid_count >= A: selects A evenly-spaced positions from valid ones.
-        When valid_count < A: takes all valid positions + pads with ignore_index
-                            positions to reach A. No index repetitions in either case.
+        Anchor positions are selected exclusively from valid (non-ignore_index) token
+        positions whenever possible. Two selection strategies are supported depending
+        on the random_sampling flag in dflash_config:
+
+        - evenly-spaced (default): A positions are spread uniformly across the valid
+            block, maximising the distance between consecutive anchors.
+        - random (random_sampling=True): A positions are drawn without replacement
+            from the valid block, with random spacing between anchors.
+
+        When valid_count >= A: A positions are selected from valid tokens only,
+                            using the active strategy (evenly-spaced or random).
+        When valid_count < A:  all valid positions are taken and the remainder is
+                            padded with ignore_index positions to reach A.
+                            No index repetitions occur in either case.
 
         Args:
-            target_ids:   (B, T) int tensor with token labels, may contain ignore_index
-            A:            number of positions to select per sample
+            target_ids:  (B, T) int tensor of token labels; may contain ignore_index
+            A:           number of anchor positions to select per sample
 
         Returns:
-            anchor_pos: (B, A) long  - selected anchor positions along dim T
+            anchor_pos:  (B, A) long tensor of selected positions along dim T
         """
         device = target_ids.device
+        B, T = target_ids.shape
 
         valid_mask  = target_ids != self.config.ignore_index
         valid_count = valid_mask.sum(dim=1) # (B,)
@@ -274,12 +285,30 @@ class BaseTrainer:
         sort_order = valid_mask.long().argsort(dim=1, descending=True, stable=True) # (B, T)
 
         # Path A: valid_count >= A
-        # Linspace over [0, valid_count - 1] produces exactly A unique local indices
-        # into the valid block - no repetitions since we map A slots onto >= A points
-        end_a   = (valid_count.clamp(min=1) - 1).float().unsqueeze(1) # (B, 1)
-        t       = torch.linspace(0, 1, A, device=device).unsqueeze(0) # (1, A)
-        local_a = (t * end_a).round().long() # (B, A)
-        indices_a = sort_order.gather(1, local_a) # (B, A)
+        random_sampling = self.config.dflash_config.get("random_sampling", False)
+        if random_sampling:
+            # Shuffle only within the valid block of each sample to guarantee that
+            # the first A columns remain exclusively valid indices.
+            scores = torch.rand(B, T, device=device) # (B, T) uniform in [0, 1)
+
+            # Build a position mask: True for slots that belong to the valid block
+            col_idx = torch.arange(T, device=device).unsqueeze(0) # (1, T)
+            valid_block_mask = col_idx < valid_count.unsqueeze(1) # (B, T)
+
+            # Clamp invalid block scores to 1.0 so they always sort after valid block scores
+            scores = torch.where(valid_block_mask, scores, torch.ones_like(scores))
+
+            # Argsort over the modified scores: valid positions (score < 1.0) come first
+            # in random order; invalid positions (score == 1.0) follow in arbitrary order
+            shuffled = sort_order.gather(1, scores.argsort(dim=1)) # (B, T)
+            indices_a = shuffled[:, :A] # (B, A)
+        else:
+            # Linspace over [0, valid_count - 1] produces exactly A unique local indices
+            # into the valid block - no repetitions since we map A slots onto >= A points
+            end_a   = (valid_count.clamp(min=1) - 1).float().unsqueeze(1) # (B, 1)
+            t       = torch.linspace(0, 1, A, device=device).unsqueeze(0) # (1, A)
+            local_a = (t * end_a).round().long() # (B, A)
+            indices_a = sort_order.gather(1, local_a) # (B, A)
 
         # Path B: valid_count < A
         # sort_order[:, :A] already contains all valid indices followed by unique
