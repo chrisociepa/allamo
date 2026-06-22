@@ -203,16 +203,11 @@ class DFlashDraftModel(torch.nn.Module):
         self.rotary_emb = rotary_emb
 
         if self.unfreeze_mask_token:
-            with torch.no_grad():
-                if self.mask_token_id is not None:
-                    orig_emb = self.embeddings.weight[self.mask_token_id]
-                    log_msg = f"Unfrozen mask token embedding for token ID {self.mask_token_id}."
-                else:
-                    orig_emb = self.embeddings.weight.mean(dim=0)
-                    log_msg = "Unfrozen mask token embedding initialized as mean of all embeddings."
-                            
-            self.mask_token_embd = torch.nn.Parameter(orig_emb.clone())
-            logger.warning(f"{log_msg} Remember to merge it with the main model before unfreezing it.")
+            self.mask_token_embd = torch.nn.Parameter(torch.empty(self.config.n_embd))
+            logger.info("DFlash mask token embedding initialized. Remember to merge it into the target model.")
+        else:
+            self.mask_token_embd = None
+            logger.info(f"DFlash will use mask token id {self.mask_token_id}")
 
         self.fc = torch.nn.Linear(len(self.target_layer_ids) * self.config.n_embd, self.config.n_embd, bias=False)
         self.hidden_norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
@@ -223,7 +218,7 @@ class DFlashDraftModel(torch.nn.Module):
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
 
         self.init_weights()
-        
+
     def init_weights(self):
         weight_init_std = 0.02 / math.sqrt(len(self.target_layer_ids))
         torch.nn.init.trunc_normal_(self.fc.weight, mean=0.0, std=weight_init_std)
@@ -255,7 +250,7 @@ class DFlashDraftModel(torch.nn.Module):
         anchor_emb = self.embeddings(anchor_ids) # (B, A, C)
 
         C = anchor_emb.shape[-1]
-        if self.unfreeze_mask_token:
+        if self.mask_token_embd is not None:
             mask_emb = self.mask_token_embd
         else:
             mask_emb = self.embeddings(torch.tensor([self.mask_token_id], device=target_hidden.device))  # (1, C)
