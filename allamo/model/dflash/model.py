@@ -150,6 +150,113 @@ class DFlashAttention(torch.nn.Module):
         return x.reshape(B, num_kv_heads * num_key_value_groups, T, hs)
 
 
+class DFlash2DynamicConv(torch.nn.Module):
+    """
+    Two-tap dynamic depthwise convolution, wrapped around one DFlash sublayer
+    (attention or feed-forward). Lets a block position see its immediate
+    predecessor within the same block without another pass through the
+    backbone:
+
+        out[i, c] = sum_{t=0,1} (base[t, g(c)] + delta[i, t, g(c)]) * x[i - t, c]
+
+    g(c) maps a channel to its group (conv_group_size channels share one
+    dynamic correction); base is a static per-group, per-tap kernel; delta is
+    predicted per position from the sublayer's own input. Taps never cross a
+    block boundary: position 0 of every anchor's block only sees itself.
+
+    The initialization contract (identity at construction) is the part that
+    matters for warm-starting from a DFlash 1 checkpoint.
+    """
+
+    def __init__(self, config: BaseModelConfig):
+        super().__init__()
+        self.n_embd = config.n_embd
+        self.draft_block_size = config.dflash_config["block_size"]
+        self.group_size = config.dflash_config.get("conv_group_size", 1)
+        assert self.n_embd % self.group_size == 0, "n_embd must be divisible by conv_group_size"
+        self.num_groups = self.n_embd // self.group_size
+
+        # static base kernel: tap 0 = self, tap 1 = predecessor
+        self.base_kernel = torch.nn.Parameter(torch.zeros(self.num_groups, 2))
+        # per-position dynamic correction, predicted from the sublayer's input
+        self.delta_proj = torch.nn.Linear(self.n_embd, self.num_groups * 2, bias=False)
+
+    def init_weights(self):
+        # identity at init: tap 0 passes x through unchanged, tap 1 and every
+        # dynamic correction start at zero, so this module is a no-op until trained
+        with torch.no_grad():
+            self.base_kernel.zero_()
+            self.base_kernel[:, 0] = 1.0
+        torch.nn.init.zeros_(self.delta_proj.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, A * draft_block_size, C)
+        B, QT, C = x.shape
+        block = self.draft_block_size
+        A = QT // block
+
+        x_blk = x.view(B, A, block, self.num_groups, self.group_size)
+        x_prev = torch.zeros_like(x_blk)
+        x_prev[:, :, 1:] = x_blk[:, :, :-1]  # shift within block; zero at block start
+
+        delta = self.delta_proj(x).view(B, A, block, self.num_groups, 2)
+        kernel = self.base_kernel.view(1, 1, 1, self.num_groups, 2) + delta
+
+        out = kernel[..., 0:1] * x_blk + kernel[..., 1:2] * x_prev
+        return out.reshape(B, QT, C)
+
+
+class DFlash2CandidateSelector(torch.nn.Module):
+    """
+    Pairwise candidate-path selector for DFlash 2, trained with teacher forcing.
+
+    At each block position t, DFlash's own head already proposes selector_top_k
+    candidates (draft_logits.topk). This module rescores each candidate against
+    the *ground-truth* predecessor token at position t-1 with a low-rank
+    bilinear term added on top of DFlash's own logit:
+
+        score(b) = logit_t(b) + <gate(h_t) * A[pred_id], B[b]>
+
+    A and B are rank-`selector_rank` token codebooks; gate() is a small context
+    projection of the hidden state at t. Training supervises the index of the
+    true token within the top-k list; positions whose true token misses the
+    list are excluded.
+
+    B starts at zero, so the bilinear term is zero at initialization: a freshly
+    built selector defers entirely to DFlash's own logits until it is trained.
+
+    Note: this module only covers the trainable head. The full inference-time
+    path walk (choosing predecessors from a live top-k set rather than a single
+    teacher-forced token, across the whole block) belongs to the serving engine
+    (vLLM/SGLang/etc.), not to this training-side module.
+    """
+
+    def __init__(self, config: BaseModelConfig):
+        super().__init__()
+        self.top_k = config.dflash_config.get("selector_top_k", 8)
+        self.rank = config.dflash_config.get("selector_rank", 128)
+        self.gate = torch.nn.Linear(config.n_embd, self.rank, bias=False)
+        self.pred_codebook = torch.nn.Embedding(config.vocab_size, self.rank)
+        self.succ_codebook = torch.nn.Embedding(config.vocab_size, self.rank)
+
+    def init_weights(self):
+        torch.nn.init.zeros_(self.gate.weight)
+        torch.nn.init.trunc_normal_(self.pred_codebook.weight, mean=0.0, std=0.02)
+        torch.nn.init.zeros_(self.succ_codebook.weight)  # bilinear term is zero at init
+
+    def forward(self,
+        hidden_t: torch.Tensor,     # (..., C)  hidden state at position t
+        pred_ids: torch.Tensor,     # (...,)    ground-truth predecessor token id (teacher forced)
+        cand_ids: torch.Tensor,     # (..., k)  top-k candidate ids at position t
+        cand_logits: torch.Tensor,  # (..., k)  DFlash's own logits for those candidates
+    ) -> torch.Tensor:
+        ctx = self.gate(hidden_t).unsqueeze(-2)                # (..., 1, rank)
+        pred_vec = self.pred_codebook(pred_ids).unsqueeze(-2)  # (..., 1, rank)
+        succ_vec = self.succ_codebook(cand_ids)                # (..., k, rank)
+        bilinear = ((pred_vec * ctx) * succ_vec).sum(-1)       # (..., k)
+        return cand_logits + bilinear
+
+
 class DFlashLayer(torch.nn.Module):
     
     def __init__(self, layer_id: int, config: BaseModelConfig):
@@ -159,12 +266,25 @@ class DFlashLayer(torch.nn.Module):
         self.feed_forward = FeedForward(config)
         self.attention_norm = torch.nn.RMSNorm(config.n_embd, eps=config.norm_eps)
         self.ffn_norm = torch.nn.RMSNorm(config.n_embd, eps=config.norm_eps)
+
+        self.dflash2 = config.dflash_config.get("dflash2", False)
+        if self.dflash2:
+            # one conv module per sublayer with two calls sharing the same projection
+            self.attn_conv = DFlash2DynamicConv(config)
+            self.ffn_conv = DFlash2DynamicConv(config)
+        else:
+            self.attn_conv = None
+            self.ffn_conv = None
     
     def init_weights(self, init_std: float):
         self.attention.init_weights(init_std)
         self.feed_forward.init_weights(init_std)
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
+        if self.attn_conv is not None:
+            self.attn_conv.init_weights()
+        if self.ffn_conv is not None:
+            self.ffn_conv.init_weights()
 
     def forward(self,
         x: torch.Tensor,
@@ -176,8 +296,17 @@ class DFlashLayer(torch.nn.Module):
         seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        x = x + self.attention(self.attention_norm(x), target_hidden, rotary_emb, anchor_pos=anchor_pos, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
-        x = x + self.feed_forward(self.ffn_norm(x))
+        attn_in = self.attn_conv(x) if self.attn_conv is not None else x
+        attn_out = self.attention(self.attention_norm(attn_in), target_hidden, rotary_emb, anchor_pos=anchor_pos, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+        if self.attn_conv is not None:
+            attn_out = self.attn_conv(attn_out)
+        x = x + attn_out
+
+        ffn_in = self.ffn_conv(x) if self.ffn_conv is not None else x
+        ffn_out = self.feed_forward(self.ffn_norm(ffn_in))
+        if self.ffn_conv is not None:
+            ffn_out = self.ffn_conv(ffn_out)
+        x = x + ffn_out
         return x
 
 
@@ -198,6 +327,9 @@ class DFlashDraftModel(torch.nn.Module):
         self.unfreeze_mask_token = config.dflash_config.get("unfreeze_mask_token", False)
         self.detach_hidden_states = config.dflash_config.get("detach_hidden_states", False)
 
+        self.dflash2 = config.dflash_config.get("dflash2", False)
+        self.selector_enabled = self.dflash2 and config.dflash_config.get("selector_enabled", True)
+
         self.embeddings = tok_embeddings
         self.lm_head = lm_head
         self.rotary_emb = rotary_emb
@@ -217,6 +349,8 @@ class DFlashDraftModel(torch.nn.Module):
             self.layers.append(DFlashLayer(layer_id, self.config))
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
 
+        self.selector = DFlash2CandidateSelector(self.config) if self.selector_enabled else None
+
         self.init_weights()
 
     def init_weights(self):
@@ -230,6 +364,9 @@ class DFlashDraftModel(torch.nn.Module):
         for layer in self.layers:
             layer.init_weights(weight_init_std)
 
+        if self.selector is not None:
+            self.selector.init_weights()
+
     def forward(self,
         target_ids: torch.Tensor,
         anchor_pos: torch.Tensor,
@@ -238,7 +375,7 @@ class DFlashDraftModel(torch.nn.Module):
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, A = anchor_pos.shape
 
         if self.detach_hidden_states:
@@ -274,5 +411,10 @@ class DFlashDraftModel(torch.nn.Module):
             )
         draft_hidden_states = self.norm(draft_hidden_states)
         draft_logits = self.lm_head(draft_hidden_states) # (B, A * draft_block_size, vocab_size)
-    
-        return draft_logits
+
+        # Selector loss needs the pre-lm_head hidden states (context gate input);
+        # only materialize/return them when a selector is actually attached, so
+        # plain DFlash 1 training keeps its original single-tensor cost.
+        if self.selector is not None:
+            return draft_logits, draft_hidden_states
+        return draft_logits, None
