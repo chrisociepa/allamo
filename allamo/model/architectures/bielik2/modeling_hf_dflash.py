@@ -101,6 +101,91 @@ class Qwen3DFlashAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+class DFlash2DynamicConv(nn.Module):
+    """
+    HF-side mirror of allamo.model.dflash.model.DFlash2DynamicConv. Parameter
+    names and shapes (base_kernel, kernel_projection) match the checkpoints
+    published for DFlash 2.
+
+    Grouped dynamic depthwise convolution, wrapped around one decoder sublayer
+    (attention or MLP): lets a block position see its immediate predecessor in
+    the same block without another pass through the backbone. base_kernel is
+    at full channel resolution; the dynamic correction from kernel_projection
+    is shared within each conv_group_size-channel group. Taps never cross a
+    block boundary. At identity init (base_kernel[0]=1, everything else 0)
+    this module is a no-op, which is what makes DFlash1 -> DFlash2 warm-starting
+    exact; a trained checkpoint carries real (non-identity) values here.
+
+    Only conv_kernel_size == 2 (self + immediate predecessor) is implemented.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.n_embd = config.hidden_size
+        self.draft_block_size = config.block_size
+        self.taps = config.dflash_config.get("conv_kernel_size", 2)
+        assert self.taps == 2, "only conv_kernel_size == 2 is implemented"
+        self.group_size = config.dflash_config.get("conv_group_size", 1)
+        assert self.n_embd % self.group_size == 0, "hidden_size must be divisible by conv_group_size"
+        self.num_groups = self.n_embd // self.group_size
+        self.base_kernel = nn.Parameter(torch.zeros(self.taps, self.n_embd))
+        self.kernel_projection = nn.Linear(self.n_embd, self.taps * self.num_groups, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, A * draft_block_size, C)
+        B, QT, C = x.shape
+        block = self.draft_block_size
+        A = QT // block
+
+        x_blk = x.view(B, A, block, self.num_groups, self.group_size)
+        x_prev = torch.zeros_like(x_blk)
+        x_prev[:, :, 1:] = x_blk[:, :, :-1]  # shift within block; zero at block start
+
+        delta = self.kernel_projection(x).view(B, A, block, self.taps, self.num_groups, 1)
+        base = self.base_kernel.view(1, 1, 1, self.taps, self.num_groups, self.group_size)
+        kernel = base + delta
+
+        out = kernel[:, :, :, 0] * x_blk + kernel[:, :, :, 1] * x_prev
+        return out.reshape(B, QT, C)
+
+
+class DFlash2CandidateSelector(nn.Module):
+    """
+    HF-side mirror of allamo.model.dflash.model.DFlash2CandidateSelector.
+    Parameter names (hidden_projection, predecessor_codebook,
+    successor_codebook) match published DFlash 2 checkpoints.
+
+    Exposed as DFlashDraftModel.candidate_selector for the serving engine to
+    call directly during its path-walk decode step: score(candidate) = the
+    candidate's own DFlash logit + a low-rank bilinear compatibility term
+    against a chosen predecessor. The forward here only scores one predecessor
+    against a set of candidates at a time (the same primitive used for
+    teacher-forced training); walking the best path across a whole block using
+    several live predecessor candidates is the serving engine's responsibility,
+    not this module's.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.top_k = config.dflash_config.get("selector_top_k", 8)
+        self.rank = config.dflash_config.get("selector_rank", 128)
+        self.hidden_projection = nn.Linear(config.hidden_size, self.rank, bias=False)
+        self.predecessor_codebook = nn.Embedding(config.vocab_size, self.rank)
+        self.successor_codebook = nn.Embedding(config.vocab_size, self.rank)
+
+    def forward(self,
+        hidden_t: torch.Tensor,     # (..., C)  hidden state at position t
+        pred_ids: torch.Tensor,     # (...,)    chosen predecessor token id(s)
+        cand_ids: torch.Tensor,     # (..., k)  candidate ids at position t
+        cand_logits: torch.Tensor,  # (..., k)  DFlash's own logits for those candidates
+    ) -> torch.Tensor:
+        ctx = self.hidden_projection(hidden_t).unsqueeze(-2)          # (..., 1, rank)
+        pred_vec = self.predecessor_codebook(pred_ids).unsqueeze(-2)  # (..., 1, rank)
+        succ_vec = self.successor_codebook(cand_ids)                  # (..., k, rank)
+        bilinear = ((pred_vec * ctx) * succ_vec).sum(-1)              # (..., k)
+        return cand_logits + bilinear
+
+
 class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
@@ -109,6 +194,16 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
         self.mlp = Qwen3MLP(config)
         self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.dflash2 = bool(config.dflash_config.get("dflash2", False))
+        if self.dflash2:
+            # one conv module per sublayer, called both before (on the raw residual stream)
+            # and after (on the sublayer's own output)
+            self.attention_conv = DFlash2DynamicConv(config)
+            self.mlp_conv = DFlash2DynamicConv(config)
+        else:
+            self.attention_conv = None
+            self.mlp_conv = None
 
     def forward(
         self,
@@ -124,9 +219,10 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        attn_in = self.attention_conv(hidden_states) if self.attention_conv is not None else hidden_states
+        attn_in = self.input_layernorm(attn_in)
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
+            hidden_states=attn_in,
             target_hidden=target_hidden,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -137,10 +233,15 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )[0]
+        if self.attention_conv is not None:
+            hidden_states = self.attention_conv(hidden_states)
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        ffn_in = self.mlp_conv(hidden_states) if self.mlp_conv is not None else hidden_states
+        ffn_in = self.post_attention_layernorm(ffn_in)
+        hidden_states = self.mlp(ffn_in)
+        if self.mlp_conv is not None:
+            hidden_states = self.mlp_conv(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -161,7 +262,33 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         self.hidden_norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.block_size = config.block_size
         self.mask_token_id = self.config.dflash_config.get("mask_token_id", None)
+        self.dflash2 = bool(config.dflash_config.get("dflash2", False))
+        self.candidate_selector = (
+            DFlash2CandidateSelector(config)
+            if self.dflash2 and config.dflash_config.get("selector_enabled", True)
+            else None
+        )
         self.post_init()
+        self._init_dflash2_identity()
+
+    def _init_dflash2_identity(self):
+        """
+        post_init() applies transformers' generic weight init to every
+        nn.Linear/nn.Embedding, which overwrites the identity/no-op values the
+        DFlash 2 conv and selector modules need at construction time (see
+        allamo.model.dflash.model's DFlash2DynamicConv.init_weights /
+        DFlash2CandidateSelector.init_weights for the training-side
+        equivalent this must match). Re-apply it here, after post_init().
+        """
+        for module in self.modules():
+            if isinstance(module, DFlash2DynamicConv):
+                with torch.no_grad():
+                    module.base_kernel.zero_()
+                    module.base_kernel[0, :] = 1.0  # tap 0 (self) passes through unchanged
+                torch.nn.init.zeros_(module.kernel_projection.weight)
+            elif isinstance(module, DFlash2CandidateSelector):
+                torch.nn.init.zeros_(module.hidden_projection.weight)
+                torch.nn.init.zeros_(module.successor_codebook.weight)  # bilinear term is zero at init
 
     def forward(
         self,
@@ -188,3 +315,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 **kwargs,
             )
         return self.norm(hidden_states)
+
+
+class DFlash2DraftModel(DFlashDraftModel):
+    """
+    Identical to DFlashDraftModel - the conv/selector submodules are already
+    built conditionally from config.dflash_config. This subclass exists only
+    so save_pretrained() writes architectures: ["DFlash2DraftModel"], which is
+    how vLLM's VllmConfig._is_dflash2_draft (vllm/config/vllm.py, merged in
+    vllm-project/vllm#52816) tells a DFlash2 checkpoint apart from a DFlash1
+    one and forces the V2 model runner that its candidate selector needs -
+    without it, a DFlash2 checkpoint silently drafts as DFlash1 on V1.
+    """
+    pass

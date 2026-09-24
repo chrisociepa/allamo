@@ -439,7 +439,7 @@ class BaseTrainer:
                 draft_acceptance_length = acceptance_length_per_group[has_active].mean().item()
 
             if draft_hidden is not None and self.selector_loss_weight > 0:
-                selector = self.model.get_dflash().selector
+                selector = self.model.get_dflash().candidate_selector
                 C = draft_hidden.size(-1)
                 V = draft_logits.size(-1)
 
