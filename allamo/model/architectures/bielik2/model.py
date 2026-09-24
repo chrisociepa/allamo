@@ -6,6 +6,7 @@ from typing import Optional, Tuple, List
 from allamo.logging import logger
 from allamo.model.modeling_utils import AttentionBlock, BaseModel, BaseModelConfig, ModelSpec
 from allamo.model.attentions import attention_version
+from allamo.model.dflash.model import DFlashDraftModel
 from allamo.model.rotary_embeddings import RotaryEmbedding
 
 def get_model_spec():
@@ -26,8 +27,11 @@ class Bielik2Model(BaseModel):
 
         self.tok_embeddings = torch.nn.Embedding(self.config.vocab_size, self.config.n_embd)
         self.tok_drop = torch.nn.Dropout(self.config.dropout) if self.config.dropout != 0 else None
-        
-        self.rotary_emb = RotaryEmbedding(self.config.head_size, self.config.block_size, self.config.rope_freq_base, self.config.rope_scaling)
+
+        max_seq_len = self.config.block_size
+        if self.config.dflash_config:
+            max_seq_len += self.config.head_size # add head_size to support draft model
+        self.rotary_emb = RotaryEmbedding(self.config.head_size, max_seq_len, self.config.rope_freq_base, self.config.rope_scaling)
         
         self.layers = torch.nn.ModuleList()
         for layer_id in range(self.config.n_layer):
@@ -35,6 +39,12 @@ class Bielik2Model(BaseModel):
         
         self.norm = torch.nn.RMSNorm(self.config.n_embd, eps=self.config.norm_eps)
         self.lm_head = torch.nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
+
+        self.target_layer_ids: Optional[set[int]] = None
+        self.dflash: Optional[DFlashDraftModel] = None
+        if self.config.dflash_config:
+            self.target_layer_ids = set(self.config.dflash_config["target_layer_ids"])
+            self.dflash = DFlashDraftModel(self.config, self.tok_embeddings, self.lm_head, self.rotary_emb)
 
     def init_model_weights(self, buffer_device: Optional[torch.device] = None):
         super().init_model_weights(buffer_device)
@@ -60,22 +70,24 @@ class Bielik2Model(BaseModel):
                 lower = -cutoff_factor * weight_init_std
                 upper = cutoff_factor * weight_init_std
                 torch.nn.init.trunc_normal_(self.lm_head.weight, mean=0.0, std=weight_init_std, a=lower, b=upper)
+            
+            if self.dflash is not None:
+                self.dflash.init_weights()
 
     def forward(self,
         input_ids: torch.Tensor,
-        target_ids: Optional[torch.Tensor] = None,
-        target_weights: Optional[torch.Tensor] = None,
+        anchor_pos: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
         seq_lens: Optional[torch.Tensor] = None,
-        ignore_index: Optional[int] = -100,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.FloatTensor]]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if inputs_embeds is not None:
-            _, T, _ = inputs_embeds.size()
+            T = inputs_embeds.size(1)
         else:
-            _, T = input_ids.size()
-            inputs_embeds = self.get_embeddings()(input_ids) # token embeddings of shape (b, t, n_embd)
+            T = input_ids.size(1)
+            inputs_embeds = self.get_embeddings()(input_ids) # (B, T, C)
             if self.tok_drop is not None:
                 inputs_embeds = self.tok_drop(inputs_embeds)
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -86,23 +98,33 @@ class Bielik2Model(BaseModel):
             elif attn_mask.ndim != 4:
                 raise ValueError(f"Unsupport attn_mask shape {attn_mask.shape}")
         
+        if self.target_layer_ids:
+            hidden_states_list = []
+            
         hidden_states = inputs_embeds
-        for layer in self.get_layers():
+        for idx, layer in enumerate(self.get_layers()):
             hidden_states = layer(hidden_states, self.rotary_emb, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
-        
-        final_embeddings = self.get_lm_head_norm()(hidden_states)
-        if target_ids is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.get_lm_head()(final_embeddings)
-            if target_weights is None:
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), ignore_index=ignore_index)
-            else:
-                loss = (target_weights.view(-1) * F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), reduction="none")).sum()
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.get_lm_head()(final_embeddings[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
-        return logits, loss, hidden_states
+            if self.target_layer_ids and idx in self.target_layer_ids:
+                hidden_states_list.append(hidden_states)
+
+        hidden_states = self.get_lm_head_norm()(hidden_states)
+        logits = self.get_lm_head()(hidden_states)
+
+        draft_logits = None
+        if self.dflash is not None:
+            with torch.no_grad():
+                target_predicted_ids = logits.argmax(dim=-1) # (B, T)
+
+            draft_logits = self.dflash(
+                target_ids=target_predicted_ids,
+                anchor_pos=anchor_pos,
+                target_hidden_states=hidden_states_list,
+                attn_mask=attn_mask,
+                input_pos=input_pos,
+                seq_lens=seq_lens,
+            )
+
+        return logits, draft_logits
     
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
@@ -123,3 +145,6 @@ class Bielik2Model(BaseModel):
     
     def get_layers(self):
         return self.layers
+    
+    def get_dflash(self):
+        return self.dflash

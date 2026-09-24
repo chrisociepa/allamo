@@ -30,7 +30,10 @@ class Bielik2HFAdapter(BaseHFAdapter):
         config.dropout = 0.0
         config.bias = self.check_bias(hf_model.state_dict())
         config.norm_eps = hf_model.config.rms_norm_eps
-        config.rope_freq_base = int(hf_model.config.rope_theta)
+        if hasattr(hf_model.config, "rope_parameters"):
+            config.rope_freq_base = int(hf_model.config.rope_parameters["rope_theta"])
+        else:
+            config.rope_freq_base = int(hf_model.config.rope_theta)
         config.qk_norm = getattr(hf_model.config, "qk_norm", False)
         config.gated_mlp = hf_model.config.hidden_act != "xielu" # heurystic that works for Apertus models
         config.attn_output_gate = False
@@ -93,7 +96,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
         return state_dicts_map
 
     def to_hf_model(self, checkpoint_dir_path, checkpoint_name_base, hf_model_path, hf_model_type, hf_model_dtype, hf_model_max_position_embeddings):
-        SUPPORTED_MODEL_ARCHS = ['llama', 'mistral', 'apertus', 'llama_lra']
+        SUPPORTED_MODEL_ARCHS = ['llama', 'mistral', 'apertus', 'llama_lra', 'dflash']
         assert hf_model_type in SUPPORTED_MODEL_ARCHS, f"HF model {hf_model_type} architecture is not supported"
 
         os.makedirs(hf_model_path, exist_ok=True)
@@ -103,24 +106,30 @@ class Bielik2HFAdapter(BaseHFAdapter):
         logger.info(f"Loading model checkpoint from {checkpoint_dir_path}...")
         config_checkpoint, model_checkpoint = self.load_model_checkpoint(checkpoint_name_base, checkpoint_dir_path)
         config = self.get_model_config_class()(**config_checkpoint['model_args'])
+        num_layers = config.n_layer
+        qk_norm = config.qk_norm
 
         remove_unwanted_prefix_from_model_state_dict(model_checkpoint)
 
-        logger.info(f"Converting parameters from the checkpoint model")
+        if hf_model_type == "dflash":
+            logger.info("Limiting state dict to DFlash module keys")
+            num_layers = config.dflash_config["num_hidden_layers"]
+            qk_norm = config.dflash_config.get("qk_norm", False)
+            model_checkpoint = {k[len("dflash."):]: v for k, v in model_checkpoint.items() if k.startswith("dflash.")}
+
+        logger.info(f"Converting parameters ({len(model_checkpoint)} keys) from the checkpoint model")
         param_count = 0
         index_dict = {"weight_map": {}}
-        for layer_i in range(config.n_layer):
+        for layer_i in range(num_layers):
             logger.info(f"converting weights in layer {layer_i}")
-            filename = f"pytorch_model-{layer_i + 1}-of-{config.n_layer + 1}.bin"
+            filename = f"pytorch_model-{layer_i + 1}-of-{num_layers + 1}.bin"
             state_dict = {
                 f"model.layers.{layer_i}.self_attn.q_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.q_proj.weight"],
                 f"model.layers.{layer_i}.self_attn.k_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.k_proj.weight"],
                 f"model.layers.{layer_i}.self_attn.v_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.v_proj.weight"],
                 f"model.layers.{layer_i}.self_attn.o_proj.weight": model_checkpoint[f"layers.{layer_i}.attention.c_proj.weight"],
                 f"model.layers.{layer_i}.mlp.down_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.weight"],
-                f"model.layers.{layer_i}.mlp.up_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.weight"],
-                f"model.layers.{layer_i}.input_layernorm.weight": model_checkpoint[f"layers.{layer_i}.attention_norm.weight"],
-                f"model.layers.{layer_i}.post_attention_layernorm.weight": model_checkpoint[f"layers.{layer_i}.ffn_norm.weight"]
+                f"model.layers.{layer_i}.mlp.up_proj.weight": model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.weight"]
             }
 
             if hf_model_type == "apertus":
@@ -142,7 +151,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 state_dict[f"model.layers.{layer_i}.mlp.down_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.down_proj.bias"]
                 state_dict[f"model.layers.{layer_i}.mlp.up_proj.bias"] = model_checkpoint[f"layers.{layer_i}.feed_forward.up_proj.bias"]
             
-            if config.qk_norm:
+            if qk_norm:
                 state_dict[f"model.layers.{layer_i}.self_attn.q_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.q_norm.weight"]
                 state_dict[f"model.layers.{layer_i}.self_attn.k_norm.weight"] = model_checkpoint[f"layers.{layer_i}.attention.k_norm.weight"]
             
@@ -166,12 +175,20 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 param_count += v.numel()
             torch.save(state_dict, os.path.join(hf_intermadiate_model_path, filename))
 
-        filename = f"pytorch_model-{config.n_layer + 1}-of-{config.n_layer + 1}.bin"
+        filename = f"pytorch_model-{num_layers + 1}-of-{num_layers + 1}.bin"
         state_dict = {
-            "model.embed_tokens.weight": model_checkpoint["tok_embeddings.weight"],
             "model.norm.weight": model_checkpoint["norm.weight"],
             "lm_head.weight": model_checkpoint["lm_head.weight"],
         }
+        if hf_model_type == "dflash":
+            state_dict["model.fc.weight"] = model_checkpoint["fc.weight"]
+            state_dict["model.hidden_norm.weight"] = model_checkpoint["hidden_norm.weight"]
+
+            if "mask_token_embd.weight" in model_checkpoint:
+                logger.warning("Mask token embedding found in draft model checkpoint. Merge it with the target model!")
+        else:
+            state_dict["model.embed_tokens.weight"] = model_checkpoint["tok_embeddings.weight"]
+
         if hf_model_dtype:
             torch_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hf_model_dtype]
             param_size_bytes = {'float32': 4, 'bfloat16': 2, 'float16': 2}[hf_model_dtype]
@@ -257,6 +274,27 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 mlp_bias=config.bias,
                 lra_group_size=config.act_fn_params["group_size"]
             )
+        elif hf_model_type == "dflash":
+            from allamo.model.architectures.bielik2.modeling_hf_dflash import dflash_config_class
+            hf_config = dflash_config_class(
+                vocab_size=config.vocab_size,
+                max_position_embeddings=max_position_embeddings,
+                hidden_size=config.n_embd,
+                intermediate_size=config.intermediate_size,
+                num_attention_heads=config.n_head,
+                num_key_value_heads=config.num_kv_heads,
+                num_hidden_layers=num_layers,
+                rms_norm_eps=config.norm_eps,
+                rope_theta=config.rope_freq_base,
+                attention_bias=False,
+                mlp_bias=False,
+                num_target_layers=config.n_layer,
+                block_size=config.dflash_config["block_size"],
+                dflash_config={
+                    "target_layer_ids": config.dflash_config["target_layer_ids"],
+                    "mask_token_id": config.dflash_config.get("mask_token_id", None),
+                }
+            )
         hf_config.save_pretrained(hf_intermadiate_model_path)
         logger.info(f"HF model configuration saved in {hf_intermadiate_model_path}")
 
@@ -279,7 +317,10 @@ class Bielik2HFAdapter(BaseHFAdapter):
         elif hf_model_type == "llama_lra":
             from allamo.model.architectures.bielik2.modeling_hf_lra import LlamaLRAForCausalLM
             hf_model = LlamaLRAForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
-        
+        elif hf_model_type == "dflash":
+            from allamo.model.architectures.bielik2.modeling_hf_dflash import DFlashDraftModel
+            hf_model = DFlashDraftModel.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
+
         # Avoid saving this as part of the config.
         del hf_model.config._name_or_path
 

@@ -103,6 +103,7 @@ class AllamoConfiguration:
     exclusive_self_attention: bool = False
     qk_norm: bool = False   
     gated_mlp: bool = True
+    dflash_config: Dict = field(default_factory=dict)
 
     # metrics logging
     log_interval: int = 1

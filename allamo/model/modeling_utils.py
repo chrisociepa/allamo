@@ -35,6 +35,7 @@ class BaseModelConfig:
     exclusive_self_attention: bool = False
     qk_norm: bool = False
     gated_mlp: bool = True
+    dflash_config: Dict = field(default_factory=dict)
 
 class FeedForward(torch.nn.Module):
 
@@ -213,6 +214,7 @@ class AttentionBlock(torch.nn.Module):
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
+
 class BaseModel(torch.nn.Module):
 
     def __init__(self, config: BaseModelConfig):
@@ -255,6 +257,9 @@ class BaseModel(torch.nn.Module):
     
     def get_layers(self):
         return None
+    
+    def get_dflash(self):
+        return None
 
     def calculate_weight_init_std(self, num_layers):
         return 0.02 / math.sqrt(2 * num_layers)
@@ -278,11 +283,18 @@ class BaseModel(torch.nn.Module):
         model_params = self.model_num_params / 1e6
         model_bytes = self.model_num_bytes / 1024**2
         logger.info(f"Model parameters: {model_params:.2f}M, Est. Size: {model_bytes:.3f}MB")
+        
         if self.get_embeddings() is not None:
             embds_params, embds_bytes = self.estimate_size(self.get_embeddings())
             embds_params = embds_params / 1e6
             embds_bytes = embds_bytes / 1024**2
             logger.info(f"Embeddings parameters: {embds_params:.2f}M, Est. Size: {embds_bytes:.3f}MB")
+        
+        if self.get_dflash() is not None:
+            dflash_params, dflash_bytes = self.estimate_size(self.get_dflash())
+            dflash_params = dflash_params / 1e6
+            dflash_bytes = dflash_bytes / 1024**2
+            logger.info(f"DFlash parameters: {dflash_params:.2f}M, Est. Size: {dflash_bytes:.3f}MB")
 
     def freeze_module_params(self, module):
         for param in module.parameters():
@@ -299,12 +311,13 @@ class BaseModel(torch.nn.Module):
             self.freeze_module_params(self.get_lm_head())
             logger.info("LM head frozen")
         if freeze_layers and self.get_layers() is not None:
-            for layer_id in range(self.model_config.n_layer):
+            for layer_id in range(self.config.n_layer):
                 if layer_id not in keep_layers_trainable:
                     self.freeze_module_params(self.get_layers()[layer_id])
                     logger.info(f"Layer {layer_id} frozen")
                 else:
                     logger.info(f"Layer {layer_id} kept trainable")
+
 
 @dataclass
 class ModelSpec:

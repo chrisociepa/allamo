@@ -9,6 +9,93 @@ from typing import Optional
 from allamo.configuration import AllamoConfiguration
 from allamo.logging import logger
 
+_flex_attn_impl_module = None
+
+def _causal_mask_fn(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
+
+def _make_sliding_window_fn(window_size: int):
+    def mask_fn(b, h, q_idx, kv_idx):
+        return (q_idx - kv_idx <= window_size) & (kv_idx - q_idx <= window_size)
+    return mask_fn
+
+def _make_diffusion_mask_fn(T: int, q_len: int, anchor_pos: torch.Tensor):
+    """
+    anchor_pos: (B, A) local ctx indices each noise block corresponds to.
+    ctx_ok: noise block t can attend to ctx positions 0..anchor_pos[b,t] (inclusive).
+    noise_ok: bidirectional within own block only.
+    """
+    def diffusion_mask(b, h, q_idx, kv_idx):
+        t = q_idx // q_len # Which anchor block this query token belongs to
+
+        # anchor_pos is in target_ids space, so +1 to get the corresponding input_ids index,
+        # which is the ctx segment's local index space (kv_idx < T walks input_ids).
+        ctx_ok   = (kv_idx < T) & (kv_idx <= anchor_pos[b, t])
+
+        noise_start = T + t * q_len
+        noise_end   = T + (t + 1) * q_len
+        noise_ok = (kv_idx >= noise_start) & (kv_idx < noise_end)
+
+        return ctx_ok | noise_ok
+
+    return diffusion_mask
+
+def _make_diffusion_mask_with_docs_fn(T: int, q_len: int,
+                                      anchor_pos: torch.Tensor,
+                                      input_pos: torch.Tensor,
+                                      attn_mask: torch.Tensor):
+    """
+    Extends _make_diffusion_mask_fn with document isolation.
+
+    anchor_pos: (B, A) local ctx indices each noise block corresponds to
+    input_pos:  (B, T) absolute sequence positions of ctx tokens
+    attn_mask:  (B, T) document ids aligned with ctx (input_ids space)
+
+    ctx_ok: causal via absolute positions + same document as anchor.
+    noise_ok: own block only + same document as anchor.
+    """
+    A = anchor_pos.shape[1]
+
+    def diffusion_mask(b, h, q_idx, kv_idx):
+        # Q - QT
+        # KV - T+QT
+        # q_len - block size
+        t = q_idx // q_len
+        anchor_idx = anchor_pos[b, t] + 1 # local ctx index of this block's anchor
+        anchor_abs = input_pos[b, anchor_idx] # absolute position of anchor
+        anchor_doc = attn_mask[b, anchor_idx] # document id of anchor
+
+        # ctx: absolute position must be < anchor's + same document
+        ctx_abs_ok = input_pos[b, kv_idx.clamp(0, T - 1)] < anchor_abs
+        ctx_doc_ok = attn_mask[b, kv_idx.clamp(0, T - 1)] == anchor_doc
+        ctx_ok     = (kv_idx < T) & ctx_abs_ok & ctx_doc_ok
+
+        # noise: own block only + same document as kv noise block's anchor
+        noise_start  = T + t * q_len
+        noise_end    = T + (t + 1) * q_len
+        noise_pos_ok = (kv_idx >= noise_start) & (kv_idx < noise_end)
+        kv_t         = ((kv_idx - T) // q_len).clamp(0, A - 1)
+        noise_doc_ok = attn_mask[b, anchor_pos[b, kv_t] + 1] == anchor_doc
+        noise_ok     = noise_pos_ok & noise_doc_ok
+
+        return ctx_ok | noise_ok
+
+    return diffusion_mask
+
+@lru_cache(maxsize=32)
+def _create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
+    assert _flex_attn_impl_module is not None, "FlexAttention module not initialized"
+    return _flex_attn_impl_module.create_block_mask(
+        mask, b, h, q_len, kv_len, device=device, _compile=True
+    )
+
+@lru_cache(maxsize=32)
+def _get_causal_mask_mod(sliding_window=None):
+    if sliding_window is None:
+        return _causal_mask_fn
+    assert _flex_attn_impl_module is not None, "FlexAttention module not initialized"
+    return _flex_attn_impl_module.and_masks(_causal_mask_fn, _make_sliding_window_fn(sliding_window))
+
 class AttentionVersion(torch.nn.Module):
     """
     Versions:
@@ -24,7 +111,7 @@ class AttentionVersion(torch.nn.Module):
         super().__init__()
         self.attn_impl_module = None
         self.causal_mask = None
-        self.enable_sdpa()
+        self.enable_flex_attn() # FlexAttention is required to make DFlash working
         
     def configure(self, config: AllamoConfiguration):
         if config.attention_implementation:
@@ -82,22 +169,23 @@ class AttentionVersion(torch.nn.Module):
         self.flash_attn_supports_window_size = False # TODO: check xops.fmha.attn_bias.LowerTriangularFromBottomRightLocalAttentionMask
 
     def enable_flex_attn(self):
+        global _flex_attn_impl_module
         self.version = 'flex'
         try:
             import torch.nn.attention.flex_attention as flexatt
             self.attn_impl_module = flexatt
+            _flex_attn_impl_module = flexatt
 
-            compiled_flex_attention = torch.compile(flexatt.flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
-            @torch.compiler.disable(recursive=False)
-            def compiled_flex_attention_fn(
-                q: torch.Tensor,
-                k: torch.Tensor,
-                v: torch.Tensor,
-                block_mask: flexatt.BlockMask,
-            ) -> torch.Tensor:
-                return compiled_flex_attention(q, k, v, block_mask=block_mask)
-            self.attn_impl_module.compiled_flex_attention_fn = compiled_flex_attention_fn
-
+            _flex_attn_impl_module.compiled_flex_attention_fn = torch.compile(
+                flexatt.flex_attention,
+                dynamic=False,
+                mode="max-autotune-no-cudagraphs"
+            )
+            _flex_attn_impl_module.compiled_create_block_mask = torch.compile(
+                flexatt.create_block_mask,
+                dynamic=False,
+                mode="max-autotune-no-cudagraphs"
+            )
         except ImportError:
             self.enable_sdpa()
             logger.warning("FlexAttention is not available, falling back to scaled_dot_product_attention!")
@@ -239,35 +327,55 @@ class AttentionVersion(torch.nn.Module):
         
         return y
 
-    def flex_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor], sliding_window: int = None) -> torch.Tensor:
-        def causal_mask(b, h, q_idx, kv_idx):
-            return q_idx >= kv_idx
-
-        def sliding_window_mask(window_size: int):
-            def mask_fn(b, h, q_idx, kv_idx):
-                return (q_idx - kv_idx <= window_size) & (kv_idx - q_idx <= window_size)
-            return mask_fn
-        
-        def document_mask(b, h, q_idx, kv_idx):
-            return attn_mask[b, q_idx] == attn_mask[b, kv_idx]
-                    
-        @lru_cache
-        def create_block_mask_cached(mask, b, h, q_len, kv_len, device="cuda"):
-            return attention_version.attn_impl_module.create_block_mask(mask, b, h, q_len, kv_len, device=device, _compile=True)
-        
-        B, _, T, _ = q.size() # (B, nh, T, hs)
-        block_mask = None
+    def flex_attention(self, q, k, v, attn_mask=None, sliding_window=None):
+        B, _, T, _ = q.size()
         if attn_mask is None:
-            mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, sliding_window_mask(sliding_window)) if sliding_window else causal_mask
-            block_mask = create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=q.device)                    
+            mask_mod = _get_causal_mask_mod(sliding_window)
+            block_mask = _create_block_mask_cached(mask_mod, b=None, h=None, q_len=T, kv_len=T, device=str(q.device))
         else:
-            mask_mod = attention_version.attn_impl_module.and_masks(causal_mask, document_mask)
+            def document_mask(b, h, q_idx, kv_idx):
+                return attn_mask[b, q_idx] == attn_mask[b, kv_idx]
+            mask_mod = _flex_attn_impl_module.and_masks(_causal_mask_fn, document_mask)
             if sliding_window:
-                mask_mod = attention_version.attn_impl_module.and_masks(mask_mod, sliding_window_mask(sliding_window))
-            block_mask = create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=q.device)
+                mask_mod = _flex_attn_impl_module.and_masks(mask_mod, _make_sliding_window_fn(sliding_window))
+            block_mask = _create_block_mask_cached(mask_mod, b=B, h=None, q_len=T, kv_len=T, device=str(q.device))
 
         # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
-        y = attention_version.attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
+        y = _flex_attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
         return y.transpose(1, 2)
-    
+
+    def flex_attention_diffusion(self, q, k, v, T, q_len,
+                                  anchor_pos: torch.Tensor,
+                                  input_pos: Optional[torch.Tensor] = None,
+                                  attn_mask: Optional[torch.Tensor] = None,
+                                  sliding_window=None):
+        B, _, total_q, _ = q.size()
+        A = anchor_pos.size(1)
+        kv_len = k.size(2)
+
+        assert total_q == A * q_len
+        assert kv_len  == T + total_q
+
+        if input_pos is not None:
+            mask_mod = _make_diffusion_mask_with_docs_fn(T, q_len, anchor_pos, input_pos, attn_mask)
+        else:
+            mask_mod = _make_diffusion_mask_fn(T, q_len, anchor_pos)
+
+        if sliding_window is not None:
+            mask_mod = _flex_attn_impl_module.and_masks(mask_mod, _make_sliding_window_fn(sliding_window))
+
+        # block_mask cannot be cached: mask_mod closes over anchor_pos (and optionally
+        # input_pos/attn_mask) whose contents change every batch. Although shapes are
+        # fixed during training, lru_cache keys on the closure object itself (a new
+        # object each call), so the cache would never hit. compiled_create_block_mask
+        # handles this correctly by compiling the computation once and re-executing
+        # the kernel with fresh tensor values each call without recompilation.
+        block_mask = _flex_attn_impl_module.compiled_create_block_mask(
+            mask_mod, B=B, H=None, Q_LEN=total_q, KV_LEN=kv_len, device=str(q.device)
+        )
+
+        # Flex attention: (B, nh, T, hs) -> (B, nh, T, hs)
+        y = _flex_attn_impl_module.compiled_flex_attention_fn(q, k, v, block_mask=block_mask)
+        return y.transpose(1, 2)
+
 attention_version = AttentionVersion()

@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from contextlib import nullcontext
+from dataclasses import dataclass
 
 from allamo.checkpoint.checkpoint_manager import CheckpointManager
 from allamo.configuration import AllamoConfiguration
@@ -29,6 +30,18 @@ from allamo.train_utils import (
     get_log_prob,
 )
 from allamo.training_context import TrainingContext
+
+@dataclass
+class ModelOutput:
+    loss: torch.Tensor
+    accuracy: float
+    unmasked_labels: int
+    draft_loss: torch.Tensor = None
+    draft_accuracy: float = 0.0
+    draft_unmasked_labels: int = 0
+    draft_ignored_groups: int = 0
+    draft_accepted_groups: int = 0
+    draft_acceptance_length: float = 0.0
 
 class BaseTrainer:
     
@@ -96,6 +109,11 @@ class BaseTrainer:
         self.model_config = create_model_config(self.config, self.model_spec)
         self.model_ctx = nullcontext()
         self.log_init_learning_rate()
+
+        self.draft_loss_scaling_factor = 0.0
+        if self.config.dflash_config:
+            self.draft_loss_scaling_factor = self.config.dflash_config.get("loss_scaling_factor", 0.1)
+            self.draft_block_size = self.config.dflash_config["block_size"]
     
     def init_metrics_logger(self):
         self.metrics_logger = MetricsLogger(self.config, self.train_ctx)
@@ -170,6 +188,10 @@ class BaseTrainer:
         with self.model_ctx:
             return self.model(**batch)
     
+    def model_forward_step(self, batch, last_gas_step):
+        with self.model_ctx:
+            return self.model(**batch)
+    
     @torch.no_grad()
     def evaluate_val_loss(self):
         self.val_dataloader.reset_offset()
@@ -177,10 +199,10 @@ class BaseTrainer:
         validation_metrics = torch.zeros(4).to(self.config.device)
         for _ in range(self.config.eval_iters):
             batch = self.val_dataloader.get_batch()
-            loss, unmasked_labels, accuracy = self.evaluate_loss(batch, 1, False)
-            validation_metrics[0] += loss.item()
-            validation_metrics[1] += unmasked_labels
-            validation_metrics[2] += accuracy
+            model_output = self.forward_step(batch, 1, False)
+            validation_metrics[0] += model_output.loss.item()
+            validation_metrics[1] += model_output.unmasked_labels
+            validation_metrics[2] += model_output.accuracy
             validation_metrics[3] += 1
         validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
         assert int(validation_metrics[3].item()) == self.config.eval_iters * self.dp_world_size
@@ -222,21 +244,107 @@ class BaseTrainer:
                 })
         self.trigger_gc()
 
-    def evaluate_pretraining_loss(self, batch, gradient_accumulation_steps, last_gas_step):
-        logits, loss, _ = self.compute_logits_and_loss(batch, last_gas_step)
-        if gradient_accumulation_steps > 1:
-            loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
-        
-        unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
-        return loss, unmasked_labels, accuracy
+    def prepare_dflash_anchor_positions(
+        self,
+        target_ids: torch.Tensor,
+        A: int,
+    ) -> torch.Tensor:
+        """
+        Prepare A anchor positions per sample from target_ids (B, T).
 
-    def evaluate_sft_loss(self, batch, gradient_accumulation_steps, last_gas_step):
-        logits, loss, _ = self.compute_logits_and_loss(batch, last_gas_step)
-        if gradient_accumulation_steps > 1:
-            loss = loss / gradient_accumulation_steps # scale the loss to account for micro steps
+        Anchor positions are selected exclusively from valid (non-ignore_index) token
+        positions whenever possible. Two selection strategies are supported depending
+        on the random_sampling flag in dflash_config:
+
+        - evenly-spaced (default): A positions are spread uniformly across the valid
+            block, maximising the distance between consecutive anchors.
+        - random (random_sampling=True): A positions are drawn without replacement
+            from the valid block, with random spacing between anchors.
+
+        When valid_count >= A: A positions are selected from valid tokens only,
+                            using the active strategy (evenly-spaced or random).
+        When valid_count < A:  all valid positions are taken and the remainder is
+                            padded with ignore_index positions to reach A.
+                            No index repetitions occur in either case.
+
+        Args:
+            target_ids:  (B, T) int tensor of token labels; may contain ignore_index
+            A:           number of anchor positions to select per sample
+
+        Returns:
+            anchor_pos:  (B, A) long tensor of selected positions along dim T
+        """
+        device = target_ids.device
+        B, T = target_ids.shape
+
+        valid_mask  = target_ids != self.config.ignore_index
+        valid_count = valid_mask.sum(dim=1) # (B,)
+
+        # Stable descending argsort puts all valid positions first, 
+        # invalid ones after, preserving their original relative order within each group
+        sort_order = valid_mask.long().argsort(dim=1, descending=True, stable=True) # (B, T)
+
+        # Path A: valid_count >= A
+        random_sampling = self.config.dflash_config.get("random_sampling", False)
+        if random_sampling:
+            # Shuffle only within the valid block of each sample to guarantee that
+            # the first A columns remain exclusively valid indices.
+            scores = torch.rand(B, T, device=device) # (B, T) uniform in [0, 1)
+
+            # Build a position mask: True for slots that belong to the valid block
+            col_idx = torch.arange(T, device=device).unsqueeze(0) # (1, T)
+            valid_block_mask = col_idx < valid_count.unsqueeze(1) # (B, T)
+
+            # Clamp invalid block scores to 1.0 so they always sort after valid block scores
+            scores = torch.where(valid_block_mask, scores, torch.ones_like(scores))
+
+            # Argsort over the modified scores: valid positions (score < 1.0) come first
+            # in random order; invalid positions (score == 1.0) follow in arbitrary order
+            shuffled = sort_order.gather(1, scores.argsort(dim=1)) # (B, T)
+            indices_a = shuffled[:, :A] # (B, A)
+        else:
+            # Linspace over [0, valid_count - 1] produces exactly A unique local indices
+            # into the valid block - no repetitions since we map A slots onto >= A points
+            end_a   = (valid_count.clamp(min=1) - 1).float().unsqueeze(1) # (B, 1)
+            t       = torch.linspace(0, 1, A, device=device).unsqueeze(0) # (1, A)
+            local_a = (t * end_a).round().long() # (B, A)
+            indices_a = sort_order.gather(1, local_a) # (B, A)
+
+        # Path B: valid_count < A
+        # sort_order[:, :A] already contains all valid indices followed by unique
+        # invalid ones - no linspace needed, no repetitions by construction
+        indices_b = sort_order[:, :A] # (B, A)
+
+        use_a = (valid_count >= A).unsqueeze(1)
+        anchor_pos = torch.where(use_a, indices_a, indices_b) # (B, A)
         
-        if batch["target_weights"] is not None:
+        return anchor_pos
+
+    def supervised_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+        if self.config.dflash_config:
+            eos_token_id = self.config.dflash_config.get("eos_token_id")
+            num_anchors = self.config.dflash_config.get("anchor_count", batch["target_ids"].size(1) // self.draft_block_size)
+            masked_target_ids = batch["target_ids"][:, :-(self.draft_block_size-1)].clone()
+            if eos_token_id is not None:
+                masked_target_ids[masked_target_ids == eos_token_id] = self.config.ignore_index
+
+            anchor_pos = self.prepare_dflash_anchor_positions(masked_target_ids, num_anchors)
+            batch["anchor_pos"] = anchor_pos
+
+        logits, draft_logits = self.model_forward_step(batch, last_gas_step)
+        if "target_weights" not in batch or batch["target_weights"] is None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                batch["target_ids"].view(-1),
+                ignore_index=self.config.ignore_index
+            )
+        else:
+            assert draft_logits is None, "Draft logits are not supported for weighted loss"
+            loss = (batch["target_weights"].view(-1) * F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                batch["target_ids"].view(-1),
+                reduction="none"
+            )).sum()
             if self.config.weighted_loss_method == 'openchat':
                 target_weights = batch["target_weights"].sum()
                 # sum loss weights over all processes
@@ -246,12 +354,104 @@ class BaseTrainer:
                 loss = loss / torch.sum(batch["target_weights"] > 0).item()
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
-        accuracy = (logits.max(2).indices == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
-        return loss, unmasked_labels, accuracy
+        accuracy = (logits.argmax(dim=-1) == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
 
-    def evaluate_dpo_loss(self, batch, gradient_accumulation_steps, last_gas_step):
-        policy_chosen_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_gas_step)
-        policy_rejected_logits, _, _ = self.compute_logits_and_loss({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_gas_step)
+        draft_loss = None
+        draft_accuracy = 0.0
+        draft_unmasked_labels = 0
+        draft_ignored_groups = 0
+        draft_accepted_groups = 0
+        draft_acceptance_length = 0.0
+        if draft_logits is not None:
+            B = batch["target_ids"].size(0)
+
+            with torch.no_grad():
+                target_predicted_ids = logits.argmax(dim=-1)  # (B, T)
+                target_predicted_ids[batch["target_ids"] == self.config.ignore_index] = self.config.ignore_index
+
+            padded = F.pad(
+                target_predicted_ids,
+                (1, self.draft_block_size),
+                value=self.config.ignore_index,
+            )
+            draft_labels = padded[:, 1:].unfold(1, self.draft_block_size, 1) # (B, T, draft_block_size)
+
+            # Select only the anchor positions
+            anchor_idx = anchor_pos.unsqueeze(-1).expand(-1, -1, self.draft_block_size)
+            draft_labels = draft_labels.gather(1, anchor_idx) # (B, A, draft_block_size)
+
+            # Mask groups containing EOS - tokens after EOS are unpredictable
+            if eos_token_id is not None:
+                group_has_eos = (draft_labels == eos_token_id).any(dim=-1, keepdim=True)
+                draft_labels = draft_labels.masked_fill(group_has_eos, self.config.ignore_index)
+
+            # If any label in a group is ignore_index, mask the entire group
+            group_has_ignore = (draft_labels == self.config.ignore_index).any(dim=-1, keepdim=True)
+            draft_labels = draft_labels.masked_fill(group_has_ignore, self.config.ignore_index)
+
+            draft_labels[:, :, 0] = self.config.ignore_index
+            draft_labels = draft_labels.contiguous().view(B, num_anchors * self.draft_block_size)
+
+            draft_ignored_groups = group_has_ignore.squeeze(-1).sum().item()
+            draft_total_groups = B * num_anchors
+            draft_accepted_groups = draft_total_groups - draft_ignored_groups
+
+            gamma = self.config.dflash_config.get("loss_decay_gamma", self.draft_block_size / math.log(10))
+            k = torch.arange(self.draft_block_size, device=draft_logits.device)
+            position_weights = torch.exp(-k / gamma)  # (draft_block_size,)
+
+            weight_map = position_weights.unsqueeze(0).unsqueeze(0).expand(B, num_anchors, -1)
+            weight_map = weight_map.reshape(B, num_anchors * self.draft_block_size)
+            weight_map = weight_map * (draft_labels != self.config.ignore_index).float()
+
+            per_token_loss = F.cross_entropy(
+                draft_logits.view(-1, draft_logits.size(-1)),
+                draft_labels.view(-1),
+                ignore_index=self.config.ignore_index,
+                reduction="none",
+            )
+            draft_loss = (per_token_loss * weight_map.view(-1)).sum() / weight_map.sum().clamp(min=1)
+
+            draft_unmasked_labels = torch.sum(draft_labels.view(-1) != self.config.ignore_index).item()
+            draft_predictions = draft_logits.view(-1, draft_logits.size(-1)).argmax(1)
+            draft_accuracy = (
+                (draft_predictions == draft_labels.view(-1)).sum().item()
+                / draft_unmasked_labels
+                if draft_unmasked_labels > 0 else 0.0
+            )
+
+            draft_labels_grouped = draft_labels.view(B, num_anchors, self.draft_block_size)
+            draft_preds_grouped = draft_predictions.view(B, num_anchors, self.draft_block_size)
+            active_mask = (draft_labels_grouped != self.config.ignore_index)
+            has_active = active_mask.any(dim=-1)
+            if has_active.any():
+                correct = (draft_preds_grouped == draft_labels_grouped) & active_mask
+                breaks_prefix = active_mask & ~correct
+                no_break_so_far = (~breaks_prefix).cumprod(dim=-1)
+                acceptance_length_per_group = (no_break_so_far & active_mask).sum(dim=-1).float()
+                draft_acceptance_length = acceptance_length_per_group[has_active].mean().item()
+
+        if gradient_accumulation_steps > 1:
+            # scale the loss to account for micro steps
+            loss = loss / gradient_accumulation_steps
+            if draft_loss is not None:
+                draft_loss = draft_loss / gradient_accumulation_steps
+        
+        return ModelOutput(
+            loss=loss,
+            accuracy=accuracy,
+            unmasked_labels=unmasked_labels,
+            draft_loss=draft_loss,
+            draft_accuracy=draft_accuracy,
+            draft_unmasked_labels=draft_unmasked_labels,
+            draft_ignored_groups=draft_ignored_groups,
+            draft_accepted_groups=draft_accepted_groups,
+            draft_acceptance_length=draft_acceptance_length,
+        )
+
+    def dpo_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+        policy_chosen_logits, _ = self.model_forward_step({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_gas_step)
+        policy_rejected_logits, _ = self.model_forward_step({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_gas_step)
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
         policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
         
@@ -330,15 +530,18 @@ class BaseTrainer:
                         f"reward_chosen={chosen_rewards:.4f} reward_rejected={rejected_rewards:.4f} "
                         f"reward_penalty={reward_penalty:.4f}"
                     )
-        return dpo_loss, unmasked_labels, accuracy
         
-    def evaluate_loss(self, batch, gradient_accumulation_steps, last_gas_step):
-        if self.config.training_type == 'pre':
-            return self.evaluate_pretraining_loss(batch, gradient_accumulation_steps, last_gas_step)
-        elif self.config.training_type == 'sft':
-            return self.evaluate_sft_loss(batch, gradient_accumulation_steps, last_gas_step)
+        return ModelOutput(
+            loss=dpo_loss,
+            accuracy=accuracy,
+            unmasked_labels=unmasked_labels
+        )
+        
+    def forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+        if self.config.training_type == 'pre' or self.config.training_type == 'sft':
+            return self.supervised_forward_step(batch, gradient_accumulation_steps, last_gas_step)
         elif self.config.training_type == 'dpo':
-            return self.evaluate_dpo_loss(batch, gradient_accumulation_steps, last_gas_step)
+            return self.dpo_forward_step(batch, gradient_accumulation_steps, last_gas_step)
         else:
             raise ValueError(f"Unknown training type: {self.config.training_type}")
     
@@ -352,7 +555,7 @@ class BaseTrainer:
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.train_dataloader.epoch
         current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
-        iter_metrics = torch.zeros(5).to(self.config.device)
+        iter_metrics = torch.zeros(10).to(self.config.device)
         batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
             if current_epoch < self.train_dataloader.epoch:
@@ -389,13 +592,22 @@ class BaseTrainer:
             fwdbwd_time = time.time()
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             for micro_step in range(self.config.gradient_accumulation_steps):
-                loss, unmasked_labels, accuracy = self.evaluate_loss(batch, self.config.gradient_accumulation_steps, (micro_step == self.config.gradient_accumulation_steps - 1))
+                model_output = self.forward_step(batch, self.config.gradient_accumulation_steps, (micro_step == self.config.gradient_accumulation_steps - 1))
                 
                 mfu_excluded_time = time.time()
-                iter_metrics[0] += loss.item()
-                iter_metrics[1] += unmasked_labels
-                iter_metrics[2] += accuracy
+                loss = model_output.loss
+                iter_metrics[0] += model_output.loss.item()
+                iter_metrics[1] += model_output.unmasked_labels
+                iter_metrics[2] += model_output.accuracy
                 iter_metrics[3] += 1
+
+                if model_output.draft_loss is not None:
+                    loss += model_output.draft_loss * self.draft_loss_scaling_factor
+                    iter_metrics[5] += model_output.draft_loss.item()
+                    iter_metrics[6] += model_output.draft_accuracy
+                    iter_metrics[7] += model_output.draft_ignored_groups
+                    iter_metrics[8] += model_output.draft_accepted_groups
+                    iter_metrics[9] += model_output.draft_acceptance_length
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.train_dataloader.get_batch()
@@ -421,6 +633,7 @@ class BaseTrainer:
                 param_group['lr'] = lr
             
             if self.train_ctx.master_process:
+                # FIXME: CPU-GPU sync point, could be done when logging metrics
                 self.train_ctx.processed_tokens += int(iter_metrics[1])
             batch_mfu_excluded_time += time.time() - mfu_excluded_time
             
@@ -433,10 +646,17 @@ class BaseTrainer:
 
             if self.should_log_metrics():
                 iter_time = time.time() - timer
-                # get loss as float. note: this is a CPU-GPU sync point
-                lossf = iter_metrics[0].item() / self.dp_world_size
+                iter_metrics_cpu = iter_metrics.cpu()
+                lossf = iter_metrics_cpu[0].item() / self.dp_world_size
                 ppl = torch.exp(torch.tensor(lossf)).item()
-                accuracy = iter_metrics[2].item() / iter_metrics[3].item()
+                accuracy = iter_metrics_cpu[2].item() / iter_metrics_cpu[3].item()
+                draft_lossf = iter_metrics_cpu[5].item() / self.dp_world_size
+                draft_accuracy = iter_metrics_cpu[6].item() / iter_metrics_cpu[3].item()
+                draft_ignored_groups = iter_metrics_cpu[7].item() / iter_metrics_cpu[3].item()
+                draft_accepted_groups = iter_metrics_cpu[8].item() / iter_metrics_cpu[3].item()
+                draft_acceptance_length = iter_metrics_cpu[9].item() / iter_metrics_cpu[3].item()
+                dflash_metrics = draft_accepted_groups + draft_ignored_groups > 0
+                total_loss = lossf + draft_lossf * self.draft_loss_scaling_factor
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
                     mfu = estimate_mfu(self.model_num_params, self.config, self.config.batch_size * self.config.gradient_accumulation_steps, fwdbwd_time)
@@ -452,6 +672,13 @@ class BaseTrainer:
                     f"mfu {mfu_str}, mtu {mtu*100:.2f}%, epoch {self.train_dataloader.epoch}, "
                     f"ETA: {self.calculate_eta()}"
                 )
+                if dflash_metrics:
+                    logger.info(
+                        f"[dflash] iter {self.train_ctx.iter_num:,}: total loss {total_loss:.4f}, dLoss {draft_lossf:.4f}, dAcc {draft_accuracy:.4f}, "
+                        f" groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}, "
+                        f" avg acceptance length={draft_acceptance_length:.2f}"
+                    )
+
                 if lossf < self.train_ctx.best_train_loss:
                     self.train_ctx.best_train_loss = lossf
 
@@ -473,6 +700,13 @@ class BaseTrainer:
                     }
                     if mfu > 0:
                         metrics['train/mfu'] = mfu
+                    if dflash_metrics:
+                        metrics['train/draft_loss'] = draft_lossf
+                        metrics['train/draft_acc'] = draft_accuracy
+                        metrics['train/total_loss'] = total_loss
+                        metrics['train/draft_ignored_groups'] = draft_ignored_groups
+                        metrics['train/draft_accepted_groups'] = draft_accepted_groups
+                        metrics['train/draft_acceptance_length'] = draft_acceptance_length
                     self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             
