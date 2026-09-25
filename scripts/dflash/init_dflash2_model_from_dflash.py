@@ -50,6 +50,8 @@ def main():
     )
     parser.add_argument("--conv_group_size", type=int, default=1,
                          help="Channels per dynamic-conv group (1 = fully depthwise per channel)")
+    parser.add_argument("--conv_kernel_size", type=int, default=2,
+                         help="Number of taps in the dynamic-conv kernel (2 = self + immediate predecessor)")
     parser.add_argument("--selector_top_k", type=int, default=8,
                          help="Number of top candidates per position the selector scores")
     parser.add_argument("--selector_rank", type=int, default=128,
@@ -75,6 +77,7 @@ def main():
     new_dflash_config = new_config_checkpoint["model_args"]["dflash_config"]
     new_dflash_config["dflash2"] = True
     new_dflash_config["conv_group_size"] = args.conv_group_size
+    new_dflash_config["conv_kernel_size"] = args.conv_kernel_size
     new_dflash_config["selector_enabled"] = not args.disable_selector
     if not args.disable_selector:
         new_dflash_config["selector_top_k"] = args.selector_top_k
