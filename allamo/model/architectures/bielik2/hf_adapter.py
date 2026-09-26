@@ -200,8 +200,8 @@ class Bielik2HFAdapter(BaseHFAdapter):
 
             if has_selector:
                 state_dict["model.candidate_selector.hidden_projection.weight"] = model_checkpoint["candidate_selector.hidden_projection.weight"]
-                state_dict["model.candidate_selector.predecessor_codebook.weight"] = model_checkpoint["candidate_selector.predecessor_codebook.weight"]
-                state_dict["model.candidate_selector.successor_codebook.weight"] = model_checkpoint["candidate_selector.successor_codebook.weight"]
+                state_dict["model.candidate_selector.predecessor_codebook"] = model_checkpoint["candidate_selector.predecessor_codebook"]
+                state_dict["model.candidate_selector.successor_codebook"] = model_checkpoint["candidate_selector.successor_codebook"]
 
             if "mask_token_embd.weight" in model_checkpoint:
                 logger.warning("Mask token embedding found in draft model checkpoint. Merge it with the target model!")

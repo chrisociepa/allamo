@@ -96,7 +96,10 @@ def main():
         # Anything here means a DFlash 1 parameter didn't find a matching name/shape
         # in the DFlash 2 model - investigate before trusting the warm start.
         logger.warning(f"Unexpected keys while loading DFlash 1 weights: {incompatible_keys.unexpected_keys}")
-    expected_new_params = [k for k in incompatible_keys.missing_keys if ("_conv." in k or ".selector." in k)]
+    expected_new_params = [
+        k for k in incompatible_keys.missing_keys
+        if "_conv." in k or ".candidate_selector." in k
+    ]
     unexplained_missing = [k for k in incompatible_keys.missing_keys if k not in expected_new_params]
     logger.info(f"DFlash 2-only parameters left at their identity init ({len(expected_new_params)} tensors): "
                 f"{expected_new_params}")
