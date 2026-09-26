@@ -127,5 +127,11 @@ def apply_fsdp(model: nn.Module, world_mesh: DeviceMesh, config: AllamoConfigura
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+
+    dflash = getattr(model, "dflash", None)
+    candidate_selector = getattr(dflash, "candidate_selector", None) if dflash is not None else None
+    if candidate_selector is not None:
+        fully_shard(candidate_selector, **fsdp_config, reshard_after_forward=not pp_enabled)
+
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
     logger.info(f"Model parallelized with FSDP2: {model}\n")
