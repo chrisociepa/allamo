@@ -140,6 +140,11 @@ class AllamoDataLoader:
         return batch
         
     def get_batch(self):
+        if self.config.dataset_buffer and self.buffer_thread is not None:
+            # get_batch may be called several times in a row (e.g. to collect all
+            # micro-batches of an optimizer step); wait for the in-flight prefetch,
+            # otherwise the same samples could be read twice or offsets could race
+            self.buffer_thread.join()
         if self.config.dataset_buffer and self.buffer is not None:
             return self.get_batch_from_buffer(self.dataset)
         elif self.dataset_offset + self.batch_size <= len(self.dataset):

@@ -44,6 +44,9 @@ class ModelOutput:
     draft_acceptance_length: float = 0.0
     selector_accuracy: float = 0.0
     candidate_recall: float = 0.0
+    # local (this micro-batch, this rank) normalizer of the main loss, e.g. number of
+    # unmasked target tokens; used to compute a token-weighted validation loss
+    loss_denominator: torch.Tensor = None
 
 class BaseTrainer:
     
@@ -189,6 +192,69 @@ class BaseTrainer:
             dist.all_reduce(x, op=op)
         return x
 
+    def uses_weighted_loss(self, batch):
+        return "target_weights" in batch and batch["target_weights"] is not None
+
+    def get_local_loss_denominator(self, batch) -> torch.Tensor:
+        """
+        Normalizer of the main supervised loss for a single micro-batch on this rank:
+        - unweighted loss: number of unmasked target tokens
+        - weighted loss ('allamo'): number of tokens with a positive weight
+        - weighted loss ('openchat'): sum of token weights
+        Returned as a float64 scalar tensor on the batch device (no CPU sync).
+        """
+        if self.uses_weighted_loss(batch):
+            if self.config.weighted_loss_method == 'openchat':
+                return batch["target_weights"].sum(dtype=torch.float64)
+            return (batch["target_weights"] > 0).sum().to(torch.float64)
+        return (batch["target_ids"] != self.config.ignore_index).sum().to(torch.float64)
+
+    def compute_global_loss_denominator(self, micro_batches):
+        """
+        Sum of loss normalizers over ALL micro-batches of the current optimizer step
+        (all gradient accumulation steps) and ALL data-parallel ranks.
+
+        Dividing every micro-batch's summed loss by this single global value (instead of by
+        its own local token count) makes the accumulated gradient equal to the gradient of
+        the true global per-token mean, independently of how answer tokens are distributed
+        between packed windows, micro-batches and ranks.
+        """
+        if self.config.training_type not in ('pre', 'sft'):
+            return None
+        denominator = torch.zeros(1, dtype=torch.float64, device=micro_batches[0]["target_ids"].device)
+        for batch in micro_batches:
+            denominator += self.get_local_loss_denominator(batch)
+        denominator = self.dist_all_reduce(denominator, op=dist.ReduceOp.SUM)
+        return denominator.squeeze(0)
+
+    def normalize_summed_loss(self, loss_sum, global_denominator):
+        """
+        Turn a summed (not averaged) loss into a contribution to the global mean.
+
+        DDP/FSDP average gradients across data-parallel ranks (divide by dp_world_size),
+        so we multiply by dp_world_size to cancel that out. Gradient accumulation sums
+        gradients over micro-steps, so no further division by gradient_accumulation_steps
+        is needed: sum over micro-steps and ranks of loss_sum / global_denominator is exactly
+        the global mean.
+        """
+        scale = self.dp_world_size / global_denominator.clamp(min=1e-12)
+        return loss_sum * scale.to(loss_sum.dtype)
+
+    def normalize_auxiliary_loss(self, loss_sum, local_denominator, across_ranks):
+        """
+        Normalization for auxiliary (DFlash draft / selector) losses, whose denominators depend
+        on the model's own predictions and therefore cannot be computed before the forward pass.
+        With across_ranks=True the denominator is summed over all data-parallel ranks, so tokens
+        on different ranks get equal weight (exact global mean within a micro step).
+        """
+        denominator = local_denominator.to(torch.float64).reshape(1)
+        if across_ranks:
+            denominator = self.dist_all_reduce(denominator, op=dist.ReduceOp.SUM)
+            scale = self.dp_world_size / denominator.clamp(min=1)
+        else:
+            scale = 1.0 / denominator.clamp(min=1)
+        return loss_sum * scale.squeeze(0).to(loss_sum.dtype)
+
     def compute_logits_and_loss(self, batch, last_gas_step):
         with self.model_ctx:
             return self.model(**batch)
@@ -201,17 +267,24 @@ class BaseTrainer:
     def evaluate_val_loss(self):
         self.val_dataloader.reset_offset()
         self.model.eval()
-        validation_metrics = torch.zeros(4).to(self.config.device)
+        validation_metrics = torch.zeros(5, dtype=torch.float64).to(self.config.device)
         for _ in range(self.config.eval_iters):
             batch = self.val_dataloader.get_batch()
             model_output = self.forward_step(batch, 1, False)
-            validation_metrics[0] += model_output.loss.item()
+            # weight each batch's (locally normalized) loss by its normalizer, so the final
+            # value is sum(per_token_loss) / sum(tokens), not a mean of per-batch means
+            if model_output.loss_denominator is not None:
+                loss_weight = model_output.loss_denominator.item()
+            else:
+                loss_weight = 1.0 # e.g. DPO, where the loss is already a per-sample mean
+            validation_metrics[0] += model_output.loss.item() * loss_weight
             validation_metrics[1] += model_output.unmasked_labels
             validation_metrics[2] += model_output.accuracy
             validation_metrics[3] += 1
+            validation_metrics[4] += loss_weight
         validation_metrics = self.dist_all_reduce(validation_metrics, op=dist.ReduceOp.SUM)
         assert int(validation_metrics[3].item()) == self.config.eval_iters * self.dp_world_size
-        val_loss = validation_metrics[0] / validation_metrics[3]
+        val_loss = (validation_metrics[0] / validation_metrics[4].clamp(min=1e-12)).float()
         val_acc = validation_metrics[2] / validation_metrics[3]
         self.model.train()
         return val_loss, validation_metrics[1], val_acc
@@ -325,7 +398,13 @@ class BaseTrainer:
         
         return anchor_pos
 
-    def supervised_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+    def supervised_forward_step(self, batch, gradient_accumulation_steps, last_gas_step, global_loss_denominator=None):
+        """
+        global_loss_denominator:
+            - training: output of compute_global_loss_denominator() for the whole optimizer step;
+              the loss is summed over tokens and divided by this global value
+            - None (e.g. evaluation): the loss is a local mean over this micro-batch
+        """
         if self.config.dflash_config:
             eos_token_id = self.config.dflash_config.get("eos_token_id")
             num_anchors = self.config.dflash_config.get("anchor_count", batch["target_ids"].size(1) // self.draft_block_size)
@@ -337,26 +416,27 @@ class BaseTrainer:
             batch["anchor_pos"] = anchor_pos
 
         logits, draft_logits, draft_hidden = self.model_forward_step(batch, last_gas_step)
-        if "target_weights" not in batch or batch["target_weights"] is None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                batch["target_ids"].view(-1),
-                ignore_index=self.config.ignore_index
-            )
-        else:
+        per_token_loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            batch["target_ids"].view(-1),
+            ignore_index=self.config.ignore_index,
+            reduction="none"
+        )
+        if self.uses_weighted_loss(batch):
             assert draft_logits is None, "Draft logits are not supported for weighted loss"
-            loss = (batch["target_weights"].view(-1) * F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                batch["target_ids"].view(-1),
-                reduction="none"
-            )).sum()
-            if self.config.weighted_loss_method == 'openchat':
-                target_weights = batch["target_weights"].sum()
-                # sum loss weights over all processes
-                target_weights = self.dist_all_reduce(target_weights, op=dist.ReduceOp.SUM)
-                loss = (self.dp_world_size / target_weights) * loss
-            else:
-                loss = loss / torch.sum(batch["target_weights"] > 0).item()
+            per_token_loss = batch["target_weights"].view(-1) * per_token_loss
+        # accumulate in fp32 so the loss value is not degraded by low-precision logits
+        loss_sum = per_token_loss.float().sum()
+        local_loss_denominator = self.get_local_loss_denominator(batch)
+
+        if global_loss_denominator is not None:
+            # sum / (global number of tokens over all micro-steps and ranks) -> true global mean,
+            # already accounts for gradient accumulation, so it is NOT divided by it again below
+            loss = self.normalize_summed_loss(loss_sum, global_loss_denominator)
+        else:
+            loss = loss_sum / local_loss_denominator.clamp(min=1e-12).to(loss_sum.dtype)
+            if gradient_accumulation_steps > 1:
+                loss = loss / gradient_accumulation_steps
         
         unmasked_labels = torch.sum(batch["target_ids"].view(-1) != self.config.ignore_index).item()
         accuracy = (logits.argmax(dim=-1) == batch["target_ids"]).sum().item() / unmasked_labels if unmasked_labels > 0 else 0
@@ -417,7 +497,11 @@ class BaseTrainer:
                 ignore_index=self.config.ignore_index,
                 reduction="none",
             )
-            draft_loss = (per_token_loss * weight_map.view(-1)).sum() / weight_map.sum().clamp(min=1)
+            draft_loss = self.normalize_auxiliary_loss(
+                (per_token_loss.float() * weight_map.view(-1)).sum(),
+                weight_map.sum(dtype=torch.float64),
+                across_ranks=global_loss_denominator is not None,
+            )
 
             draft_unmasked_labels = torch.sum(draft_labels.view(-1) != self.config.ignore_index).item()
             draft_predictions = draft_logits.view(-1, draft_logits.size(-1)).argmax(1)
@@ -471,7 +555,11 @@ class BaseTrainer:
                 ).view_as(target_idx)
 
                 selector_denom = valid_mask.sum().clamp(min=1)
-                selector_loss = (per_pos_ce * valid_mask.float()).sum() / selector_denom
+                selector_loss = self.normalize_auxiliary_loss(
+                    (per_pos_ce.float() * valid_mask.float()).sum(),
+                    valid_mask.sum(dtype=torch.float64),
+                    across_ranks=global_loss_denominator is not None,
+                )
                 draft_loss = draft_loss + self.selector_loss_weight * selector_loss
 
                 recall_denom = valid_pred.sum().clamp(min=1)
@@ -481,14 +569,15 @@ class BaseTrainer:
                     selector_correct = (selector_pred_idx == target_idx) & valid_mask
                     selector_accuracy = selector_correct.sum().item() / selector_denom.item()
 
-        if gradient_accumulation_steps > 1:
-            # scale the loss to account for micro steps
-            loss = loss / gradient_accumulation_steps
-            if draft_loss is not None:
-                draft_loss = draft_loss / gradient_accumulation_steps
+        if gradient_accumulation_steps > 1 and draft_loss is not None:
+            # the main loss is already normalized for gradient accumulation (see above);
+            # the draft loss depends on the model's predictions, so its global denominator
+            # over all micro-steps is unknown before backward - scale it per micro step
+            draft_loss = draft_loss / gradient_accumulation_steps
         
         return ModelOutput(
             loss=loss,
+            loss_denominator=local_loss_denominator,
             accuracy=accuracy,
             unmasked_labels=unmasked_labels,
             draft_loss=draft_loss,
@@ -589,9 +678,9 @@ class BaseTrainer:
             unmasked_labels=unmasked_labels
         )
         
-    def forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
+    def forward_step(self, batch, gradient_accumulation_steps, last_gas_step, global_loss_denominator=None):
         if self.config.training_type == 'pre' or self.config.training_type == 'sft':
-            return self.supervised_forward_step(batch, gradient_accumulation_steps, last_gas_step)
+            return self.supervised_forward_step(batch, gradient_accumulation_steps, last_gas_step, global_loss_denominator)
         elif self.config.training_type == 'dpo':
             return self.dpo_forward_step(batch, gradient_accumulation_steps, last_gas_step)
         else:
@@ -608,7 +697,8 @@ class BaseTrainer:
         current_epoch = self.train_dataloader.epoch
         current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
         iter_metrics = torch.zeros(12).to(self.config.device)
-        batch = self.train_dataloader.get_batch() # fetch the very first batch
+        gas = self.config.gradient_accumulation_steps
+        next_batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
             if current_epoch < self.train_dataloader.epoch:
                 ckpt_file_name = f'epoch_{current_epoch}'
@@ -642,9 +732,24 @@ class BaseTrainer:
             batch_mfu_excluded_time = 0
             timer = time.time()
             fwdbwd_time = time.time()
+
+            # Collect all micro-batches of this optimizer step up front, so the loss can be
+            # normalized by the GLOBAL number of tokens (all micro-steps and all DP ranks)
+            # before the first backward pass. Only the first micro-batch of the next step is
+            # prefetched ahead (below), which keeps the checkpointed dataloader offset unchanged.
+            mfu_excluded_time = time.time()
+            micro_batches = [next_batch] + [self.train_dataloader.get_batch() for _ in range(gas - 1)]
+            next_batch = None
+            global_loss_denominator = self.compute_global_loss_denominator(micro_batches)
+            batch_mfu_excluded_time += time.time() - mfu_excluded_time
+
             # forward backward update, with optional gradient accumulation to simulate larger batch size
-            for micro_step in range(self.config.gradient_accumulation_steps):
-                model_output = self.forward_step(batch, self.config.gradient_accumulation_steps, (micro_step == self.config.gradient_accumulation_steps - 1))
+            for micro_step in range(gas):
+                last_gas_step = (micro_step == gas - 1)
+                batch = micro_batches[micro_step]
+                micro_batches[micro_step] = None # release the reference as soon as possible
+                model_output = self.forward_step(batch, gas, last_gas_step, global_loss_denominator)
+                del batch
                 
                 mfu_excluded_time = time.time()
                 loss = model_output.loss
@@ -663,8 +768,9 @@ class BaseTrainer:
                     iter_metrics[10] += model_output.selector_accuracy
                     iter_metrics[11] += model_output.candidate_recall
                 
-                # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                batch = self.train_dataloader.get_batch()
+                if last_gas_step:
+                    # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                    next_batch = self.train_dataloader.get_batch()
                 batch_mfu_excluded_time += time.time() - mfu_excluded_time
                 
                 # backward pass, with gradient scaling
