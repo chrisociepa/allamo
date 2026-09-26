@@ -116,6 +116,14 @@ class Bielik2HFAdapter(BaseHFAdapter):
             num_layers = config.dflash_config["num_hidden_layers"]
             qk_norm = config.dflash_config.get("qk_norm", False)
             model_checkpoint = {k[len("dflash."):]: v for k, v in model_checkpoint.items() if k.startswith("dflash.")}
+            is_dflash2 = config.dflash_config.get("dflash2", False)
+            has_selector = is_dflash2 and config.dflash_config.get("selector_enabled", True)
+            if is_dflash2:
+                logger.info("Source is a DFlash 2 checkpoint - exporting conv"
+                             f"{' + selector' if has_selector else ' (selector disabled)'} tensors too")
+        else:
+            is_dflash2 = False
+            has_selector = False
 
         logger.info(f"Converting parameters ({len(model_checkpoint)} keys) from the checkpoint model")
         param_count = 0
@@ -169,6 +177,12 @@ class Bielik2HFAdapter(BaseHFAdapter):
             elif config.act_fn == "xielu":
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.alpha_p"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.alpha_p"]
                 state_dict[f"model.layers.{layer_i}.mlp.act_fn.alpha_n"] = model_checkpoint[f"layers.{layer_i}.feed_forward.act_fn.alpha_n"]
+
+            if is_dflash2:
+                state_dict[f"model.layers.{layer_i}.attention_conv.base_kernel"] = model_checkpoint[f"layers.{layer_i}.attention_conv.base_kernel"]
+                state_dict[f"model.layers.{layer_i}.attention_conv.kernel_projection.weight"] = model_checkpoint[f"layers.{layer_i}.attention_conv.kernel_projection.weight"]
+                state_dict[f"model.layers.{layer_i}.mlp_conv.base_kernel"] = model_checkpoint[f"layers.{layer_i}.mlp_conv.base_kernel"]
+                state_dict[f"model.layers.{layer_i}.mlp_conv.kernel_projection.weight"] = model_checkpoint[f"layers.{layer_i}.mlp_conv.kernel_projection.weight"]
             
             for k, v in state_dict.items():
                 index_dict["weight_map"][k] = filename
@@ -183,6 +197,11 @@ class Bielik2HFAdapter(BaseHFAdapter):
         if hf_model_type == "dflash":
             state_dict["model.fc.weight"] = model_checkpoint["fc.weight"]
             state_dict["model.hidden_norm.weight"] = model_checkpoint["hidden_norm.weight"]
+
+            if has_selector:
+                state_dict["model.candidate_selector.hidden_projection.weight"] = model_checkpoint["candidate_selector.hidden_projection.weight"]
+                state_dict["model.candidate_selector.predecessor_codebook.weight"] = model_checkpoint["candidate_selector.predecessor_codebook.weight"]
+                state_dict["model.candidate_selector.successor_codebook.weight"] = model_checkpoint["candidate_selector.successor_codebook.weight"]
 
             if "mask_token_embd.weight" in model_checkpoint:
                 logger.warning("Mask token embedding found in draft model checkpoint. Merge it with the target model!")
@@ -218,6 +237,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
+                head_dim=config.head_size,
                 num_hidden_layers=config.n_layer,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
@@ -235,6 +255,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
+                head_dim=config.head_size,
                 num_hidden_layers=config.n_layer,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
@@ -250,6 +271,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
+                head_dim=config.head_size,
                 num_hidden_layers=config.n_layer,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
@@ -267,6 +289,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
+                head_dim=config.head_size,
                 num_hidden_layers=config.n_layer,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
@@ -275,7 +298,20 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 lra_group_size=config.act_fn_params["group_size"]
             )
         elif hf_model_type == "dflash":
-            from allamo.model.architectures.bielik2.modeling_hf_dflash import dflash_config_class
+            from allamo.model.architectures.bielik2.modeling_hf_dflash import dflash_config_class, DFlashDraftModel, DFlash2DraftModel
+            hf_draft_model_cls = DFlash2DraftModel if is_dflash2 else DFlashDraftModel
+            hf_dflash_config = {
+                "target_layer_ids": config.dflash_config["target_layer_ids"],
+                "mask_token_id": config.dflash_config.get("mask_token_id", None),
+            }
+            if is_dflash2:
+                hf_dflash_config["dflash2"] = True
+                hf_dflash_config["conv_group_size"] = config.dflash_config.get("conv_group_size", 1)
+                hf_dflash_config["conv_kernel_size"] = config.dflash_config.get("conv_kernel_size", 2)
+                hf_dflash_config["selector_enabled"] = has_selector
+                if has_selector:
+                    hf_dflash_config["selector_top_k"] = config.dflash_config.get("selector_top_k", 8)
+                    hf_dflash_config["selector_rank"] = config.dflash_config.get("selector_rank", 128)
             hf_config = dflash_config_class(
                 vocab_size=config.vocab_size,
                 max_position_embeddings=max_position_embeddings,
@@ -283,6 +319,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 intermediate_size=config.intermediate_size,
                 num_attention_heads=config.n_head,
                 num_key_value_heads=config.num_kv_heads,
+                head_dim=config.head_size,
                 num_hidden_layers=num_layers,
                 rms_norm_eps=config.norm_eps,
                 rope_theta=config.rope_freq_base,
@@ -290,10 +327,12 @@ class Bielik2HFAdapter(BaseHFAdapter):
                 mlp_bias=False,
                 num_target_layers=config.n_layer,
                 block_size=config.dflash_config["block_size"],
-                dflash_config={
-                    "target_layer_ids": config.dflash_config["target_layer_ids"],
-                    "mask_token_id": config.dflash_config.get("mask_token_id", None),
-                }
+                dflash_config=hf_dflash_config,
+                # DFlash's attention is non-causal within a block (bidirectional
+                # diffusion over the drafted tokens); recorded explicitly at the
+                # top level, matching the published DFlash 2 checkpoints, since
+                # vLLM's causality inference otherwise falls back to layer_types.
+                is_causal=False,
             )
         hf_config.save_pretrained(hf_intermadiate_model_path)
         logger.info(f"HF model configuration saved in {hf_intermadiate_model_path}")
@@ -318,8 +357,7 @@ class Bielik2HFAdapter(BaseHFAdapter):
             from allamo.model.architectures.bielik2.modeling_hf_lra import LlamaLRAForCausalLM
             hf_model = LlamaLRAForCausalLM.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
         elif hf_model_type == "dflash":
-            from allamo.model.architectures.bielik2.modeling_hf_dflash import DFlashDraftModel
-            hf_model = DFlashDraftModel.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
+            hf_model = hf_draft_model_cls.from_pretrained(hf_intermadiate_model_path, dtype=torch_dtype, low_cpu_mem_usage=True)
 
         # Avoid saving this as part of the config.
         del hf_model.config._name_or_path

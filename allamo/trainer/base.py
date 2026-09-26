@@ -42,6 +42,8 @@ class ModelOutput:
     draft_ignored_groups: int = 0
     draft_accepted_groups: int = 0
     draft_acceptance_length: float = 0.0
+    selector_accuracy: float = 0.0
+    candidate_recall: float = 0.0
 
 class BaseTrainer:
     
@@ -111,9 +113,12 @@ class BaseTrainer:
         self.log_init_learning_rate()
 
         self.draft_loss_scaling_factor = 0.0
+        self.selector_loss_weight = 0.0
         if self.config.dflash_config:
             self.draft_loss_scaling_factor = self.config.dflash_config.get("loss_scaling_factor", 0.1)
             self.draft_block_size = self.config.dflash_config["block_size"]
+            if self.config.dflash_config.get("dflash2", False) and self.config.dflash_config.get("selector_enabled", True):
+                self.selector_loss_weight = self.config.dflash_config.get("selector_loss_weight", 0.2)
     
     def init_metrics_logger(self):
         self.metrics_logger = MetricsLogger(self.config, self.train_ctx)
@@ -331,7 +336,7 @@ class BaseTrainer:
             anchor_pos = self.prepare_dflash_anchor_positions(masked_target_ids, num_anchors)
             batch["anchor_pos"] = anchor_pos
 
-        logits, draft_logits = self.model_forward_step(batch, last_gas_step)
+        logits, draft_logits, draft_hidden = self.model_forward_step(batch, last_gas_step)
         if "target_weights" not in batch or batch["target_weights"] is None:
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
@@ -362,6 +367,8 @@ class BaseTrainer:
         draft_ignored_groups = 0
         draft_accepted_groups = 0
         draft_acceptance_length = 0.0
+        selector_accuracy = 0.0
+        candidate_recall = 0.0
         if draft_logits is not None:
             B = batch["target_ids"].size(0)
 
@@ -431,6 +438,49 @@ class BaseTrainer:
                 acceptance_length_per_group = (no_break_so_far & active_mask).sum(dim=-1).float()
                 draft_acceptance_length = acceptance_length_per_group[has_active].mean().item()
 
+            if draft_hidden is not None and self.selector_loss_weight > 0:
+                selector = self.model.get_dflash().candidate_selector
+                C = draft_hidden.size(-1)
+                V = draft_logits.size(-1)
+
+                hidden_grouped = draft_hidden.view(B, num_anchors, self.draft_block_size, C)
+                logits_grouped = draft_logits.view(B, num_anchors, self.draft_block_size, V)
+
+                # position 0 of every block is the anchor's own (real) token, so
+                # positions 1..block_size-1 are the ones with an in-block predecessor
+                pred_ids = draft_labels_grouped[:, :, :-1]      # (B, A, block-1) ground-truth predecessor
+                target_ids_t = draft_labels_grouped[:, :, 1:]   # (B, A, block-1) ground-truth token at t
+                hidden_t = hidden_grouped[:, :, 1:]             # (B, A, block-1, C)
+                logits_t = logits_grouped[:, :, 1:]             # (B, A, block-1, V)
+
+                valid_pred = pred_ids != self.config.ignore_index
+                safe_pred_ids = pred_ids.clamp(min=0)  # avoid an embedding lookup on ignore_index
+
+                top_vals, top_ids = logits_t.topk(selector.top_k, dim=-1)      # (B, A, block-1, k)
+                scores = selector(hidden_t, safe_pred_ids, top_ids, top_vals)  # (B, A, block-1, k)
+
+                match = top_ids == target_ids_t.unsqueeze(-1)
+                has_target = match.any(dim=-1)
+                target_idx = match.float().argmax(dim=-1)
+                valid_mask = has_target & valid_pred & (target_ids_t != self.config.ignore_index)
+
+                per_pos_ce = F.cross_entropy(
+                    scores.reshape(-1, selector.top_k),
+                    target_idx.reshape(-1),
+                    reduction="none",
+                ).view_as(target_idx)
+
+                selector_denom = valid_mask.sum().clamp(min=1)
+                selector_loss = (per_pos_ce * valid_mask.float()).sum() / selector_denom
+                draft_loss = draft_loss + self.selector_loss_weight * selector_loss
+
+                recall_denom = valid_pred.sum().clamp(min=1)
+                candidate_recall = (has_target & valid_pred).float().sum().item() / recall_denom.item()
+                with torch.no_grad():
+                    selector_pred_idx = scores.argmax(dim=-1)
+                    selector_correct = (selector_pred_idx == target_idx) & valid_mask
+                    selector_accuracy = selector_correct.sum().item() / selector_denom.item()
+
         if gradient_accumulation_steps > 1:
             # scale the loss to account for micro steps
             loss = loss / gradient_accumulation_steps
@@ -444,14 +494,16 @@ class BaseTrainer:
             draft_loss=draft_loss,
             draft_accuracy=draft_accuracy,
             draft_unmasked_labels=draft_unmasked_labels,
+            selector_accuracy=selector_accuracy,
+            candidate_recall=candidate_recall,
             draft_ignored_groups=draft_ignored_groups,
             draft_accepted_groups=draft_accepted_groups,
             draft_acceptance_length=draft_acceptance_length,
         )
 
     def dpo_forward_step(self, batch, gradient_accumulation_steps, last_gas_step):
-        policy_chosen_logits, _ = self.model_forward_step({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_gas_step)
-        policy_rejected_logits, _ = self.model_forward_step({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_gas_step)
+        policy_chosen_logits, _, _ = self.model_forward_step({"input_ids": batch["chosen_input_ids"], "target_ids": batch["chosen_target_ids"]}, last_gas_step)
+        policy_rejected_logits, _, _ = self.model_forward_step({"input_ids": batch["rejected_input_ids"], "target_ids": batch["rejected_target_ids"]}, last_gas_step)
         policy_chosen_logps = get_log_prob(policy_chosen_logits, batch["chosen_target_ids"], self.config.ignore_index)
         policy_rejected_logps = get_log_prob(policy_rejected_logits, batch["rejected_target_ids"], self.config.ignore_index)
         
@@ -555,7 +607,7 @@ class BaseTrainer:
         self.start_timestamp = datetime.datetime.now()
         current_epoch = self.train_dataloader.epoch
         current_num_loaded_files = self.train_dataloader.get_num_loaded_files()
-        iter_metrics = torch.zeros(10).to(self.config.device)
+        iter_metrics = torch.zeros(12).to(self.config.device)
         batch = self.train_dataloader.get_batch() # fetch the very first batch
         while self.has_next_iter_to_perform():
             if current_epoch < self.train_dataloader.epoch:
@@ -608,6 +660,8 @@ class BaseTrainer:
                     iter_metrics[7] += model_output.draft_ignored_groups
                     iter_metrics[8] += model_output.draft_accepted_groups
                     iter_metrics[9] += model_output.draft_acceptance_length
+                    iter_metrics[10] += model_output.selector_accuracy
+                    iter_metrics[11] += model_output.candidate_recall
                 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.train_dataloader.get_batch()
@@ -655,7 +709,10 @@ class BaseTrainer:
                 draft_ignored_groups = iter_metrics_cpu[7].item() / iter_metrics_cpu[3].item()
                 draft_accepted_groups = iter_metrics_cpu[8].item() / iter_metrics_cpu[3].item()
                 draft_acceptance_length = iter_metrics_cpu[9].item() / iter_metrics_cpu[3].item()
+                selector_accuracy = iter_metrics_cpu[10].item() / iter_metrics_cpu[3].item()
+                candidate_recall = iter_metrics_cpu[11].item() / iter_metrics_cpu[3].item()
                 dflash_metrics = draft_accepted_groups + draft_ignored_groups > 0
+                selector_metrics = self.selector_loss_weight > 0 and dflash_metrics
                 total_loss = lossf + draft_lossf * self.draft_loss_scaling_factor
                 grad_norm = iter_metrics[4].item() / self.dp_world_size
                 if self.config.mfu_flops_peak > 0 and self.train_ctx.iter_num > self.start_iter:
@@ -674,9 +731,15 @@ class BaseTrainer:
                 )
                 if dflash_metrics:
                     logger.info(
-                        f"[dflash] iter {self.train_ctx.iter_num:,}: total loss {total_loss:.4f}, dLoss {draft_lossf:.4f}, dAcc {draft_accuracy:.4f}, "
-                        f" groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}, "
-                        f" avg acceptance length={draft_acceptance_length:.2f}"
+                        f"[dflash] iter {self.train_ctx.iter_num:,}: total loss {total_loss:.4f}, "
+                        f"dLoss {draft_lossf:.4f}, dAcc {draft_accuracy:.4f}, "
+                        f"groups accepted={draft_accepted_groups:.4f} ignored={draft_ignored_groups:.4f}, "
+                        f"avg acceptance length={draft_acceptance_length:.2f}"
+                    )
+                if selector_metrics:
+                    logger.info(
+                        f"[dflash2] iter {self.train_ctx.iter_num:,}: selector acc {selector_accuracy:.4f}, "
+                        f"candidate recall {candidate_recall:.4f}"
                     )
 
                 if lossf < self.train_ctx.best_train_loss:
@@ -707,6 +770,9 @@ class BaseTrainer:
                         metrics['train/draft_ignored_groups'] = draft_ignored_groups
                         metrics['train/draft_accepted_groups'] = draft_accepted_groups
                         metrics['train/draft_acceptance_length'] = draft_acceptance_length
+                    if selector_metrics:
+                        metrics['train/selector_acc'] = selector_accuracy
+                        metrics['train/candidate_recall'] = candidate_recall
                     self.metrics_logger.log_metrics(metrics)
             self.train_ctx.iter_num += 1
             

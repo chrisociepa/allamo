@@ -82,7 +82,7 @@ class Bielik2Model(BaseModel):
         seq_lens: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         if inputs_embeds is not None:
             T = inputs_embeds.size(1)
         else:
@@ -111,11 +111,12 @@ class Bielik2Model(BaseModel):
         logits = self.get_lm_head()(hidden_states)
 
         draft_logits = None
+        draft_hidden = None
         if self.dflash is not None:
             with torch.no_grad():
                 target_predicted_ids = logits.argmax(dim=-1) # (B, T)
 
-            draft_logits = self.dflash(
+            draft_logits, draft_hidden = self.dflash(
                 target_ids=target_predicted_ids,
                 anchor_pos=anchor_pos,
                 target_hidden_states=hidden_states_list,
@@ -124,7 +125,7 @@ class Bielik2Model(BaseModel):
                 seq_lens=seq_lens,
             )
 
-        return logits, draft_logits
+        return logits, draft_logits, draft_hidden
     
     def add_layer(self, new_layers=1):
         for _ in range(new_layers):
