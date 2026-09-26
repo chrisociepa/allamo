@@ -112,11 +112,13 @@ class DFlash2DynamicConv(nn.Module):
     the same block without another pass through the backbone. base_kernel is
     at full channel resolution; the dynamic correction from kernel_projection
     is shared within each conv_group_size-channel group. Taps never cross a
-    block boundary. At identity init (base_kernel[0]=1, everything else 0)
+    block boundary. At identity init (base_kernel[:, 0]=1, everything else 0)
     this module is a no-op, which is what makes DFlash1 -> DFlash2 warm-starting
     exact; a trained checkpoint carries real (non-identity) values here.
 
-    Only conv_kernel_size == 2 (self + immediate predecessor) is implemented.
+    A single projection of the normalized sublayer input emits the coefficients
+    for both the pre- and post-sublayer convolution, matching vLLM's DFlash 2
+    execution and checkpoint layout.
     """
 
     def __init__(self, config):
@@ -124,29 +126,41 @@ class DFlash2DynamicConv(nn.Module):
         self.n_embd = config.hidden_size
         self.draft_block_size = config.block_size
         self.taps = config.dflash_config.get("conv_kernel_size", 2)
-        assert self.taps == 2, "only conv_kernel_size == 2 is implemented"
+        assert 0 < self.taps <= self.draft_block_size, "conv_kernel_size must be in [1, block_size]"
         self.group_size = config.dflash_config.get("conv_group_size", 1)
         assert self.n_embd % self.group_size == 0, "hidden_size must be divisible by conv_group_size"
         self.num_groups = self.n_embd // self.group_size
-        self.base_kernel = nn.Parameter(torch.zeros(self.taps, self.n_embd))
-        self.kernel_projection = nn.Linear(self.n_embd, self.taps * self.num_groups, bias=False)
+        self.base_kernel = nn.Parameter(torch.zeros(2, self.taps, self.n_embd))
+        self.kernel_projection = nn.Linear(self.n_embd, 2 * self.taps * self.num_groups, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _convolve(self, x: torch.Tensor, delta: torch.Tensor, side: int) -> torch.Tensor:
         # x: (B, A * draft_block_size, C)
         B, QT, C = x.shape
         block = self.draft_block_size
         A = QT // block
+        assert QT % block == 0, "draft sequence length must be divisible by block_size"
 
         x_blk = x.view(B, A, block, self.num_groups, self.group_size)
-        x_prev = torch.zeros_like(x_blk)
-        x_prev[:, :, 1:] = x_blk[:, :, :-1]  # shift within block; zero at block start
-
-        delta = self.kernel_projection(x).view(B, A, block, self.taps, self.num_groups, 1)
-        base = self.base_kernel.view(1, 1, 1, self.taps, self.num_groups, self.group_size)
-        kernel = base + delta
-
-        out = kernel[:, :, :, 0] * x_blk + kernel[:, :, :, 1] * x_prev
+        base = self.base_kernel[side].view(1, 1, 1, self.taps, self.num_groups, self.group_size)
+        kernel = base + delta.unsqueeze(-1)
+        out = kernel[:, :, :, 0] * x_blk
+        for tap in range(1, self.taps):
+            shifted = torch.zeros_like(x_blk)
+            shifted[:, :, tap:] = x_blk[:, :, :-tap]
+            out = out + kernel[:, :, :, tap] * shifted
         return out.reshape(B, QT, C)
+
+    def prepare(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, QT, _ = x.shape
+        assert QT % self.draft_block_size == 0, "draft sequence length must be divisible by block_size"
+        A = QT // self.draft_block_size
+        coefficients = self.kernel_projection(x).view(
+            B, A, self.draft_block_size, 2, self.taps, self.num_groups
+        )
+        return self._convolve(x, coefficients[:, :, :, 0], 0), coefficients[:, :, :, 1]
+
+    def finish(self, x: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
+        return self._convolve(x, coefficients, 1)
 
 
 class DFlash2CandidateSelector(nn.Module):
@@ -170,8 +184,8 @@ class DFlash2CandidateSelector(nn.Module):
         self.top_k = config.dflash_config.get("selector_top_k", 8)
         self.rank = config.dflash_config.get("selector_rank", 128)
         self.hidden_projection = nn.Linear(config.hidden_size, self.rank, bias=False)
-        self.predecessor_codebook = nn.Embedding(config.vocab_size, self.rank)
-        self.successor_codebook = nn.Embedding(config.vocab_size, self.rank)
+        self.predecessor_codebook = nn.Parameter(torch.empty(config.vocab_size, self.rank))
+        self.successor_codebook = nn.Parameter(torch.empty(config.vocab_size, self.rank))
 
     def forward(self,
         hidden_t: torch.Tensor,     # (..., C)  hidden state at position t
@@ -180,8 +194,8 @@ class DFlash2CandidateSelector(nn.Module):
         cand_logits: torch.Tensor,  # (..., k)  DFlash's own logits for those candidates
     ) -> torch.Tensor:
         ctx = self.hidden_projection(hidden_t).unsqueeze(-2)          # (..., 1, rank)
-        pred_vec = self.predecessor_codebook(pred_ids).unsqueeze(-2)  # (..., 1, rank)
-        succ_vec = self.successor_codebook(cand_ids)                  # (..., k, rank)
+        pred_vec = self.predecessor_codebook[pred_ids].unsqueeze(-2)  # (..., 1, rank)
+        succ_vec = self.successor_codebook[cand_ids]                  # (..., k, rank)
         bilinear = ((pred_vec * ctx) * succ_vec).sum(-1)              # (..., k)
         return cand_logits + bilinear
 
@@ -197,8 +211,8 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
 
         self.dflash2 = bool(config.dflash_config.get("dflash2", False))
         if self.dflash2:
-            # one conv module per sublayer, called both before (on the raw residual stream)
-            # and after (on the sublayer's own output)
+            # One conv module per sublayer: project the normalized input once,
+            # then apply its two coefficient sets before and after the sublayer.
             self.attention_conv = DFlash2DynamicConv(config)
             self.mlp_conv = DFlash2DynamicConv(config)
         else:
@@ -219,8 +233,9 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
-        attn_in = self.attention_conv(hidden_states) if self.attention_conv is not None else hidden_states
-        attn_in = self.input_layernorm(attn_in)
+        attn_in = self.input_layernorm(hidden_states)
+        if self.attention_conv is not None:
+            attn_in, attn_coefficients = self.attention_conv.prepare(attn_in)
         hidden_states = self.self_attn(
             hidden_states=attn_in,
             target_hidden=target_hidden,
@@ -234,14 +249,15 @@ class Qwen3DFlashDecoderLayer(GradientCheckpointingLayer):
             **kwargs,
         )[0]
         if self.attention_conv is not None:
-            hidden_states = self.attention_conv(hidden_states)
+            hidden_states = self.attention_conv.finish(hidden_states, attn_coefficients)
         hidden_states = residual + hidden_states
         residual = hidden_states
-        ffn_in = self.mlp_conv(hidden_states) if self.mlp_conv is not None else hidden_states
-        ffn_in = self.post_attention_layernorm(ffn_in)
+        ffn_in = self.post_attention_layernorm(hidden_states)
+        if self.mlp_conv is not None:
+            ffn_in, ffn_coefficients = self.mlp_conv.prepare(ffn_in)
         hidden_states = self.mlp(ffn_in)
         if self.mlp_conv is not None:
-            hidden_states = self.mlp_conv(hidden_states)
+            hidden_states = self.mlp_conv.finish(hidden_states, ffn_coefficients)
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -284,11 +300,12 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             if isinstance(module, DFlash2DynamicConv):
                 with torch.no_grad():
                     module.base_kernel.zero_()
-                    module.base_kernel[0, :] = 1.0  # tap 0 (self) passes through unchanged
+                    module.base_kernel[:, 0, :] = 1.0  # tap 0 (self) passes through unchanged
                 torch.nn.init.zeros_(module.kernel_projection.weight)
             elif isinstance(module, DFlash2CandidateSelector):
                 torch.nn.init.zeros_(module.hidden_projection.weight)
-                torch.nn.init.zeros_(module.successor_codebook.weight)  # bilinear term is zero at init
+                torch.nn.init.trunc_normal_(module.predecessor_codebook, mean=0.0, std=0.02)
+                torch.nn.init.zeros_(module.successor_codebook)  # bilinear term is zero at init
 
     def forward(
         self,

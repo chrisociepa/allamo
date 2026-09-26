@@ -165,16 +165,11 @@ class DFlash2DynamicConv(torch.nn.Module):
     predicted from the sublayer's own input. Taps never cross a block
     boundary: position i only sums over t <= i within its own block.
 
-    Only conv_kernel_size == 2 (self + immediate predecessor) is implemented
-    here, matching the published DFlash 2 drafters. conv_kernel_size is still
-    read from config and recorded on the module so a checkpoint declares its
-    own contract explicitly rather than relying on a silent default.
-
     Parameter names (base_kernel, kernel_projection) and base_kernel's full
-    per-channel shape match the checkpoints published for DFlash 2 (verified
-    against z-lab/Qwen3.8-27B-DFlash2 and the vLLM reference kernel test,
-    tests/v1/spec_decode/test_dflash2.py::test_grouped_conv_matches_reference),
-    so a state-dict copy needs no reshaping on export.
+    per-channel shape match vLLM's DFlash 2 runner. One projection of the
+    normalized sublayer input produces coefficients for both the pre- and
+    post-sublayer convolutions; the post-sublayer convolution reuses its
+    second half rather than projecting the output again.
 
     The initialization contract (identity at construction) is the part that
     matters for warm-starting from a DFlash 1 checkpoint.
@@ -185,42 +180,53 @@ class DFlash2DynamicConv(torch.nn.Module):
         self.n_embd = config.n_embd
         self.draft_block_size = config.dflash_config["block_size"]
         self.taps = config.dflash_config.get("conv_kernel_size", 2)
-        assert self.taps == 2, "only conv_kernel_size == 2 is implemented"
+        assert 0 < self.taps <= self.draft_block_size, "conv_kernel_size must be in [1, block_size]"
         self.group_size = config.dflash_config.get("conv_group_size", 1)
         assert self.n_embd % self.group_size == 0, "n_embd must be divisible by conv_group_size"
         self.num_groups = self.n_embd // self.group_size
 
-        # static base kernel at full channel resolution: tap 0 = self, tap 1 = predecessor
-        self.base_kernel = torch.nn.Parameter(torch.zeros(self.taps, self.n_embd))
-        # per-position dynamic correction, one value per (tap, group), predicted
-        # from the sublayer's input; tap-major output so it reshapes to (taps, num_groups)
-        self.kernel_projection = torch.nn.Linear(self.n_embd, self.taps * self.num_groups, bias=False)
+        # Side 0 is applied before a sublayer and side 1 after it.
+        self.base_kernel = torch.nn.Parameter(torch.zeros(2, self.taps, self.n_embd))
+        self.kernel_projection = torch.nn.Linear(
+            self.n_embd, 2 * self.taps * self.num_groups, bias=False
+        )
 
     def init_weights(self):
         # identity at init: tap 0 passes x through unchanged, tap 1 and every
         # dynamic correction start at zero, so this module is a no-op until trained
         with torch.no_grad():
             self.base_kernel.zero_()
-            self.base_kernel[0, :] = 1.0
+            self.base_kernel[:, 0, :] = 1.0
         torch.nn.init.zeros_(self.kernel_projection.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _convolve(self, x: torch.Tensor, delta: torch.Tensor, side: int) -> torch.Tensor:
         # x: (B, A * draft_block_size, C)
         B, QT, C = x.shape
         block = self.draft_block_size
         A = QT // block
+        assert QT % block == 0, "draft sequence length must be divisible by block_size"
 
         x_blk = x.view(B, A, block, self.num_groups, self.group_size)
-        x_prev = torch.zeros_like(x_blk)
-        x_prev[:, :, 1:] = x_blk[:, :, :-1]  # shift within block; zero at block start
-
-        # (B, A, block, taps, num_groups) - tap-major, matches kernel_projection's output layout
-        delta = self.kernel_projection(x).view(B, A, block, self.taps, self.num_groups, 1)
-        base = self.base_kernel.view(1, 1, 1, self.taps, self.num_groups, self.group_size)
-        kernel = base + delta  # broadcasts delta's group-shared value across group_size channels
-
-        out = kernel[:, :, :, 0] * x_blk + kernel[:, :, :, 1] * x_prev
+        base = self.base_kernel[side].view(1, 1, 1, self.taps, self.num_groups, self.group_size)
+        kernel = base + delta.unsqueeze(-1)
+        out = kernel[:, :, :, 0] * x_blk
+        for tap in range(1, self.taps):
+            shifted = torch.zeros_like(x_blk)
+            shifted[:, :, tap:] = x_blk[:, :, :-tap]
+            out = out + kernel[:, :, :, tap] * shifted
         return out.reshape(B, QT, C)
+
+    def prepare(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, QT, _ = x.shape
+        assert QT % self.draft_block_size == 0, "draft sequence length must be divisible by block_size"
+        A = QT // self.draft_block_size
+        coefficients = self.kernel_projection(x).view(
+            B, A, self.draft_block_size, 2, self.taps, self.num_groups
+        )
+        return self._convolve(x, coefficients[:, :, :, 0], 0), coefficients[:, :, :, 1]
+
+    def finish(self, x: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
+        return self._convolve(x, coefficients, 1)
 
 
 class DFlash2CandidateSelector(torch.nn.Module):
@@ -258,13 +264,13 @@ class DFlash2CandidateSelector(torch.nn.Module):
         self.top_k = config.dflash_config.get("selector_top_k", 8)
         self.rank = config.dflash_config.get("selector_rank", 128)
         self.hidden_projection = torch.nn.Linear(config.n_embd, self.rank, bias=False)
-        self.predecessor_codebook = torch.nn.Embedding(config.vocab_size, self.rank)
-        self.successor_codebook = torch.nn.Embedding(config.vocab_size, self.rank)
+        self.predecessor_codebook = torch.nn.Parameter(torch.empty(config.vocab_size, self.rank))
+        self.successor_codebook = torch.nn.Parameter(torch.empty(config.vocab_size, self.rank))
 
     def init_weights(self):
         torch.nn.init.zeros_(self.hidden_projection.weight)
-        torch.nn.init.trunc_normal_(self.predecessor_codebook.weight, mean=0.0, std=0.02)
-        torch.nn.init.zeros_(self.successor_codebook.weight)  # bilinear term is zero at init
+        torch.nn.init.trunc_normal_(self.predecessor_codebook, mean=0.0, std=0.02)
+        torch.nn.init.zeros_(self.successor_codebook)  # bilinear term is zero at init
 
     def forward(self,
         hidden_t: torch.Tensor,     # (..., C)  hidden state at position t
@@ -273,8 +279,8 @@ class DFlash2CandidateSelector(torch.nn.Module):
         cand_logits: torch.Tensor,  # (..., k)  DFlash's own logits for those candidates
     ) -> torch.Tensor:
         ctx = self.hidden_projection(hidden_t).unsqueeze(-2)                # (..., 1, rank)
-        pred_vec = self.predecessor_codebook(pred_ids).unsqueeze(-2)       # (..., 1, rank)
-        succ_vec = self.successor_codebook(cand_ids)                        # (..., k, rank)
+        pred_vec = self.predecessor_codebook[pred_ids].unsqueeze(-2)       # (..., 1, rank)
+        succ_vec = self.successor_codebook[cand_ids]                        # (..., k, rank)
         bilinear = ((pred_vec * ctx) * succ_vec).sum(-1)       # (..., k)
         return cand_logits + bilinear
 
@@ -318,16 +324,20 @@ class DFlashLayer(torch.nn.Module):
         seq_lens: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        attn_in = self.attention_conv(x) if self.attention_conv is not None else x
-        attn_out = self.attention(self.attention_norm(attn_in), target_hidden, rotary_emb, anchor_pos=anchor_pos, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+        attn_in = self.attention_norm(x)
         if self.attention_conv is not None:
-            attn_out = self.attention_conv(attn_out)
+            attn_in, attn_coefficients = self.attention_conv.prepare(attn_in)
+        attn_out = self.attention(attn_in, target_hidden, rotary_emb, anchor_pos=anchor_pos, attn_mask=attn_mask, input_pos=input_pos, seq_lens=seq_lens)
+        if self.attention_conv is not None:
+            attn_out = self.attention_conv.finish(attn_out, attn_coefficients)
         x = x + attn_out
 
-        ffn_in = self.mlp_conv(x) if self.mlp_conv is not None else x
-        ffn_out = self.feed_forward(self.ffn_norm(ffn_in))
+        ffn_in = self.ffn_norm(x)
         if self.mlp_conv is not None:
-            ffn_out = self.mlp_conv(ffn_out)
+            ffn_in, ffn_coefficients = self.mlp_conv.prepare(ffn_in)
+        ffn_out = self.feed_forward(ffn_in)
+        if self.mlp_conv is not None:
+            ffn_out = self.mlp_conv.finish(ffn_out, ffn_coefficients)
         x = x + ffn_out
         return x
 
