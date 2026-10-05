@@ -40,8 +40,9 @@ def merge_model(config_path, output_dir_path, output_dtype):
         torch_dtype = torch.float32
     
     final_hf_model = None
-    state_dict = None
+    merged_state_dict = None  # independent float32 accumulator (not tied to any model's parameters)
     total_weight = 0
+
     for checkpoint in checkpoints:
         logger.info(f"loading checkpoint from {checkpoint['path']}...")
         hf_model = AutoModelForCausalLM.from_pretrained(checkpoint['path'], torch_dtype=torch.float32, low_cpu_mem_usage=True)
@@ -49,23 +50,31 @@ def merge_model(config_path, output_dir_path, output_dtype):
 
         weight = checkpoint['weight'] if 'weight' in checkpoint else 1.0
         total_weight += weight
-        
         logger.info(f"merging checkpoint with weight {weight}")
-        if state_dict is None:
-            state_dict = model_checkpoint
+
+        if merged_state_dict is None:
+            # clone() is required: state_dict() tensors share memory with the model parameters
+            # (and tied weights share memory between keys), so in-place ops would corrupt them.
+            # Every checkpoint, including the first one, must be scaled by its own weight.
+            merged_state_dict = {k: v.detach().clone() * weight for k, v in model_checkpoint.items()}
             final_hf_model = hf_model
         else:
             for k, v in model_checkpoint.items():
-                if k in state_dict:
-                    state_dict[k] += v * weight
+                if k in merged_state_dict:
+                    merged_state_dict[k].add_(v.detach(), alpha=weight)
                 else:
-                    logger.warning(f"key {k} not found in state_dict, adding it")
-                    state_dict[k] = v * weight
-    
+                    logger.warning(f"key {k} not found in merged state_dict, skipping it")
+            del hf_model, model_checkpoint
+
     assert total_weight > 0
+
     logger.info(f"normalizing state_dict by total weight {total_weight}")
-    for k, v in state_dict.items():
-        state_dict[k] = v / total_weight
+    for k in merged_state_dict:
+        merged_state_dict[k].div_(total_weight)
+
+    # without this the saved model would keep the first checkpoint's original weights
+    final_hf_model.load_state_dict(merged_state_dict)
+    del merged_state_dict
 
     if output_dtype != 'float32':
         logger.info(f"converting model to {output_dtype}")
