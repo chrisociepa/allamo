@@ -40,8 +40,10 @@ def merge_model(config_path, output_dir_path, output_checkpoint_name_base):
     assert len(checkpoints) > 1, "at least two checkpoints must be provided"
     
     final_config_checkpoint = None
-    state_dict = None
+    merged_state_dict = None  # accumulator kept in float32 to avoid precision loss
+    orig_dtypes = {}
     total_weight = 0
+
     for checkpoint in checkpoints:
         logger.info(f"loading checkpoint from {checkpoint['path']}...")
         with open(get_config_checkpoint_path(checkpoint['name_base'], checkpoint['path']), "r", encoding="utf-8") as f:
@@ -51,24 +53,33 @@ def merge_model(config_path, output_dir_path, output_checkpoint_name_base):
 
         weight = checkpoint['weight'] if 'weight' in checkpoint else 1.0
         total_weight += weight
-        
         logger.info(f"merging checkpoint with weight {weight}")
-        if state_dict is None:
-            state_dict = model_checkpoint
+
+        if merged_state_dict is None:
+            # every checkpoint, including the first one, must be scaled by its own weight
+            merged_state_dict = {}
+            for k, v in model_checkpoint.items():
+                orig_dtypes[k] = v.dtype
+                merged_state_dict[k] = v.to(torch.float32) * weight
             final_config_checkpoint = config_checkpoint
         else:
             for k, v in model_checkpoint.items():
-                if k in state_dict:
-                    state_dict[k] += v * weight
+                if k in merged_state_dict:
+                    merged_state_dict[k].add_(v.to(torch.float32), alpha=weight)
                 else:
                     logger.warning(f"key {k} not found in state_dict, adding it")
-                    state_dict[k] = v * weight
-    
+                    orig_dtypes[k] = v.dtype
+                    merged_state_dict[k] = v.to(torch.float32) * weight
+        del model_checkpoint
+
     assert total_weight > 0
+
     logger.info(f"normalizing state_dict by total weight {total_weight}")
-    for k, v in state_dict.items():
-        state_dict[k] = v / total_weight
-    
+    state_dict = {}
+    for k, v in merged_state_dict.items():
+        state_dict[k] = (v / total_weight).to(orig_dtypes[k])
+    del merged_state_dict
+
     param_count = 0
     param_bytes = 0
     for k, v in state_dict.items():
