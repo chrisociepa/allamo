@@ -96,9 +96,11 @@ class FSDPTrainer(BaseTrainer):
         ckpt_path = get_optimizer_checkpoint_path(self.checkpoint_manager.checkpoint_name, self.checkpoint_manager.checkpoint_dir)
         if os.path.exists(ckpt_path):
             # requires each rank to have the full dict in CPU memory to reduce communication
-            full_osd = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            full_osd = torch.load(ckpt_path, map_location='cpu', weights_only=True, mmap=True)
             sharded_osd = FSDP.optim_state_dict_to_load(model, optimizer, full_osd)
+            del full_osd
             optimizer.load_state_dict(sharded_osd)
+            del sharded_osd
             logger.info(f"Shared optimizer state loaded from checkpoint {ckpt_path}")
         else:
             if self.train_ctx.master_process:
